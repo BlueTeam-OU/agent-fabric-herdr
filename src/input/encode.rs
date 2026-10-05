@@ -670,6 +670,46 @@ mod tests {
     }
 
     #[test]
+    fn non_latin_layout_ctrl_chords_encode_as_base_keys() {
+        let ctrl_w = || parse_terminal_key_sequence("\x1b[1094::119;5u").unwrap();
+        assert_eq!(
+            encode_terminal_key(ctrl_w(), KeyboardProtocol::Legacy),
+            vec![0x17]
+        );
+        assert_eq!(
+            encode_terminal_key(ctrl_w(), KeyboardProtocol::Kitty { flags: 5 }),
+            b"\x1b[119;5u"
+        );
+        let ctrl_c = parse_terminal_key_sequence("\x1b[1089::99;5u").unwrap();
+        assert_eq!(
+            encode_terminal_key(ctrl_c, KeyboardProtocol::Legacy),
+            vec![0x03]
+        );
+        let alt_w = parse_terminal_key_sequence("\x1b[1094::119;3u").unwrap();
+        assert_eq!(
+            encode_terminal_key(alt_w, KeyboardProtocol::Legacy),
+            b"\x1bw"
+        );
+    }
+
+    #[test]
+    fn non_latin_layout_text_and_altgr_keep_layout_characters() {
+        // Plain typing reports a base key too, but must still type the character.
+        let plain = parse_terminal_key_sequence("\x1b[1094::119u").unwrap();
+        assert_eq!(
+            encode_terminal_key(plain, KeyboardProtocol::Legacy),
+            "\u{0446}".as_bytes()
+        );
+        // An AltGr-style chord that generated text keeps the generated text.
+        let altgr = parse_terminal_key_sequence("\x1b[281::101;7;281u").unwrap();
+        assert_eq!(altgr.code, KeyCode::Char('\u{0119}'));
+        assert_eq!(
+            encode_terminal_key(altgr, KeyboardProtocol::Legacy),
+            "\u{0119}".as_bytes()
+        );
+    }
+
+    #[test]
     fn legacy_ctrl_shift_punctuation_keeps_c0_byte() {
         let key = KeyEvent::new(
             KeyCode::Char('_'),

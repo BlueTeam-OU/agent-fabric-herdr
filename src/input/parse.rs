@@ -29,12 +29,16 @@ fn parse_kitty_key_sequence(data: &str) -> Option<TerminalKey> {
 
     let mut key_fields = key_part.split(':');
     let codepoint = key_fields.next()?.parse::<u32>().ok()?;
-    let shifted_codepoint = key_fields
+    let mut shifted_codepoint = key_fields
+        .next()
+        .filter(|field| !field.is_empty())
+        .and_then(|field| field.parse::<u32>().ok());
+    let base_layout_codepoint = key_fields
         .next()
         .filter(|field| !field.is_empty())
         .and_then(|field| field.parse::<u32>().ok());
 
-    let code = kitty_codepoint_to_keycode(codepoint)?;
+    let mut code = kitty_codepoint_to_keycode(codepoint)?;
     let associated_text = match associated_text {
         Some(value) => match parse_kitty_associated_text(value) {
             Some(text) => Some(text),
@@ -45,6 +49,21 @@ fn parse_kitty_key_sequence(data: &str) -> Option<TerminalKey> {
     };
     let kind = parse_kitty_event_type(event_type)?;
     let mut modifiers = key_modifiers_from_u8(modifier);
+    if let Some(base) = command_chord_base_layout_key(
+        code,
+        modifiers,
+        base_layout_codepoint,
+        associated_text.is_some(),
+    ) {
+        // Downstream (keybinds, legacy C0 bytes, CSI-u panes) only understands
+        // the US-layout key, so resolve the chord here as a US terminal would
+        // report it. The layout's shifted character means nothing for that key.
+        code = KeyCode::Char(base);
+        shifted_codepoint = shifted_codepoint.and(
+            base.is_ascii_lowercase()
+                .then(|| base.to_ascii_uppercase() as u32),
+        );
+    }
     // Kitty permits the shifted alternate only while Shift is active. Normalize
     // contradictory reports here so they cannot dispatch an unshifted command.
     if matches!(code, KeyCode::Char(_))
@@ -59,6 +78,29 @@ fn parse_kitty_key_sequence(data: &str) -> Option<TerminalKey> {
         key = key.with_shifted_codepoint(shifted_codepoint);
     }
     Some(key.with_generated_text(associated_text))
+}
+
+/// Ctrl/Alt/Super chords on a non-Latin layout (`ESC[1094::119;5u` is Ctrl+ц
+/// on the key where US `w` sits) resolve to the base-layout key. Plain typing,
+/// IME, and AltGr produce text without command modifiers and stay untouched.
+fn command_chord_base_layout_key(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    base_layout_codepoint: Option<u32>,
+    has_text: bool,
+) -> Option<char> {
+    let KeyCode::Char(primary) = code else {
+        return None;
+    };
+    if primary.is_ascii()
+        || has_text
+        || !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+    {
+        return None;
+    }
+    base_layout_codepoint
+        .and_then(char::from_u32)
+        .filter(char::is_ascii_graphic)
 }
 
 fn parse_kitty_associated_text(value: &str) -> Option<String> {
@@ -666,6 +708,55 @@ mod tests {
                 None,
             );
         }
+    }
+
+    #[test]
+    fn parse_kitty_non_latin_command_chord_resolves_to_base_layout_key() {
+        let cases = [
+            ("\x1b[1094::119;5u", KeyModifiers::CONTROL, None),
+            ("\x1b[1094::119;3u", KeyModifiers::ALT, None),
+            ("\x1b[1094::119;9u", KeyModifiers::SUPER, None),
+            (
+                "\x1b[1094:1062:119;6u",
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                Some('W' as u32),
+            ),
+        ];
+        for (sequence, modifiers, shifted) in cases {
+            let key = parse_terminal_key_sequence(sequence).unwrap();
+            assert_terminal_key_eq(
+                key,
+                KeyCode::Char('w'),
+                modifiers,
+                crossterm::event::KeyEventKind::Press,
+                shifted,
+            );
+        }
+    }
+
+    #[test]
+    fn parse_kitty_non_latin_key_without_command_chord_keeps_layout_key() {
+        let cases = [
+            // Plain and shifted typing.
+            ("\x1b[1094::119u", '\u{0446}', KeyModifiers::empty()),
+            ("\x1b[1094:1062:119;2u", '\u{0446}', KeyModifiers::SHIFT),
+            // No base-layout key reported.
+            ("\x1b[1094;5u", '\u{0446}', KeyModifiers::CONTROL),
+            // Chord that generated text (AltGr-style).
+            (
+                "\x1b[281::101;7;281u",
+                '\u{0119}',
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ),
+        ];
+        for (sequence, ch, modifiers) in cases {
+            let key = parse_terminal_key_sequence(sequence).unwrap();
+            assert_eq!(key.code, KeyCode::Char(ch), "{sequence:?}");
+            assert_eq!(key.modifiers, modifiers, "{sequence:?}");
+        }
+        // Latin keys are never rewritten, even with a differing base key.
+        let key = parse_terminal_key_sequence("\x1b[122::121;5u").unwrap();
+        assert_eq!(key.code, KeyCode::Char('z'));
     }
 
     #[test]
