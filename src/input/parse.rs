@@ -80,6 +80,8 @@ fn parse_kitty_key_sequence(data: &str) -> Option<TerminalKey> {
 /// Ctrl/Alt/Super chords on a non-Latin layout (`ESC[1094::119;5u` is Ctrl+ц
 /// on the key where US `w` sits) resolve to the base-layout key. Plain typing,
 /// IME, and AltGr produce text without command modifiers and stay untouched.
+/// Latin-script layouts (ö, å, ı, ...) keep their own keys so existing
+/// bindings on those characters still match.
 fn command_chord_base_layout_key(
     code: KeyCode,
     modifiers: KeyModifiers,
@@ -89,8 +91,12 @@ fn command_chord_base_layout_key(
     let KeyCode::Char(primary) = code else {
         return None;
     };
-    if primary.is_ascii()
+    // Ctrl+Alt is how Windows-style AltGr arrives, and our host flags do not
+    // request associated text, so the chord may be a typed character.
+    let altgr_like = modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT);
+    if !is_non_latin_script(primary)
         || has_text
+        || altgr_like
         || !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
     {
         return None;
@@ -98,6 +104,37 @@ fn command_chord_base_layout_key(
     base_layout_codepoint
         .and_then(char::from_u32)
         .filter(char::is_ascii_graphic)
+}
+
+fn is_non_latin_script(ch: char) -> bool {
+    matches!(
+        u32::from(ch),
+        0x0370..=0x03FF // Greek
+            | 0x0400..=0x052F // Cyrillic and supplement
+            | 0x0530..=0x058F // Armenian
+            | 0x0590..=0x05FF // Hebrew
+            | 0x0600..=0x06FF // Arabic
+            | 0x0750..=0x077F // Arabic supplement
+            | 0x08A0..=0x08FF // Arabic extended-A
+            | 0x0900..=0x0DFF // Indic scripts through Sinhala
+            | 0x0E00..=0x0EFF // Thai, Lao
+            | 0x0F00..=0x0FFF // Tibetan
+            | 0x1000..=0x109F // Myanmar
+            | 0x10A0..=0x10FF // Georgian
+            | 0x1100..=0x11FF // Hangul Jamo
+            | 0x1200..=0x139F // Ethiopic
+            | 0x1780..=0x17FF // Khmer
+            | 0x1C80..=0x1C8F // Cyrillic extended-C
+            | 0x1C90..=0x1CBF // Georgian extended
+            | 0x1F00..=0x1FFF // Greek extended
+            | 0x2DE0..=0x2DFF // Cyrillic extended-A
+            | 0x3040..=0x30FF // Hiragana, Katakana
+            | 0x3100..=0x318F // Bopomofo, Hangul compatibility Jamo
+            | 0x3400..=0x4DBF // CJK extension A
+            | 0x4E00..=0x9FFF // CJK unified ideographs
+            | 0xA640..=0xA69F // Cyrillic extended-B
+            | 0xAC00..=0xD7AF // Hangul syllables
+    )
 }
 
 fn us_shifted_char(base: char) -> Option<char> {
@@ -802,6 +839,90 @@ mod tests {
         // Latin keys are never rewritten, even with a differing base key.
         let key = parse_terminal_key_sequence("\x1b[122::121;5u").unwrap();
         assert_eq!(key.code, KeyCode::Char('z'));
+    }
+
+    /// Master ignored the base-layout field, so stripping it gives master's result.
+    fn without_base_layout_field(sequence: &str) -> String {
+        let (key_part, rest) = sequence.split_once(';').unwrap_or((sequence, ""));
+        let mut fields = key_part.splitn(3, ':');
+        let codepoint = fields.next().unwrap_or_default();
+        let stripped = match fields.next() {
+            Some(shifted) if !shifted.is_empty() => format!("{codepoint}:{shifted}"),
+            _ => codepoint.to_string(),
+        };
+        if rest.is_empty() {
+            stripped
+        } else {
+            format!("{stripped};{rest}")
+        }
+    }
+
+    const LATIN_AND_ALTGR_CHORDS: &[&str] = &[
+        // German \u{f6} on `;`, French \u{e9} on `2`, Turkish \u{131} on `i`,
+        // Nordic \u{e5} on `[`: Ctrl, Alt, Super, Ctrl+Shift, press and release.
+        "\x1b[246::59;5u",
+        "\x1b[246::59;5:3u",
+        "\x1b[246:214:59;6u",
+        "\x1b[233::50;5u",
+        "\x1b[233::50;3u",
+        "\x1b[305::105;5u",
+        "\x1b[305:73:105;6u",
+        "\x1b[229::91;5u",
+        "\x1b[229::91;9u",
+        "\x1b[229:197:91;6:3u",
+        // Textless AltGr (Ctrl+Alt), Latin and non-Latin.
+        "\x1b[281::101;7u",
+        "\x1b[281::101;7:3u",
+        "\x1b[1094::119;7u",
+        // macOS Option-generated characters reported with Alt.
+        "\x1b[248::111;3u",
+        "\x1b[8721::119;3u",
+        "\x1b[8721::119;3:3u",
+    ];
+
+    #[test]
+    fn parse_latin_layout_and_altgr_chords_match_master() {
+        for sequence in LATIN_AND_ALTGR_CHORDS {
+            let master = without_base_layout_field(sequence);
+            assert_ne!(*sequence, master);
+            let key = parse_terminal_key_sequence(sequence).unwrap();
+            let master_key = parse_terminal_key_sequence(&master).unwrap();
+            assert_eq!(key, master_key, "{sequence:?}");
+            for protocol in [
+                crate::input::KeyboardProtocol::Legacy,
+                crate::input::KeyboardProtocol::Kitty { flags: 1 },
+                crate::input::KeyboardProtocol::Kitty { flags: 5 },
+                crate::input::KeyboardProtocol::Kitty { flags: 31 },
+            ] {
+                assert_eq!(
+                    crate::input::encode_terminal_key(key.clone(), protocol),
+                    crate::input::encode_terminal_key(master_key.clone(), protocol),
+                    "{sequence:?} {protocol:?}"
+                );
+            }
+        }
+        let key = parse_terminal_key_sequence("\x1b[246::59;5u").unwrap();
+        assert_eq!(key.code, KeyCode::Char('\u{f6}'));
+        let key = parse_terminal_key_sequence("\x1b[281::101;7u").unwrap();
+        assert_eq!(key.code, KeyCode::Char('\u{119}'));
+    }
+
+    #[test]
+    fn parse_non_latin_chord_press_and_release_resolve_alike() {
+        for (sequence, kind) in [
+            ("\x1b[1094::119;5u", crossterm::event::KeyEventKind::Press),
+            (
+                "\x1b[1094::119;5:2u",
+                crossterm::event::KeyEventKind::Repeat,
+            ),
+            (
+                "\x1b[1094::119;5:3u",
+                crossterm::event::KeyEventKind::Release,
+            ),
+        ] {
+            let key = parse_terminal_key_sequence(sequence).unwrap();
+            assert_terminal_key_eq(key, KeyCode::Char('w'), KeyModifiers::CONTROL, kind, None);
+        }
     }
 
     #[test]
