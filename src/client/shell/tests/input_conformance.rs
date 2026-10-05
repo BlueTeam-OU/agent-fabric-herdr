@@ -225,16 +225,21 @@ impl Oracle {
     }
 }
 
+fn is_legacy_pane(pane_mode: &[u8]) -> bool {
+    matches!(pane_mode, b"" | b"\x1b[?1h")
+}
+
 /// Agreed exception table: panes that negotiated no keyboard protocol keep the
-/// classic bytes for keys where Ghostty's escape sequences break shells.
+/// classic bytes for keys where Ghostty's escape sequences break shells, and
+/// get Super chords as basic Kitty reports (see `is_legacy_pane` use above).
 fn legacy_shell_exception(pane_mode: &[u8], key: &str, mods: u16) -> Option<Vec<u8>> {
-    if !matches!(pane_mode, b"" | b"\x1b[?1h") {
+    if !is_legacy_pane(pane_mode) {
         return None;
     }
     let alt = mods & ghostty::MOD_ALT != 0;
     let base = mods & !ghostty::MOD_ALT;
     let classic: &[u8] = match (key, base) {
-        ("enter", m) if m == ghostty::MOD_SHIFT || m == ghostty::MOD_CTRL => b"\r",
+        ("enter", m) if m != 0 => b"\r",
         ("m", ghostty::MOD_CTRL) => b"\r",
         ("i", ghostty::MOD_CTRL) | ("tab", ghostty::MOD_CTRL) => b"\t",
         ("[", ghostty::MOD_CTRL) => b"\x1b",
@@ -264,7 +269,7 @@ impl HerdrPath {
         runtime.test_process_pty_bytes(app_output);
         while rx.try_recv().is_ok() {}
         Self {
-            state: Self::fresh_state(),
+            state: Self::fresh_state(host),
             framer: Self::fresh_framer(host),
             runtime,
             rx,
@@ -272,8 +277,10 @@ impl HerdrPath {
         }
     }
 
-    fn fresh_state() -> ClientShellState {
+    fn fresh_state(host: HostProfile) -> ClientShellState {
         let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        // Mirrors the client: Herdr pushes Kitty event types on Kitty hosts.
+        state.set_host_reports_key_releases(host == HostProfile::Kitty);
         state.set_snapshot(Box::new(snapshot()));
         state.set_pane_surface(surface());
         state
@@ -342,7 +349,7 @@ impl HerdrPath {
     }
 
     fn reset_client(&mut self) {
-        self.state = Self::fresh_state();
+        self.state = Self::fresh_state(self.host);
         self.framer = Self::fresh_framer(self.host);
     }
 
@@ -436,6 +443,7 @@ fn run_keyboard_conformance() -> Report {
         for &(pane_name, pane_mode) in PANE_MODES {
             let mut host_oracle = Oracle::new(host.setup(pane_mode));
             let mut direct_oracle = Oracle::new(pane_mode);
+            let mut disambiguate_oracle = Oracle::new(b"\x1b[>1u");
 
             let mut cases = Vec::new();
             for def in KEYS {
@@ -449,6 +457,8 @@ fn run_keyboard_conformance() -> Report {
                     let (mut press, release) = direct_oracle.keystroke(*def, mods);
                     if let Some(classic) = legacy_shell_exception(pane_mode, def.name, mods) {
                         press = classic;
+                    } else if is_legacy_pane(pane_mode) && mods & ghostty::MOD_SUPER != 0 {
+                        press = disambiguate_oracle.keystroke(*def, mods).0;
                     }
                     // A host that never reports releases gives nobody a release to forward.
                     let expected = if host_bytes.1.is_empty() {
@@ -461,7 +471,10 @@ fn run_keyboard_conformance() -> Report {
             }
 
             let mut expected_by_host_bytes: HashMap<&HostKeystroke, Vec<&Vec<u8>>> = HashMap::new();
-            for (_, _, host_bytes, expected) in &cases {
+            for (_, mods, host_bytes, expected) in &cases {
+                if host == HostProfile::Legacy && mods & ghostty::MOD_SUPER != 0 {
+                    continue;
+                }
                 expected_by_host_bytes
                     .entry(host_bytes)
                     .or_default()
@@ -479,8 +492,14 @@ fn run_keyboard_conformance() -> Report {
                     .by_cell
                     .entry((host.name(), pane_name, group))
                     .or_default();
-                let distinct = &expected_by_host_bytes[host_bytes];
-                if distinct.iter().any(|other| *other != expected) {
+                // Legacy hosts cannot report Super at all (they drop it or send
+                // the chord without it), so nothing downstream can recover it.
+                let super_unreportable =
+                    host == HostProfile::Legacy && mods & ghostty::MOD_SUPER != 0;
+                let ambiguous = expected_by_host_bytes
+                    .get(host_bytes)
+                    .is_some_and(|distinct| distinct.iter().any(|other| *other != expected));
+                if super_unreportable || ambiguous {
                     tally.host_lossy += 1;
                     continue;
                 }
@@ -517,7 +536,7 @@ fn run_keyboard_conformance() -> Report {
     report
 }
 
-fn print_report(report: &Report) -> Tally {
+fn print_report(report: &Report) {
     let mut total = Tally::default();
     println!(
         "\n{:<12} {:<17} {:<6} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
@@ -571,13 +590,12 @@ fn print_report(report: &Report) -> Tally {
             .collect();
         std::fs::write(path, lines.join("\n")).expect("write failures");
     }
-    total
 }
 
-// Ratchet: these baselines may only go up. Raise them when a change improves a
-// score; a drop means a regression in Herdr's input transparency.
-const KEYBOARD_PASSED_BASELINE: usize = 15_203;
-const MOUSE_PASSED_BASELINE: usize = 1_824;
+// Ratchet: failure counts may only go down. Lower them when a change fixes
+// cases; a rise means a regression in Herdr's input transparency.
+const KEYBOARD_FAILURES_BASELINE: usize = 120;
+const MOUSE_FAILURES_BASELINE: usize = 96;
 const SPLIT_IDLE_MISMATCH_BASELINE: usize = 6_730;
 const REPLY_IDLE_MISMATCH_BASELINE: usize = 77;
 
@@ -1076,21 +1094,21 @@ fn split_read_robustness() {
 #[tokio::test(flavor = "multi_thread")]
 async fn mouse_transparency_conformance() {
     let report = run_mouse_conformance();
-    let total = print_report(&report);
+    print_report(&report);
     assert!(
-        total.passed >= MOUSE_PASSED_BASELINE,
-        "mouse transparency regressed: {} < {MOUSE_PASSED_BASELINE}",
-        total.passed
+        report.failures.len() <= MOUSE_FAILURES_BASELINE,
+        "mouse transparency regressed: {} failures > {MOUSE_FAILURES_BASELINE}",
+        report.failures.len()
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn keyboard_transparency_conformance() {
     let report = run_keyboard_conformance();
-    let total = print_report(&report);
+    print_report(&report);
     assert!(
-        total.passed >= KEYBOARD_PASSED_BASELINE,
-        "keyboard transparency regressed: {} < {KEYBOARD_PASSED_BASELINE}",
-        total.passed
+        report.failures.len() <= KEYBOARD_FAILURES_BASELINE,
+        "keyboard transparency regressed: {} failures > {KEYBOARD_FAILURES_BASELINE}",
+        report.failures.len()
     );
 }

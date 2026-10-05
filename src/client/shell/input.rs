@@ -98,6 +98,10 @@ impl ClientShellState {
         )
     }
 
+    pub(crate) fn set_host_reports_key_releases(&mut self, reports: bool) {
+        self.host_reports_key_releases = reports;
+    }
+
     #[cfg(test)]
     pub(crate) fn handle_input_bytes(&mut self, data: &[u8]) -> ClientShellInput {
         self.handle_raw_events(crate::raw_input::parse_raw_input_bytes_sync(data))
@@ -324,6 +328,11 @@ impl ClientShellState {
             self.copy_input_queue.push_back(key);
             return;
         }
+        let key = if self.host_reports_key_releases && key.generated_text.is_some() {
+            key.with_physical_identity_hint(true)
+        } else {
+            key
+        };
         let lease_key = crate::input::InputLeaseKey::new(LOCAL_INPUT_SOURCE, &key);
         let key = self.input_leases.normalize_press(&lease_key, key);
         match key.kind {
@@ -351,7 +360,26 @@ impl ClientShellState {
                 self.execute_repeat_plan(lease_key, key, plan, outcome);
             }
             KeyEventKind::Release => {
-                if let Some(lease) = self.input_leases.remove_forwarded(&lease_key) {
+                // A press that arrived as text ("X") is released by its key
+                // report ("x" with shifted alternate "X"); match either.
+                let shifted_lease_key =
+                    key.shifted_codepoint
+                        .and_then(char::from_u32)
+                        .map(|shifted| {
+                            crate::input::InputLeaseKey::new(
+                                LOCAL_INPUT_SOURCE,
+                                &crate::input::TerminalKey::new(
+                                    KeyCode::Char(shifted),
+                                    key.modifiers,
+                                ),
+                            )
+                        });
+                let forwarded = self.input_leases.remove_forwarded(&lease_key).or_else(|| {
+                    shifted_lease_key
+                        .as_ref()
+                        .and_then(|shifted| self.input_leases.remove_forwarded(shifted))
+                });
+                if let Some(lease) = forwarded {
                     let release = lease
                         .key
                         .with_modifiers(key.modifiers)
@@ -359,6 +387,9 @@ impl ClientShellState {
                     self.push_pane_key(lease.target, release, outcome);
                 } else {
                     let _ = self.input_leases.remove(&lease_key);
+                    if let Some(shifted) = shifted_lease_key {
+                        let _ = self.input_leases.remove(&shifted);
+                    }
                 }
             }
         }

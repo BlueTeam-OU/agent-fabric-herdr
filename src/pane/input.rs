@@ -1,6 +1,12 @@
+/// Build the key event the Ghostty app would build from an OS key event, so
+/// libghostty can encode it for the pane's current keyboard modes: physical
+/// key, modifiers, the layout text, the unshifted codepoint, and Shift marked
+/// consumed when it produced the text.
 pub(super) fn ghostty_key_event_from_terminal_key(
     key: &crate::input::TerminalKey,
 ) -> Option<crate::ghostty::KeyEvent> {
+    use crossterm::event::KeyCode;
+
     let mut event = crate::ghostty::KeyEvent::new().ok()?;
     event.set_action(match key.kind {
         crossterm::event::KeyEventKind::Press => {
@@ -14,31 +20,132 @@ pub(super) fn ghostty_key_event_from_terminal_key(
         }
     });
     let mut mods = ghostty_mods_from_key_modifiers(key.modifiers);
-    if matches!(key.code, crossterm::event::KeyCode::BackTab) {
-        // Ghostty represents backtab as Tab with Shift rather than a distinct key.
-        mods |= crate::ghostty::MOD_SHIFT;
+    match key.code {
+        KeyCode::Char(c) => {
+            // Legacy input reports the produced character ("%", "D"); Kitty
+            // reports the unshifted key. Both map to the same physical key.
+            let base = unshifted_char(c);
+            if base != c {
+                mods |= crate::ghostty::MOD_SHIFT;
+            }
+            event.set_key(
+                ghostty_key_from_char(base)
+                    .unwrap_or(crate::ghostty::ffi::GhosttyKey_GHOSTTY_KEY_UNIDENTIFIED),
+            );
+            event.set_unshifted_codepoint(base as u32);
+            let shifted = mods & crate::ghostty::MOD_SHIFT != 0;
+            if let Some(text) = key_text(key, base, shifted) {
+                if shifted && !text.starts_with(base) {
+                    event.set_consumed_mods(crate::ghostty::MOD_SHIFT);
+                }
+                event.set_utf8(&text);
+            }
+        }
+        KeyCode::BackTab => {
+            // Ghostty represents backtab as Tab with Shift rather than a distinct key.
+            mods |= crate::ghostty::MOD_SHIFT;
+            event.set_key(crate::ghostty::ffi::GhosttyKey_GHOSTTY_KEY_TAB);
+        }
+        code => event.set_key(ghostty_key_from_key_code(code)?),
     }
     event.set_mods(mods);
-    event.set_key(ghostty_key_from_crossterm_key_code(
-        key.code,
-        key.shifted_codepoint,
-    )?);
-
-    if let Some(text) = ghostty_key_text(key) {
-        event.set_utf8(&text);
-    } else {
-        event.set_utf8("");
-    }
-
-    if let Some(codepoint) = ghostty_unshifted_codepoint(key) {
-        event.set_unshifted_codepoint(codepoint);
-    }
+    event.set_composing(key.is_windows_dead_key());
 
     Some(event)
 }
 
-pub(super) fn ghostty_prefers_herdr_text_encoding(key: &crate::input::TerminalKey) -> bool {
-    matches!(key.code, crossterm::event::KeyCode::Char(_))
+/// Exception table for panes that negotiated no keyboard protocol. Ghostty sends
+/// these chords as escape sequences that plain shells do not understand; keep
+/// the classic key instead. libghostty still encodes the result (so Alt keeps
+/// its ESC prefix).
+pub(super) fn legacy_shell_key(key: crate::input::TerminalKey) -> crate::input::TerminalKey {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let alt = key.modifiers & KeyModifiers::ALT;
+    let chord = key.modifiers - KeyModifiers::ALT;
+    let classic = match (key.code, chord) {
+        (KeyCode::Enter, chord) if !chord.is_empty() => KeyCode::Enter,
+        (KeyCode::Char('m'), KeyModifiers::CONTROL) => KeyCode::Enter,
+        (KeyCode::Char('i'), KeyModifiers::CONTROL) | (KeyCode::Tab, KeyModifiers::CONTROL) => {
+            KeyCode::Tab
+        }
+        (KeyCode::Char('['), KeyModifiers::CONTROL) => KeyCode::Esc,
+        _ => return key,
+    };
+    crate::input::TerminalKey::new(classic, alt)
+        .with_kind(key.kind)
+        .with_repeat_count(key.repeat_count)
+}
+
+/// Second exception for panes that negotiated nothing: legacy encoding has no
+/// Super, so Ghostty would deliver Cmd+C as a bare "c" (#3710). Encode Super
+/// chords as basic Kitty (disambiguate) reports instead.
+pub(super) fn legacy_super_chord(key: &crate::input::TerminalKey) -> bool {
+    key.modifiers
+        .contains(crossterm::event::KeyModifiers::SUPER)
+}
+
+/// Text the key produced on the user's layout, before Ctrl/Alt transformations.
+fn key_text(key: &crate::input::TerminalKey, base: char, shifted: bool) -> Option<String> {
+    if let Some(text) = key
+        .generated_text
+        .as_ref()
+        .filter(|text| !text.is_empty() && !text.chars().any(char::is_control))
+    {
+        return Some(text.clone());
+    }
+    let produced = if shifted {
+        key.shifted_codepoint
+            .and_then(char::from_u32)
+            .or_else(|| us_shifted_char(base))
+            .unwrap_or(base)
+    } else {
+        base
+    };
+    (!produced.is_control()).then(|| produced.to_string())
+}
+
+fn unshifted_char(c: char) -> char {
+    if c.is_uppercase() {
+        let mut lower = c.to_lowercase();
+        if let (Some(lower), None) = (lower.next(), lower.next()) {
+            return lower;
+        }
+        return c;
+    }
+    ghostty_unshifted_ascii_pair(c).unwrap_or(c)
+}
+
+/// US-layout shifted character, used only when the host reported Shift without
+/// the shifted alternate.
+fn us_shifted_char(base: char) -> Option<char> {
+    if base.is_ascii_lowercase() {
+        return Some(base.to_ascii_uppercase());
+    }
+    Some(match base {
+        '1' => '!',
+        '2' => '@',
+        '3' => '#',
+        '4' => '$',
+        '5' => '%',
+        '6' => '^',
+        '7' => '&',
+        '8' => '*',
+        '9' => '(',
+        '0' => ')',
+        '-' => '_',
+        '=' => '+',
+        '[' => '{',
+        ']' => '}',
+        '\\' => '|',
+        ';' => ':',
+        '\'' => '"',
+        ',' => '<',
+        '.' => '>',
+        '/' => '?',
+        '`' => '~',
+        _ => return None,
+    })
 }
 
 pub(super) fn ghostty_mods_from_key_modifiers(modifiers: crossterm::event::KeyModifiers) -> u16 {
@@ -196,31 +303,14 @@ pub(super) fn ghostty_mouse_event_from_wheel_kind(
     Some(event)
 }
 
-fn ghostty_key_text(key: &crate::input::TerminalKey) -> Option<String> {
-    match key.code {
-        crossterm::event::KeyCode::Char(c) => Some(
-            key.shifted_codepoint
-                .and_then(char::from_u32)
-                .unwrap_or(c)
-                .to_string(),
-        ),
-        _ => None,
-    }
-}
-
-fn ghostty_unshifted_codepoint(key: &crate::input::TerminalKey) -> Option<u32> {
-    match key.code {
-        crossterm::event::KeyCode::Char(c) => Some(c as u32),
-        _ => None,
-    }
-}
-
-fn ghostty_key_from_crossterm_key_code(
+/// Physical key for a non-character key code. Keys libghostty has no name for
+/// (some media keys, Hyper/Meta, ISO level shifts) return None; the Ghostty app
+/// cannot send them either.
+fn ghostty_key_from_key_code(
     code: crossterm::event::KeyCode,
-    shifted_codepoint: Option<u32>,
 ) -> Option<crate::ghostty::ffi::GhosttyKey> {
     use crate::ghostty::ffi;
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, MediaKeyCode, ModifierKeyCode};
 
     match code {
         KeyCode::Backspace => Some(ffi::GhosttyKey_GHOSTTY_KEY_BACKSPACE),
@@ -250,26 +340,75 @@ fn ghostty_key_from_crossterm_key_code(
             10 => ffi::GhosttyKey_GHOSTTY_KEY_F10,
             11 => ffi::GhosttyKey_GHOSTTY_KEY_F11,
             12 => ffi::GhosttyKey_GHOSTTY_KEY_F12,
+            13 => ffi::GhosttyKey_GHOSTTY_KEY_F13,
+            14 => ffi::GhosttyKey_GHOSTTY_KEY_F14,
+            15 => ffi::GhosttyKey_GHOSTTY_KEY_F15,
+            16 => ffi::GhosttyKey_GHOSTTY_KEY_F16,
+            17 => ffi::GhosttyKey_GHOSTTY_KEY_F17,
+            18 => ffi::GhosttyKey_GHOSTTY_KEY_F18,
+            19 => ffi::GhosttyKey_GHOSTTY_KEY_F19,
+            20 => ffi::GhosttyKey_GHOSTTY_KEY_F20,
+            21 => ffi::GhosttyKey_GHOSTTY_KEY_F21,
+            22 => ffi::GhosttyKey_GHOSTTY_KEY_F22,
+            23 => ffi::GhosttyKey_GHOSTTY_KEY_F23,
+            24 => ffi::GhosttyKey_GHOSTTY_KEY_F24,
+            25 => ffi::GhosttyKey_GHOSTTY_KEY_F25,
             _ => return None,
         }),
-        KeyCode::Char(c) => ghostty_key_from_char(c, shifted_codepoint),
+        KeyCode::CapsLock => Some(ffi::GhosttyKey_GHOSTTY_KEY_CAPS_LOCK),
+        KeyCode::ScrollLock => Some(ffi::GhosttyKey_GHOSTTY_KEY_SCROLL_LOCK),
+        KeyCode::NumLock => Some(ffi::GhosttyKey_GHOSTTY_KEY_NUM_LOCK),
+        KeyCode::PrintScreen => Some(ffi::GhosttyKey_GHOSTTY_KEY_PRINT_SCREEN),
+        KeyCode::Pause => Some(ffi::GhosttyKey_GHOSTTY_KEY_PAUSE),
+        KeyCode::Menu => Some(ffi::GhosttyKey_GHOSTTY_KEY_CONTEXT_MENU),
+        KeyCode::KeypadBegin => Some(ffi::GhosttyKey_GHOSTTY_KEY_NUMPAD_BEGIN),
+        KeyCode::Media(MediaKeyCode::PlayPause) => {
+            Some(ffi::GhosttyKey_GHOSTTY_KEY_MEDIA_PLAY_PAUSE)
+        }
+        KeyCode::Media(MediaKeyCode::Stop) => Some(ffi::GhosttyKey_GHOSTTY_KEY_MEDIA_STOP),
+        KeyCode::Media(MediaKeyCode::TrackNext) => {
+            Some(ffi::GhosttyKey_GHOSTTY_KEY_MEDIA_TRACK_NEXT)
+        }
+        KeyCode::Media(MediaKeyCode::TrackPrevious) => {
+            Some(ffi::GhosttyKey_GHOSTTY_KEY_MEDIA_TRACK_PREVIOUS)
+        }
+        KeyCode::Media(MediaKeyCode::LowerVolume) => {
+            Some(ffi::GhosttyKey_GHOSTTY_KEY_AUDIO_VOLUME_DOWN)
+        }
+        KeyCode::Media(MediaKeyCode::RaiseVolume) => {
+            Some(ffi::GhosttyKey_GHOSTTY_KEY_AUDIO_VOLUME_UP)
+        }
+        KeyCode::Media(MediaKeyCode::MuteVolume) => {
+            Some(ffi::GhosttyKey_GHOSTTY_KEY_AUDIO_VOLUME_MUTE)
+        }
+        KeyCode::Modifier(ModifierKeyCode::LeftShift) => {
+            Some(ffi::GhosttyKey_GHOSTTY_KEY_SHIFT_LEFT)
+        }
+        KeyCode::Modifier(ModifierKeyCode::RightShift) => {
+            Some(ffi::GhosttyKey_GHOSTTY_KEY_SHIFT_RIGHT)
+        }
+        KeyCode::Modifier(ModifierKeyCode::LeftControl) => {
+            Some(ffi::GhosttyKey_GHOSTTY_KEY_CONTROL_LEFT)
+        }
+        KeyCode::Modifier(ModifierKeyCode::RightControl) => {
+            Some(ffi::GhosttyKey_GHOSTTY_KEY_CONTROL_RIGHT)
+        }
+        KeyCode::Modifier(ModifierKeyCode::LeftAlt) => Some(ffi::GhosttyKey_GHOSTTY_KEY_ALT_LEFT),
+        KeyCode::Modifier(ModifierKeyCode::RightAlt) => Some(ffi::GhosttyKey_GHOSTTY_KEY_ALT_RIGHT),
+        KeyCode::Modifier(ModifierKeyCode::LeftSuper) => {
+            Some(ffi::GhosttyKey_GHOSTTY_KEY_META_LEFT)
+        }
+        KeyCode::Modifier(ModifierKeyCode::RightSuper) => {
+            Some(ffi::GhosttyKey_GHOSTTY_KEY_META_RIGHT)
+        }
         _ => None,
     }
 }
 
-fn ghostty_key_from_char(
-    c: char,
-    shifted_codepoint: Option<u32>,
-) -> Option<crate::ghostty::ffi::GhosttyKey> {
+fn ghostty_key_from_char(base: char) -> Option<crate::ghostty::ffi::GhosttyKey> {
     use crate::ghostty::ffi;
 
-    let base = if let Some(shifted) = shifted_codepoint.and_then(char::from_u32) {
-        ghostty_unshifted_ascii_pair(shifted).unwrap_or(c)
-    } else {
-        c
-    };
-
-    match base.to_ascii_lowercase() {
+    match base {
         'a' => Some(ffi::GhosttyKey_GHOSTTY_KEY_A),
         'b' => Some(ffi::GhosttyKey_GHOSTTY_KEY_B),
         'c' => Some(ffi::GhosttyKey_GHOSTTY_KEY_C),
