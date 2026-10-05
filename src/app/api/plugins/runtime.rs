@@ -417,16 +417,37 @@ mod tests {
 
     #[test]
     fn plugin_finish_time_is_taken_when_the_command_exits() {
-        // The background sleep keeps both pipes open after `sh` exits.
-        let child = std::process::Command::new("sh")
-            .args(["-c", "sleep 2 &"])
+        // The background `cat` keeps both output pipes open after `sh` exits,
+        // until the test closes its stdin.
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "cat <&0 >/dev/null &"])
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        let started_unix_ms = current_unix_ms();
+        let stdin = child.stdin.take().unwrap();
+        let pid = child.id().to_string();
+        let releaser = std::thread::spawn(move || {
+            // Hold the pipes until `sh` has exited and been reaped.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while std::time::Instant::now() < deadline
+                && std::process::Command::new("ps")
+                    .args(["-p", &pid])
+                    .stdout(Stdio::null())
+                    .status()
+                    .is_ok_and(|status| status.success())
+            {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let released_unix_ms = current_unix_ms();
+            drop(stdin);
+            released_unix_ms
+        });
 
         let finished = finish_plugin_child("log".into(), child);
+        let released_unix_ms = releaser.join().unwrap();
 
         let crate::events::AppEvent::PluginCommandFinished {
             finished_unix_ms,
@@ -437,7 +458,6 @@ mod tests {
             panic!("expected plugin command result");
         };
         assert_eq!(exit_code, Some(0));
-        assert!(current_unix_ms() - started_unix_ms >= 1500);
-        assert!(finished_unix_ms - started_unix_ms < 1500);
+        assert!(finished_unix_ms <= released_unix_ms);
     }
 }
