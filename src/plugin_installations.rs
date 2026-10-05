@@ -58,131 +58,183 @@ fn retain_checkout(leases: &mut Leases, checkout: &Path) -> io::Result<()> {
     Ok(())
 }
 
+// Pin failures leave a registered installation unprotected only after it is
+// replaced; plugin store errors must not hide every plugin.
 pub(crate) fn load(leases: &mut Leases) -> io::Result<Vec<InstalledPluginInfo>> {
     crate::persist::plugin_registry::read(|entries| {
         for entry in &entries {
-            retain_checkout(leases, Path::new(&entry.plugin_root))?;
+            if let Err(err) = retain_checkout(leases, Path::new(&entry.plugin_root)) {
+                tracing::warn!(%err, plugin_root = %entry.plugin_root, "failed to pin plugin installation");
+            }
         }
         Ok(entries)
     })
 }
 
-fn installations() -> io::Result<Vec<PathBuf>> {
+// Unreadable entries are skipped and reported so callers can stay conservative.
+fn installations(errors: &mut Vec<io::Error>) -> Vec<PathBuf> {
     let root = crate::plugin_paths::managed_plugins_dir().join("github-installations");
     let plugins = match std::fs::read_dir(root) {
         Ok(plugins) => plugins,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Vec::new(),
+        Err(err) => {
+            errors.push(err);
+            return Vec::new();
+        }
     };
     let mut result = Vec::new();
-    for plugin in plugins {
+    let generations = |plugin: io::Result<std::fs::DirEntry>| -> io::Result<Vec<PathBuf>> {
         let plugin = plugin?;
         if !plugin.file_type()?.is_dir() {
-            continue;
+            return Ok(Vec::new());
         }
+        let mut paths = Vec::new();
         for generation in std::fs::read_dir(plugin.path())? {
             let generation = generation?;
             if generation.file_type()?.is_dir() {
-                result.push(generation.path().canonicalize()?);
+                paths.push(generation.path().canonicalize()?);
             }
         }
+        Ok(paths)
+    };
+    for plugin in plugins {
+        match generations(plugin) {
+            Ok(paths) => result.extend(paths),
+            Err(err) => errors.push(err),
+        }
     }
-    Ok(result)
+    result
 }
 
+fn retain_startup_installation(
+    leases: &mut Leases,
+    installation: PathBuf,
+    restored_cwds: &[PathBuf],
+    handoff: bool,
+) -> io::Result<()> {
+    if leases.contains_key(&installation) {
+        return Ok(());
+    }
+    let file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(installation.join(LEASE_FILE))
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    let referenced = restored_cwds.iter().any(|cwd| {
+        cwd.canonicalize()
+            .unwrap_or_else(|_| cwd.clone())
+            .starts_with(installation.join("checkout"))
+    });
+    if !referenced && !handoff {
+        return Ok(());
+    }
+    match file.try_lock() {
+        Ok(()) if !referenced => return Ok(()),
+        Ok(()) => file.unlock()?,
+        Err(TryLockError::WouldBlock) => {}
+        Err(TryLockError::Error(err)) => return Err(err),
+    }
+    // Also retain generations held by the outgoing server during handoff.
+    file.lock_shared()?;
+    leases.insert(installation, Arc::new(file));
+    Ok(())
+}
+
+/// Best-effort: plugin store errors never block startup or handoff. Returns
+/// false when an installation may be unpinned; the caller must then skip
+/// startup cleanup so it never reclaims files a restored consumer still uses.
 pub(crate) fn retain_startup(
     leases: &mut Leases,
     restored_cwds: &[PathBuf],
     handoff: bool,
-) -> io::Result<()> {
-    crate::persist::plugin_registry::with_registry_lock(|| {
-        for installation in installations()? {
-            if leases.contains_key(&installation) {
-                continue;
-            }
-            let file = match OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(installation.join(LEASE_FILE))
-            {
-                Ok(file) => file,
-                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
-                Err(err) => return Err(err),
-            };
-            let referenced = restored_cwds.iter().any(|cwd| {
-                cwd.canonicalize()
-                    .unwrap_or_else(|_| cwd.clone())
-                    .starts_with(installation.join("checkout"))
-            });
-            if !referenced && !handoff {
-                continue;
-            }
-            match file.try_lock() {
-                Ok(()) if !referenced => continue,
-                Ok(()) => file.unlock()?,
-                Err(TryLockError::WouldBlock) => {}
-                Err(TryLockError::Error(err)) => return Err(err),
-            }
-            // Also retain generations held by the outgoing server during handoff.
-            file.lock_shared()?;
-            leases.insert(installation, Arc::new(file));
+) -> bool {
+    let result = crate::persist::plugin_registry::with_registry_lock(|| {
+        let mut errors = Vec::new();
+        let installations = installations(&mut errors);
+        for err in &errors {
+            tracing::warn!(%err, "failed to scan plugin installations");
         }
-        Ok(())
+        let mut complete = errors.is_empty();
+        for installation in installations {
+            if let Err(err) =
+                retain_startup_installation(leases, installation.clone(), restored_cwds, handoff)
+            {
+                tracing::warn!(%err, installation = %installation.display(), "failed to pin plugin installation");
+                complete = false;
+            }
+        }
+        Ok(complete)
+    });
+    result.unwrap_or_else(|err| {
+        tracing::warn!(%err, "failed to pin plugin installations");
+        false
     })
 }
 
+fn reclaim(installation: &Path) -> io::Result<()> {
+    let Some(component) = installation.parent().and_then(Path::file_name) else {
+        return Ok(());
+    };
+    let mutation_path = crate::plugin_paths::managed_plugins_dir()
+        .join(".locks")
+        .join(format!(".{}.lock", component.to_string_lossy()));
+    let mutation = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(mutation_path)?;
+    match mutation.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => return Ok(()),
+        Err(TryLockError::Error(err)) => return Err(err),
+    }
+    let lease = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(installation.join(LEASE_FILE))
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    match lease.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => return Ok(()),
+        Err(TryLockError::Error(err)) => return Err(err),
+    }
+    // Windows cannot remove the open lease file. Registry + mutation
+    // locks exclude new readers/installers while the handle is closed.
+    drop(lease);
+    // Keep the marker if removing checkout files fails so a later
+    // cleanup can retry (for example, an open Windows build artifact).
+    match std::fs::remove_dir_all(installation.join("checkout")) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+    std::fs::remove_dir_all(installation)
+}
+
+/// Reclaims every unused installation it can and returns the first error.
 pub(crate) fn cleanup() -> io::Result<()> {
     crate::persist::plugin_registry::read(|entries| {
-        for installation in installations()? {
+        let mut errors = Vec::new();
+        for installation in installations(&mut errors) {
             if entries.iter().any(|entry| {
                 lease_path(Path::new(&entry.plugin_root)).as_ref() == Some(&installation)
             }) {
                 continue;
             }
-            let Some(component) = installation.parent().and_then(Path::file_name) else {
-                continue;
-            };
-            let mutation_path = crate::plugin_paths::managed_plugins_dir()
-                .join(".locks")
-                .join(format!(".{}.lock", component.to_string_lossy()));
-            let mutation = OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(mutation_path)?;
-            match mutation.try_lock() {
-                Ok(()) => {}
-                Err(TryLockError::WouldBlock) => continue,
-                Err(TryLockError::Error(err)) => return Err(err),
+            if let Err(err) = reclaim(&installation) {
+                errors.push(err);
             }
-            let lease = match OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(installation.join(LEASE_FILE))
-            {
-                Ok(file) => file,
-                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
-                Err(err) => return Err(err),
-            };
-            match lease.try_lock() {
-                Ok(()) => {}
-                Err(TryLockError::WouldBlock) => continue,
-                Err(TryLockError::Error(err)) => return Err(err),
-            }
-            // Windows cannot remove the open lease file. Registry + mutation
-            // locks exclude new readers/installers while the handle is closed.
-            drop(lease);
-            // Keep the marker if removing checkout files fails so a later
-            // cleanup can retry (for example, an open Windows build artifact).
-            match std::fs::remove_dir_all(installation.join("checkout")) {
-                Ok(()) => {}
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-                Err(err) => return Err(err),
-            }
-            std::fs::remove_dir_all(&installation)?;
         }
-        Ok(())
+        errors.into_iter().next().map_or(Ok(()), Err)
     })
 }
 
@@ -326,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_retains_restored_and_handoff_generations_and_rejects_pin_errors() {
+    fn startup_retains_restored_and_handoff_generations_and_survives_pin_errors() {
         with_config(|| {
             let (restored, _) = installation("example.restored");
             let (handoff, _) = installation("example.handoff");
@@ -337,13 +389,17 @@ mod tests {
                 .unwrap();
             outgoing.lock_shared().unwrap();
             let mut unrelated = Leases::new();
-            retain_startup(&mut unrelated, &[], false).unwrap();
+            assert!(retain_startup(&mut unrelated, &[], false));
             assert!(
                 unrelated.is_empty(),
                 "ordinary startup must not inherit other servers' pins"
             );
             let mut incoming = Leases::new();
-            retain_startup(&mut incoming, &[restored.join("checkout")], true).unwrap();
+            assert!(retain_startup(
+                &mut incoming,
+                &[restored.join("checkout")],
+                true
+            ));
             drop(outgoing);
             cleanup().unwrap();
             assert!(restored.exists());
@@ -376,8 +432,10 @@ mod tests {
             let broken =
                 crate::plugin_paths::create_managed_installation("example.broken").unwrap();
             std::fs::create_dir(broken.join(LEASE_FILE)).unwrap();
+            let (retired, _) = installation("example.unused");
+            assert!(!retain_startup(&mut Leases::new(), &[], true));
             let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            let app = crate::app::App::try_new(
+            let mut app = crate::app::App::try_new(
                 &crate::config::Config::default(),
                 crate::app::AppPolicy {
                     persist_plugin_registry: true,
@@ -386,11 +444,27 @@ mod tests {
                 None,
                 rx,
                 crate::api::EventHub::default(),
-            );
+            )
+            .expect("plugin pin errors must not prevent server startup");
+            assert!(!app.plugin_installation_cleanup_allowed);
+            app.run_plugin_startup_hooks();
             assert!(
-                app.is_err(),
-                "startup cannot restore consumers without their pins"
+                retired.exists(),
+                "startup cleanup is skipped when an installation could not be pinned"
             );
+        });
+    }
+
+    #[test]
+    fn cleanup_continues_past_installations_it_cannot_remove() {
+        with_config(|| {
+            let (stuck, _) = installation("example.stuck");
+            std::fs::remove_dir_all(stuck.join("checkout")).unwrap();
+            std::fs::write(stuck.join("checkout"), "not a directory").unwrap();
+            let (unused, _) = installation("example.unused");
+            assert!(cleanup().is_err(), "the failure is still reported");
+            assert!(stuck.join(LEASE_FILE).exists());
+            assert!(!unused.exists(), "other installations are still reclaimed");
         });
     }
 }

@@ -165,6 +165,9 @@ pub struct App {
     // ponytail: server-lifetime pins defer reclamation until restart; use
     // per-pane leases only if reclamation during long-running sessions matters.
     pub(crate) plugin_installation_leases: crate::plugin_installations::Leases,
+    // False when startup could not pin every installation; cleanup could
+    // otherwise reclaim files a restored consumer still uses.
+    pub(crate) plugin_installation_cleanup_allowed: bool,
 }
 
 pub(crate) const APP_EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -395,6 +398,7 @@ impl App {
         let mut restored_terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
         let snapshot = policy.restore_session.then(crate::persist::load).flatten();
         let mut plugin_installation_leases = crate::plugin_installations::Leases::new();
+        let mut plugin_installation_cleanup_allowed = true;
         if policy.persist_plugin_registry {
             let restored_cwds = snapshot
                 .as_ref()
@@ -404,11 +408,11 @@ impl App {
                 .flat_map(|tab| tab.panes.values())
                 .map(|pane| pane.cwd.clone())
                 .collect::<Vec<_>>();
-            crate::plugin_installations::retain_startup(
+            plugin_installation_cleanup_allowed = crate::plugin_installations::retain_startup(
                 &mut plugin_installation_leases,
                 &restored_cwds,
                 false,
-            )?;
+            );
         }
         let session_writer = Arc::new(std::sync::Mutex::new(crate::persist::SessionWriter::new(
             policy.restore_session && snapshot.is_none(),
@@ -602,6 +606,7 @@ impl App {
 
         let mut app = Self {
             plugin_installation_leases,
+            plugin_installation_cleanup_allowed,
             config_diagnostic_deadline: None,
             toast_deadline: None,
             last_api_notification_at: None,
@@ -687,11 +692,13 @@ impl App {
             api_rx,
             event_hub,
         )?;
-        crate::plugin_installations::retain_startup(
+        if !crate::plugin_installations::retain_startup(
             &mut app.plugin_installation_leases,
             &[],
             true,
-        )?;
+        ) {
+            app.plugin_installation_cleanup_allowed = false;
+        }
         let (workspaces, terminals, runtimes) = crate::persist::restore_handoff(
             snapshot,
             config.advanced.scrollback_limit_bytes,

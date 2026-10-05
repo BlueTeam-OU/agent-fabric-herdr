@@ -185,7 +185,9 @@ impl App {
     }
 
     pub(crate) fn run_plugin_startup_hooks(&mut self) {
-        if self.policy.persist_plugin_registry {
+        if self.policy.persist_plugin_registry && !self.plugin_installation_cleanup_allowed {
+            tracing::warn!("plugin cleanup skipped: some installations could not be pinned");
+        } else if self.policy.persist_plugin_registry {
             if let Err(err) = crate::plugin_installations::cleanup() {
                 tracing::warn!(%err, "plugin cleanup deferred");
             }
