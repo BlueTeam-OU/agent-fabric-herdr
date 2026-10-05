@@ -72,6 +72,7 @@ pub(crate) const PANE_TERM: &str = crate::ghostty::TERM;
 pub(crate) const MIN_PANE_ROWS: u16 = 2;
 pub(crate) const MIN_PANE_COLS: u16 = 4;
 const PANE_COLORTERM: &str = "truecolor";
+const FISH_HANDLE_REFLOW_ENV_VAR: &str = "fish_handle_reflow";
 
 fn terminal_compression_permits() -> Arc<tokio::sync::Semaphore> {
     static PERMITS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
@@ -103,6 +104,11 @@ fn apply_pane_terminal_env(cmd: &mut CommandBuilder) {
     cmd.env("COLORTERM", PANE_COLORTERM);
     cmd.env("TERM_PROGRAM", "herdr");
     cmd.env("TERM_PROGRAM_VERSION", crate::build_info::version());
+    // fish only skips its own resize repaint for terminals it recognizes as
+    // reflowing. Herdr reflows too, and the competing repaint glues prompt copies.
+    if cmd.get_env(FISH_HANDLE_REFLOW_ENV_VAR).is_none() {
+        cmd.env(FISH_HANDLE_REFLOW_ENV_VAR, "0");
+    }
     // Host handles refer to the outer terminal, never to this pane.
     for key in [
         "ITERM_SESSION_ID",
@@ -4182,6 +4188,41 @@ mod tests {
         assert_eq!(
             cmd.get_env("TERM_PROGRAM_VERSION"),
             Some(OsStr::new(&crate::build_info::version()))
+        );
+    }
+
+    #[test]
+    fn pane_terminal_env_tells_fish_that_herdr_reflows() {
+        let mut cmd = CommandBuilder::new("shell");
+        cmd.env_remove(FISH_HANDLE_REFLOW_ENV_VAR);
+        apply_pane_terminal_env(&mut cmd);
+        assert_eq!(
+            cmd.get_env(FISH_HANDLE_REFLOW_ENV_VAR),
+            Some(OsStr::new("0"))
+        );
+    }
+
+    #[test]
+    fn pane_terminal_env_keeps_user_fish_handle_reflow() {
+        let mut inherited = CommandBuilder::new("shell");
+        inherited.env(FISH_HANDLE_REFLOW_ENV_VAR, "1");
+        apply_pane_terminal_env(&mut inherited);
+        apply_pane_launch_env(&mut inherited, &PaneLaunchEnv::default());
+        assert_eq!(
+            inherited.get_env(FISH_HANDLE_REFLOW_ENV_VAR),
+            Some(OsStr::new("1"))
+        );
+
+        let mut explicit = CommandBuilder::new("shell");
+        explicit.env_remove(FISH_HANDLE_REFLOW_ENV_VAR);
+        apply_pane_terminal_env(&mut explicit);
+        apply_pane_launch_env(
+            &mut explicit,
+            &PaneLaunchEnv::from_extra(vec![(FISH_HANDLE_REFLOW_ENV_VAR.into(), "1".into())]),
+        );
+        assert_eq!(
+            explicit.get_env(FISH_HANDLE_REFLOW_ENV_VAR),
+            Some(OsStr::new("1"))
         );
     }
 
