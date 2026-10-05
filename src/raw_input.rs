@@ -21,16 +21,20 @@ use crate::terminal_theme::{
 };
 
 const ESC: u8 = 0x1b;
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 pub(crate) const RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS: i32 = 10;
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 pub(crate) const MOUSE_ACTIVE_ESCAPE_SEQUENCE_FLUSH_TIMEOUT_MS: i32 = 150;
 /// Covers the 33 ms split in #4630 without gluing legacy Alt+[ to the next key.
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 pub(crate) const MOUSE_ACTIVE_CSI_INTRODUCER_FLUSH_TIMEOUT_MS: i32 = 50;
 /// Covers the 350 ms mouse tail delay in #3480. Other input ends it early (#4751).
 #[cfg(unix)]
 const DISAMBIGUATED_MOUSE_TAIL_FLUSH_TIMEOUT_MS: i32 = 500;
+/// Bytes already inside a sequence cannot be a key, so wait long enough for a
+/// split read over a slow link before giving up on them.
+#[cfg(any(unix, test))]
+pub(crate) const INCOMPLETE_SEQUENCE_FLUSH_TIMEOUT_MS: i32 = 500;
 pub(crate) const GHOSTTY_COLOR_SCHEME_DARK_REPORT: &[u8] = b"\x1b[?997;1n";
 pub(crate) const GHOSTTY_COLOR_SCHEME_LIGHT_REPORT: &[u8] = b"\x1b[?997;2n";
 const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
@@ -165,6 +169,12 @@ impl RawInputFramer {
                         TerminalKey::new(crossterm::event::KeyCode::Esc, KeyModifiers::empty())
                             .with_vt_bytes(chunk),
                     ));
+                }
+                // The byte framer released this introducer as a key on its own.
+                if is_alt_key_introducer(&chunk) {
+                    let text = std::str::from_utf8(&chunk).ok()?;
+                    return parse_terminal_key_sequence(text)
+                        .map(|key| RawInputEvent::Key(key.with_vt_bytes(chunk.clone())));
                 }
                 extract_one_event(&chunk).map(|(event, _consumed)| {
                     tracing::debug!(raw_bytes = ?chunk, event = ?event, "raw input event parsed");
@@ -304,6 +314,44 @@ impl RawInputByteFramer {
         self.host_escape_disambiguation_active = active;
     }
 
+    /// Pending bytes that could still be a key on their own: a lone ESC or ESC
+    /// plus one introducer. Legacy hosts send those for Escape and Alt+key, and
+    /// host text bindings (e.g. Ghostty `text:\x1bO`) send them even when the
+    /// host disambiguates escapes.
+    #[cfg(any(unix, test))]
+    fn pending_could_be_escape_key(&self) -> bool {
+        is_escape_key_prefix(&self.buffer)
+    }
+
+    /// How long to wait for more input before `flush_timeout`. Only bytes that
+    /// could still be a key get the short keyboard window; anything already
+    /// inside a sequence waits long enough for split reads over slow links.
+    #[cfg(any(unix, test))]
+    pub(crate) fn idle_flush_timeout_ms(&self, host_mouse_capture_active: bool) -> i32 {
+        if self.buffer.is_empty() {
+            return RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS;
+        }
+        // A reply Herdr asked for can split right after its introducer.
+        if self.awaiting_host_reply() && matches!(self.buffer.as_slice(), b"\x1b[" | b"\x1b]") {
+            return INCOMPLETE_SEQUENCE_FLUSH_TIMEOUT_MS;
+        }
+        if self.pending_could_be_escape_key() {
+            if !host_mouse_capture_active {
+                return RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS;
+            }
+            return match self.buffer.as_slice() {
+                [ESC] => MOUSE_ACTIVE_ESCAPE_SEQUENCE_FLUSH_TIMEOUT_MS,
+                // A mouse report split after ESC[ is still ambiguous with legacy Alt+[.
+                b"\x1b[" => MOUSE_ACTIVE_CSI_INTRODUCER_FLUSH_TIMEOUT_MS,
+                _ => RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS,
+            };
+        }
+        if self.buffer.first() == Some(&ESC) || starts_with_incomplete_utf8_char(&self.buffer) {
+            return INCOMPLETE_SEQUENCE_FLUSH_TIMEOUT_MS;
+        }
+        RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS
+    }
+
     /// How long to keep holding input after a first idle flush held it.
     #[cfg(unix)]
     pub(crate) fn held_input_flush_timeout_ms(&self) -> i32 {
@@ -312,22 +360,6 @@ impl RawInputByteFramer {
         } else {
             RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS
         }
-    }
-
-    #[cfg(unix)]
-    pub(crate) fn has_pending_lone_escape(&self) -> bool {
-        self.buffer.as_slice() == [ESC]
-    }
-
-    #[cfg(unix)]
-    pub(crate) fn has_pending_csi_introducer(&self) -> bool {
-        self.buffer.as_slice() == b"\x1b["
-    }
-
-    #[cfg(unix)]
-    pub(crate) fn has_pending_incomplete_mouse_sequence(&self) -> bool {
-        starts_with_incomplete_sgr_mouse_sequence(&self.buffer)
-            || starts_with_incomplete_default_mouse_sequence(&self.buffer)
     }
 
     #[cfg(any(windows, test))]
@@ -392,8 +424,11 @@ impl RawInputByteFramer {
         #[cfg(not(unix))]
         let mouse_wait_served = false;
         #[cfg(unix)]
+        // Prefixes already inside a sequence waited the long window; only the
+        // ambiguous ESC / ESC[ prefixes need this extra mouse-tail hold.
         if !mouse_wait_served
             && self.host_escape_disambiguation_active
+            && self.pending_could_be_escape_key()
             && could_continue_as_mouse_report(&self.buffer)
         {
             self.awaiting_mouse_tail_after = Some(self.buffer.len());
@@ -511,6 +546,26 @@ impl RawInputByteFramer {
             self.held_pending_host_reply_esc = false;
             self.discard_until = Some(ControlStringFamily::HostReplyCsi);
             self.discarded_tail_bytes = 0;
+            self.buffer.clear();
+            return chunks;
+        }
+
+        // A legacy host sends Alt+[ and Alt+O as ESC plus that byte. When nothing
+        // followed and no reply is expected, it was the key. String introducers
+        // (OSC, DCS, APC, PM, SOS) also start host replies, so they keep the
+        // control-string path and are never forwarded as Alt keys (#344).
+        if is_alt_key_introducer(&self.buffer) && !self.awaiting_host_reply() {
+            chunks.push(std::mem::take(&mut self.buffer));
+            return chunks;
+        }
+        // A lone string introducer with no reply expected is a legacy Alt chord
+        // that cannot be forwarded safely. Drop just these bytes; entering
+        // control-string discard would swallow the user's next keystrokes.
+        if is_escape_key_prefix(&self.buffer)
+            && self.buffer.len() == 2
+            && !self.awaiting_host_reply()
+        {
+            tracing::debug!(bytes = ?self.buffer, "dropping lone string introducer");
             self.buffer.clear();
             return chunks;
         }
@@ -991,6 +1046,18 @@ fn starts_with_incomplete_host_cell_size_report(buffer: &[u8]) -> bool {
         && !(height.is_some_and(<[u8]>::is_empty) && width.is_some())
 }
 
+fn is_alt_key_introducer(buffer: &[u8]) -> bool {
+    matches!(buffer, [ESC, b'[' | b'O'])
+}
+
+fn is_escape_key_prefix(buffer: &[u8]) -> bool {
+    match buffer {
+        [ESC] => true,
+        [ESC, introducer] => matches!(introducer, b'[' | b'O' | b'P' | b']' | b'X' | b'^' | b'_'),
+        _ => false,
+    }
+}
+
 fn control_string(buffer: &[u8]) -> Option<ControlString> {
     let family = match buffer.get(..2)? {
         b"\x1b]" => ControlStringFamily::Osc,
@@ -1121,6 +1188,7 @@ fn could_continue_as_mouse_report(buffer: &[u8]) -> bool {
 }
 
 #[cfg(any(unix, windows, test))]
+#[cfg(any(windows, test))]
 fn starts_with_incomplete_default_mouse_sequence(buffer: &[u8]) -> bool {
     buffer.starts_with(b"\x1b[M") && buffer.len() < 6
 }
@@ -2632,6 +2700,7 @@ mod tests {
     #[test]
     fn raw_input_byte_framer_discards_split_control_string_after_timeout() {
         let mut framer = RawInputByteFramer::default();
+        framer.host_color_query_sent();
 
         assert!(framer.push(b"\x1b]").is_empty());
         assert!(framer.flush_timeout().is_empty());
@@ -2642,6 +2711,7 @@ mod tests {
     #[test]
     fn raw_input_byte_framer_keeps_discarding_tail_across_timeout() {
         let mut framer = RawInputByteFramer::default();
+        framer.host_color_query_sent();
 
         assert!(framer.push(b"\x1b]").is_empty());
         assert!(framer.flush_timeout().is_empty());
@@ -2654,12 +2724,32 @@ mod tests {
     #[test]
     fn raw_input_byte_framer_releases_discard_on_implausible_tail() {
         let mut framer = RawInputByteFramer::default();
+        framer.host_color_query_sent();
 
         assert!(framer.push(b"\x1b]").is_empty());
         assert!(framer.flush_timeout().is_empty());
         assert!(framer.push(b"a").is_empty());
         assert!(framer.flush_timeout().is_empty());
         assert_eq!(framer.push(b"b"), vec![b"b".to_vec()]);
+    }
+
+    #[test]
+    fn csi_and_ss3_introducers_without_expected_reply_are_alt_keys() {
+        for (bytes, code) in [
+            (&b"\x1b["[..], KeyCode::Char('[')),
+            (b"\x1bO", KeyCode::Char('O')),
+        ] {
+            let mut framer = RawInputFramer::default();
+            assert!(framer.push(bytes).is_empty());
+            let events = framer.flush_timeout();
+            assert!(
+                matches!(&events[..], [RawInputEvent::Key(key)]
+                    if key.code == code && key.modifiers.contains(KeyModifiers::ALT)),
+                "{bytes:?}: {events:?}"
+            );
+            // The next keystroke is not swallowed as a sequence tail.
+            assert_eq!(framer.push(b"a").len(), 1, "{bytes:?}");
+        }
     }
 
     #[test]

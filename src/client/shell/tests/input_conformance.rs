@@ -596,10 +596,12 @@ fn print_report(report: &Report) {
 
 // Ratchet: failure counts may only go down. Lower them when a change fixes
 // cases; a rise means a regression in Herdr's input transparency.
-const KEYBOARD_FAILURES_BASELINE: usize = 120;
+// Remaining: Alt+], Alt+Shift+P/X, Alt+^, Alt+_ behind legacy hosts. Their bytes
+// also start host replies, so they are never forwarded (#344).
+const KEYBOARD_FAILURES_BASELINE: usize = 50;
 const MOUSE_FAILURES_BASELINE: usize = 96;
-const SPLIT_IDLE_MISMATCH_BASELINE: usize = 6_730;
-const REPLY_IDLE_MISMATCH_BASELINE: usize = 77;
+// Remaining: legacy hosts split right after ESC[, which is also Alt+[.
+const SPLIT_IDLE_MISMATCH_BASELINE: usize = 207;
 
 // ---------------------------------------------------------------------------
 // Mouse
@@ -961,14 +963,20 @@ const HOST_REPLIES: &[&[u8]] = &[
     b"\x1b[?997;2n",
 ];
 
-fn framed_events(host: HostProfile, pieces: &[&[u8]], idle_between: bool) -> String {
-    framed_events_with(host, pieces, idle_between, false)
+/// A network hiccup between two reads of one sequence (SSH, slow links).
+const SPLIT_PAUSE_MS: i32 = 50;
+
+fn framed_events(host: HostProfile, pieces: &[&[u8]], pause_ms: Option<i32>) -> String {
+    framed_events_with(host, pieces, pause_ms, false)
 }
 
+/// Feed `pieces` as separate reads. With `pause_ms`, the reads are that far
+/// apart: like the client loop, the framer is flushed only when the pause
+/// outlasts the wait it asked for.
 fn framed_events_with(
     host: HostProfile,
     pieces: &[&[u8]],
-    idle_between: bool,
+    pause_ms: Option<i32>,
     awaiting_replies: bool,
 ) -> String {
     let mut framer = HerdrPath::fresh_framer(host);
@@ -980,9 +988,18 @@ fn framed_events_with(
         framer.host_cell_size_query_sent();
     }
     let mut chunks = Vec::new();
-    for piece in pieces {
+    for (index, piece) in pieces.iter().enumerate() {
         chunks.extend(framer.push(piece));
-        if idle_between {
+        let Some(pause_ms) = pause_ms.filter(|_| index + 1 < pieces.len()) else {
+            continue;
+        };
+        let mut waited = 0;
+        for _ in 0..3 {
+            let wait = framer.idle_flush_timeout_ms(true);
+            if !framer.has_pending_input() || waited + wait > pause_ms {
+                break;
+            }
+            waited += wait;
             chunks.extend(framer.flush_timeout());
         }
     }
@@ -1006,11 +1023,11 @@ fn split_read_robustness() {
     let mut burst_mismatch = Vec::new();
     let mut idle_mismatch = Vec::new();
     for (host, bytes) in &corpus {
-        let whole = framed_events(*host, &[bytes], false);
+        let whole = framed_events(*host, &[bytes], None);
         for cut in 1..bytes.len() {
             splits += 1;
             let pieces = [&bytes[..cut], &bytes[cut..]];
-            if framed_events(*host, &pieces, false) != whole {
+            if framed_events(*host, &pieces, None) != whole {
                 burst_mismatch.push(format!(
                     "{}\t{}|{}",
                     host.name(),
@@ -1018,7 +1035,7 @@ fn split_read_robustness() {
                     show(pieces[1])
                 ));
             }
-            if framed_events(*host, &pieces, true) != whole {
+            if framed_events(*host, &pieces, Some(SPLIT_PAUSE_MS)) != whole {
                 idle_mismatch.push(format!(
                     "{}\t{}|{}",
                     host.name(),
@@ -1032,21 +1049,22 @@ fn split_read_robustness() {
     let mut reply_burst_mismatch = Vec::new();
     let mut reply_idle_mismatch = Vec::new();
     for reply in HOST_REPLIES {
-        let whole = framed_events_with(HostProfile::Kitty, &[reply], false, true);
+        let whole = framed_events_with(HostProfile::Kitty, &[reply], None, true);
         for cut in 1..reply.len() {
             reply_splits += 1;
             let pieces = [&reply[..cut], &reply[cut..]];
             let line = format!("reply\t{}|{}", show(pieces[0]), show(pieces[1]));
-            if framed_events_with(HostProfile::Kitty, &pieces, false, true) != whole {
+            if framed_events_with(HostProfile::Kitty, &pieces, None, true) != whole {
                 reply_burst_mismatch.push(line.clone());
             }
-            if framed_events_with(HostProfile::Kitty, &pieces, true, true) != whole {
+            if framed_events_with(HostProfile::Kitty, &pieces, Some(SPLIT_PAUSE_MS), true) != whole
+            {
                 reply_idle_mismatch.push(line);
             }
         }
     }
     println!(
-        "\nhost replies: {} replies, {} splits\n  burst (no pause): {} differ\n  pause between:    {} differ",
+        "\nhost replies: {} replies, {} splits\n  burst (no pause): {} differ\n  {SPLIT_PAUSE_MS}ms pause:      {} differ",
         HOST_REPLIES.len(),
         reply_splits,
         reply_burst_mismatch.len(),
@@ -1055,7 +1073,7 @@ fn split_read_robustness() {
 
     let pct = |bad: usize| 100.0 * (splits - bad) as f64 / splits.max(1) as f64;
     println!(
-        "\nsplit reads: {} sequences, {} splits\n  burst (no pause): {:.1}% identical ({} differ)\n  pause between:    {:.1}% identical ({} differ)",
+        "\nsplit reads: {} sequences, {} splits\n  burst (no pause): {:.1}% identical ({} differ)\n  {SPLIT_PAUSE_MS}ms pause:      {:.1}% identical ({} differ)",
         corpus.len(),
         splits,
         pct(burst_mismatch.len()),
@@ -1087,9 +1105,8 @@ fn split_read_robustness() {
         idle_mismatch.len()
     );
     assert!(
-        reply_idle_mismatch.len() <= REPLY_IDLE_MISMATCH_BASELINE,
-        "host-reply split robustness regressed: {} > {REPLY_IDLE_MISMATCH_BASELINE}",
-        reply_idle_mismatch.len()
+        reply_idle_mismatch.is_empty(),
+        "split host replies changed after a {SPLIT_PAUSE_MS}ms pause: {reply_idle_mismatch:?}"
     );
 }
 

@@ -376,17 +376,7 @@ fn idle_flush_timeout_ms(
     framer: &crate::raw_input::RawInputByteFramer,
     host_mouse_capture_active: bool,
 ) -> i32 {
-    if !host_mouse_capture_active {
-        return crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS;
-    }
-    if framer.has_pending_lone_escape() || framer.has_pending_incomplete_mouse_sequence() {
-        crate::raw_input::MOUSE_ACTIVE_ESCAPE_SEQUENCE_FLUSH_TIMEOUT_MS
-    } else if framer.has_pending_csi_introducer() {
-        // A mouse report split after ESC[ is still ambiguous with legacy Alt+[.
-        crate::raw_input::MOUSE_ACTIVE_CSI_INTRODUCER_FLUSH_TIMEOUT_MS
-    } else {
-        crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS
-    }
+    framer.idle_flush_timeout_ms(host_mouse_capture_active)
 }
 
 #[cfg(windows)]
@@ -1058,7 +1048,7 @@ mod tests {
     }
 
     #[test]
-    fn mouse_active_escape_sequences_get_longer_reassembly_window() {
+    fn only_ambiguous_escape_prefixes_get_the_short_keyboard_window() {
         let mut escape = crate::raw_input::RawInputByteFramer::default();
         assert!(escape.push(b"\x1b").is_empty());
         let mut csi = crate::raw_input::RawInputByteFramer::default();
@@ -1070,26 +1060,30 @@ mod tests {
         let mut unrelated = crate::raw_input::RawInputByteFramer::default();
         assert!(unrelated.push(b"\x1b[49:33;2:").is_empty());
 
-        for framer in [&escape, &csi, &sgr_mouse, &default_mouse, &unrelated] {
+        // A lone ESC or ESC[ may still be a key (Escape, Alt+[).
+        for framer in [&escape, &csi] {
             assert_eq!(
                 idle_flush_timeout_ms(framer, false),
                 crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS
             );
         }
-        for framer in [&escape, &sgr_mouse, &default_mouse] {
-            assert_eq!(
-                idle_flush_timeout_ms(framer, true),
-                crate::raw_input::MOUSE_ACTIVE_ESCAPE_SEQUENCE_FLUSH_TIMEOUT_MS
-            );
-        }
+        assert_eq!(
+            idle_flush_timeout_ms(&escape, true),
+            crate::raw_input::MOUSE_ACTIVE_ESCAPE_SEQUENCE_FLUSH_TIMEOUT_MS
+        );
         assert_eq!(
             idle_flush_timeout_ms(&csi, true),
             crate::raw_input::MOUSE_ACTIVE_CSI_INTRODUCER_FLUSH_TIMEOUT_MS
         );
-        assert_eq!(
-            idle_flush_timeout_ms(&unrelated, true),
-            crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS
-        );
+        // Anything further inside a sequence cannot be a key: wait for the rest.
+        for framer in [&sgr_mouse, &default_mouse, &unrelated] {
+            for mouse_capture in [false, true] {
+                assert_eq!(
+                    idle_flush_timeout_ms(framer, mouse_capture),
+                    crate::raw_input::INCOMPLETE_SEQUENCE_FLUSH_TIMEOUT_MS
+                );
+            }
+        }
 
         let mouse_timeout_ms =
             std::hint::black_box(crate::raw_input::MOUSE_ACTIVE_ESCAPE_SEQUENCE_FLUSH_TIMEOUT_MS);
