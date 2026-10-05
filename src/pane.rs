@@ -6386,24 +6386,24 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn spawned_pane_process_sees_fish_handle_reflow() {
-        let output_path = std::env::temp_dir().join(format!(
-            "herdr-fish-handle-reflow-test-{}-{}.txt",
+        let output_dir = std::env::temp_dir().join(format!(
+            "herdr-fish-handle-reflow-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
+        std::fs::create_dir(&output_dir).unwrap();
+        let output_path = output_dir.join("out.txt");
         let (events, _event_rx) = mpsc::channel(8);
+        // The cwd keeps the temp path out of the shell command line.
         let runtime = PaneRuntime::spawn_shell_command(
             PaneId::from_raw(42),
             24,
             80,
-            std::env::temp_dir(),
-            &format!(
-                "printf '%s\\n' \"$fish_handle_reflow\" > '{}'",
-                output_path.display()
-            ),
+            output_dir.clone(),
+            "printf '%s\\n' \"$fish_handle_reflow\" > out.txt",
             &PaneLaunchEnv::default(),
             AgentDetection::Disabled,
             0,
@@ -6428,7 +6428,7 @@ mod tests {
         .await
         .expect("pane process should write its env");
         runtime.shutdown();
-        let _ = std::fs::remove_file(&output_path);
+        let _ = std::fs::remove_dir_all(&output_dir);
 
         let expected = std::env::var(FISH_HANDLE_REFLOW_ENV_VAR).unwrap_or_else(|_| "0".into());
         assert_eq!(output, format!("{expected}\n"));
