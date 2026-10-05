@@ -754,6 +754,26 @@ struct WindowsInputTranslator {
     pump: WindowsInputPump,
 }
 
+/// Test handle that feeds native key records through the real Windows input
+/// translation (mapper + pump), for cross-module conformance tests.
+#[cfg(all(test, windows))]
+#[derive(Default)]
+pub(crate) struct TestWindowsInput(WindowsInputTranslator);
+
+#[cfg(all(test, windows))]
+impl TestWindowsInput {
+    pub(crate) fn key(
+        &mut self,
+        record: crate::input::WindowsKeyRecord,
+    ) -> Vec<crate::protocol::ClientInputEvent> {
+        self.0.translate(WindowsInputRecord::Key(record))
+    }
+
+    pub(crate) fn idle(&mut self) -> Vec<crate::protocol::ClientInputEvent> {
+        self.0.idle()
+    }
+}
+
 #[cfg(test)]
 impl WindowsInputTranslator {
     fn translate(&mut self, record: WindowsInputRecord) -> Vec<crate::protocol::ClientInputEvent> {

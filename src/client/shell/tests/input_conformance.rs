@@ -10,6 +10,10 @@
 //! Keystrokes whose host bytes cannot distinguish keys the pane would see
 //! differently are counted as host-lossy, not as Herdr failures.
 
+// The Unix-host checks are compiled out on Windows, leaving helpers that only
+// they use.
+#![cfg_attr(windows, allow(dead_code))]
+
 use std::collections::{BTreeMap, HashMap};
 
 use super::*;
@@ -365,10 +369,19 @@ impl HerdrPath {
             }
             chunks.extend(self.framer.flush_timeout());
         }
+        let outcomes = chunks
+            .iter()
+            .map(|chunk| self.state.handle_input_bytes(chunk))
+            .collect();
+        self.deliver(outcomes)
+    }
+
+    /// Route client outcomes through server pane input and collect the bytes the
+    /// pane receives. None when Herdr kept the input for itself.
+    fn deliver(&mut self, outcomes: Vec<ClientShellInput>) -> Option<Vec<u8>> {
         let mut events = Vec::new();
         let mut herdr_owned = false;
-        for chunk in chunks {
-            let outcome = self.state.handle_input_bytes(&chunk);
+        for outcome in outcomes {
             herdr_owned |= self.absorb(outcome, &mut events);
         }
         herdr_owned |= self.state.mode != ClientShellMode::Terminal || self.state.overlay.is_some();
@@ -1016,6 +1029,9 @@ fn framed_events_with(
     format!("{events:?}")
 }
 
+// The keyboard, mouse and split-read checks model a Unix host sending terminal
+// bytes. Windows input arrives as native records; see `windows_records`.
+#[cfg(unix)]
 #[test]
 fn split_read_robustness() {
     let corpus = host_input_corpus();
@@ -1110,6 +1126,7 @@ fn split_read_robustness() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn mouse_transparency_conformance() {
     let report = run_mouse_conformance();
@@ -1121,6 +1138,7 @@ async fn mouse_transparency_conformance() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn keyboard_transparency_conformance() {
     let report = run_keyboard_conformance();
@@ -1130,4 +1148,302 @@ async fn keyboard_transparency_conformance() {
         "keyboard transparency regressed: {} failures > {KEYBOARD_FAILURES_BASELINE}",
         report.failures.len()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Windows: native key records
+// ---------------------------------------------------------------------------
+//
+// In Windows Terminal each keypress reaches ConPTY as a native key record
+// (win32-input-mode). Herdr's pane is a ConPTY too, so for a pane that
+// negotiated no keyboard protocol, transparency means the pane's ConPTY gets
+// the same records Herdr received. Records are built from the real keyboard
+// layouts with ToUnicodeEx, the way Windows produces them.
+
+#[cfg(windows)]
+mod windows_records {
+    use super::*;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetKeyboardLayout, LoadKeyboardLayoutW, MapVirtualKeyExW, ToUnicodeEx, HKL,
+        KLF_NOTELLSHELL, MAPVK_VK_TO_VSC,
+    };
+
+    const RIGHT_ALT_PRESSED: u32 = 0x0001;
+    const LEFT_ALT_PRESSED: u32 = 0x0002;
+    const LEFT_CTRL_PRESSED: u32 = 0x0008;
+    const SHIFT_PRESSED: u32 = 0x0010;
+    const ENHANCED_KEY: u32 = 0x0100;
+
+    const VK_SHIFT: usize = 0x10;
+    const VK_CONTROL: usize = 0x11;
+    const VK_MENU: usize = 0x12;
+    const VK_LSHIFT: usize = 0xa0;
+    const VK_LCONTROL: usize = 0xa2;
+    const VK_LMENU: usize = 0xa4;
+    const VK_RMENU: usize = 0xa5;
+
+    const LAYOUTS: &[(&str, &str)] = &[("us", "00000409"), ("de", "00000407")];
+
+    #[derive(Clone, Copy)]
+    struct Chord {
+        name: &'static str,
+        shift: bool,
+        ctrl: bool,
+        left_alt: bool,
+        /// AltGr: Windows reports it as Right Alt plus Left Ctrl.
+        alt_gr: bool,
+    }
+
+    const fn chord(
+        name: &'static str,
+        shift: bool,
+        ctrl: bool,
+        left_alt: bool,
+        alt_gr: bool,
+    ) -> Chord {
+        Chord {
+            name,
+            shift,
+            ctrl,
+            left_alt,
+            alt_gr,
+        }
+    }
+
+    const CHORDS: &[Chord] = &[
+        chord("plain", false, false, false, false),
+        chord("shift", true, false, false, false),
+        chord("ctrl", false, true, false, false),
+        chord("alt", false, false, true, false),
+        chord("ctrl+shift", true, true, false, false),
+        chord("alt+shift", true, false, true, false),
+        chord("ctrl+alt", false, true, true, false),
+        chord("altgr", false, false, false, true),
+        chord("altgr+shift", true, false, false, true),
+    ];
+
+    fn virtual_keys() -> Vec<(String, u16, bool)> {
+        let mut keys: Vec<(String, u16, bool)> = Vec::new();
+        for vk in (0x41..=0x5a).chain(0x30..=0x39) {
+            keys.push((format!("vk{vk:02x}"), vk, false));
+        }
+        for vk in [
+            0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf, 0xc0, 0xdb, 0xdc, 0xdd, 0xde, 0xe2,
+        ] {
+            keys.push((format!("oem{vk:02x}"), vk, false));
+        }
+        for (name, vk) in [
+            ("space", 0x20),
+            ("enter", 0x0d),
+            ("tab", 0x09),
+            ("backspace", 0x08),
+            ("escape", 0x1b),
+        ] {
+            keys.push((name.to_owned(), vk, false));
+        }
+        for (name, vk) in [
+            ("pageup", 0x21),
+            ("pagedown", 0x22),
+            ("end", 0x23),
+            ("home", 0x24),
+            ("left", 0x25),
+            ("up", 0x26),
+            ("right", 0x27),
+            ("down", 0x28),
+            ("insert", 0x2d),
+            ("delete", 0x2e),
+        ] {
+            keys.push((name.to_owned(), vk, true));
+        }
+        for n in 0..12u16 {
+            keys.push((format!("f{}", n + 1), 0x70 + n, false));
+        }
+        keys
+    }
+
+    /// Sessions without a desktop (SSH) can only use the current layout.
+    fn load_layout(klid: &str) -> Option<HKL> {
+        let wide: Vec<u16> = klid.encode_utf16().chain(Some(0)).collect();
+        // SAFETY: `wide` is a NUL-terminated layout id that outlives the call.
+        let loaded = unsafe { LoadKeyboardLayoutW(wide.as_ptr(), KLF_NOTELLSHELL) };
+        if !loaded.is_null() {
+            return Some(loaded);
+        }
+        // SAFETY: querying the calling thread's layout has no preconditions.
+        let current = unsafe { GetKeyboardLayout(0) };
+        let current_id = (current as usize & 0xffff) as u32;
+        (u32::from_str_radix(klid, 16).ok()? & 0xffff == current_id).then_some(current)
+    }
+
+    /// The press and release records Windows produces for `vk` under `chord`,
+    /// or None for dead keys and multi-unit output.
+    fn key_records(
+        layout: HKL,
+        vk: u16,
+        enhanced: bool,
+        chord: Chord,
+    ) -> Option<(
+        crate::input::WindowsKeyRecord,
+        crate::input::WindowsKeyRecord,
+    )> {
+        // SAFETY: pure layout lookup.
+        let scan = unsafe { MapVirtualKeyExW(u32::from(vk), MAPVK_VK_TO_VSC, layout) } as u16;
+        let mut state = [0u8; 256];
+        let mut control_key_state = if enhanced { ENHANCED_KEY } else { 0 };
+        if chord.shift {
+            state[VK_SHIFT] = 0x80;
+            state[VK_LSHIFT] = 0x80;
+            control_key_state |= SHIFT_PRESSED;
+        }
+        if chord.ctrl || chord.alt_gr {
+            state[VK_CONTROL] = 0x80;
+            state[VK_LCONTROL] = 0x80;
+            control_key_state |= LEFT_CTRL_PRESSED;
+        }
+        if chord.left_alt {
+            state[VK_MENU] = 0x80;
+            state[VK_LMENU] = 0x80;
+            control_key_state |= LEFT_ALT_PRESSED;
+        }
+        if chord.alt_gr {
+            state[VK_MENU] = 0x80;
+            state[VK_RMENU] = 0x80;
+            control_key_state |= RIGHT_ALT_PRESSED;
+        }
+        let mut buf = [0u16; 8];
+        // SAFETY: buffers are valid for the given lengths. Flag 0x4 leaves the
+        // kernel dead-key state untouched.
+        let written = unsafe {
+            ToUnicodeEx(
+                u32::from(vk),
+                u32::from(scan),
+                state.as_ptr(),
+                buf.as_mut_ptr(),
+                buf.len() as i32,
+                0x4,
+                layout,
+            )
+        };
+        let unicode = match written {
+            0 => 0,
+            1 => buf[0],
+            _ => return None,
+        };
+        let press = crate::input::WindowsKeyRecord {
+            key_down: true,
+            repeat_count: 1,
+            virtual_key_code: vk,
+            virtual_scan_code: scan,
+            unicode,
+            control_key_state,
+        };
+        Some((
+            press,
+            crate::input::WindowsKeyRecord {
+                key_down: false,
+                ..press
+            },
+        ))
+    }
+
+    fn win32_input_mode(record: crate::input::WindowsKeyRecord) -> Vec<u8> {
+        format!(
+            "\x1b[{};{};{};{};{};{}_",
+            record.virtual_key_code,
+            record.virtual_scan_code,
+            record.unicode,
+            u8::from(record.key_down),
+            record.control_key_state,
+            record.repeat_count
+        )
+        .into_bytes()
+    }
+
+    fn deliver_record(
+        herdr: &mut HerdrPath,
+        input: &mut crate::client::input::windows_vti::TestWindowsInput,
+        record: crate::input::WindowsKeyRecord,
+    ) -> Option<Vec<u8>> {
+        let mut events = input.key(record);
+        events.extend(input.idle());
+        let outcome = herdr.state.handle_client_events(&events);
+        herdr.deliver(vec![outcome])
+    }
+
+    fn run() -> Report {
+        let mut report = Report {
+            by_cell: BTreeMap::new(),
+            failures: Vec::new(),
+            owned: Vec::new(),
+        };
+        for &(layout_name, klid) in LAYOUTS {
+            let Some(layout) = load_layout(klid) else {
+                println!(
+                    "keyboard layout {layout_name} ({klid}) unavailable in this session; skipped"
+                );
+                continue;
+            };
+            let mut herdr = HerdrPath::new(HostProfile::Legacy, b"");
+            let mut input = crate::client::input::windows_vti::TestWindowsInput::default();
+            for (key_name, vk, enhanced) in virtual_keys() {
+                for chord in CHORDS {
+                    let tally = report
+                        .by_cell
+                        .entry(("windows", layout_name, chord.name))
+                        .or_default();
+                    let Some((press, release)) = key_records(layout, vk, enhanced, *chord) else {
+                        tally.host_lossy += 1;
+                        continue;
+                    };
+                    let expected = [win32_input_mode(press), win32_input_mode(release)].concat();
+                    let pressed = deliver_record(&mut herdr, &mut input, press);
+                    let released = deliver_record(&mut herdr, &mut input, release);
+                    let page_key_scrolls_herdr = chord.name == "plain"
+                        && matches!(key_name.as_str(), "pageup" | "pagedown")
+                        && herdr.runtime.plain_page_keys_use_host_scrollback() == Some(true);
+                    let (Some(pressed), Some(released), false) =
+                        (pressed, released, page_key_scrolls_herdr)
+                    else {
+                        tally.herdr_owned += 1;
+                        herdr.reset_client();
+                        input = Default::default();
+                        continue;
+                    };
+                    let actual = [pressed, released].concat();
+                    tally.scored += 1;
+                    if actual == expected {
+                        tally.passed += 1;
+                    } else {
+                        report.failures.push(Failure {
+                            host: "windows",
+                            pane: layout_name,
+                            keystroke: format!(
+                                "{}+{key_name} vk={vk:#x} uc={:#x}",
+                                chord.name, press.unicode
+                            ),
+                            expected,
+                            actual,
+                        });
+                    }
+                }
+            }
+        }
+        report
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn windows_key_record_transparency() {
+        let report = run();
+        print_report(&report);
+        assert!(
+            report.failures.len() <= WINDOWS_RECORD_FAILURES_BASELINE,
+            "windows key record transparency regressed: {} failures > {WINDOWS_RECORD_FAILURES_BASELINE}",
+            report.failures.len()
+        );
+    }
+
+    // Ratchet (may only go down). Remaining: modified keys that produce no
+    // character (Ctrl/AltGr + punctuation, AltGr + Space/PageUp/PageDown) are
+    // dropped instead of forwarded as records.
+    const WINDOWS_RECORD_FAILURES_BASELINE: usize = 57;
 }
