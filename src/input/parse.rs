@@ -114,7 +114,7 @@ fn is_non_latin_script(ch: char) -> bool {
             | 0x0530..=0x058F // Armenian
             | 0x0590..=0x05FF // Hebrew
             | 0x0600..=0x06FF // Arabic
-            | 0x0750..=0x077F // Arabic supplement
+            | 0x0700..=0x07FF // Syriac, Arabic supplement, Thaana, NKo
             | 0x08A0..=0x08FF // Arabic extended-A
             | 0x0900..=0x0DFF // Indic scripts through Sinhala
             | 0x0E00..=0x0EFF // Thai, Lao
@@ -122,8 +122,7 @@ fn is_non_latin_script(ch: char) -> bool {
             | 0x1000..=0x109F // Myanmar
             | 0x10A0..=0x10FF // Georgian
             | 0x1100..=0x11FF // Hangul Jamo
-            | 0x1200..=0x139F // Ethiopic
-            | 0x1780..=0x17FF // Khmer
+            | 0x1200..=0x18FF // Ethiopic, Cherokee, Canadian Syllabics, Khmer, Mongolian
             | 0x1C80..=0x1C8F // Cyrillic extended-C
             | 0x1C90..=0x1CBF // Georgian extended
             | 0x1F00..=0x1FFF // Greek extended
@@ -775,6 +774,13 @@ mod tests {
 
     #[test]
     fn parse_kitty_non_latin_command_chord_resolves_to_base_layout_key() {
+        // Greek, Hebrew, Arabic, Thai, Georgian, Hangul, Cherokee, Canadian
+        // Syllabics, Mongolian.
+        for codepoint in [945, 1513, 1588, 3615, 4304, 12609, 5024, 5121, 6176] {
+            let key = parse_terminal_key_sequence(&format!("\x1b[{codepoint}::97;5u")).unwrap();
+            assert_eq!(key.code, KeyCode::Char('a'), "U+{codepoint:04X}");
+        }
+
         let cases = [
             ("\x1b[1094::119;5u", KeyModifiers::CONTROL, None),
             ("\x1b[1094::119;3u", KeyModifiers::ALT, None),
