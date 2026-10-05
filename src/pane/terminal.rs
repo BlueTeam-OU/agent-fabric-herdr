@@ -5271,6 +5271,10 @@ mod tests {
         assert_eq!(pane.modify_other_keys_level(), 0);
         let encoded = pane.encode_terminal_key(key.clone());
 
+        // An unnegotiated Windows pane gets the native ConPTY record instead.
+        #[cfg(windows)]
+        assert_eq!(encoded, b"\x1b[13;28;13;1;16;1_");
+        #[cfg(not(windows))]
         assert_eq!(encoded, b"\r");
     }
 

@@ -173,14 +173,10 @@ mod tests {
         assert_eq!(tracker.flags, 1);
         assert_eq!(tracker.stack, vec![0]);
         assert_eq!(tracker.modify_other_keys_level(), 1);
-        #[cfg(windows)]
-        {
-            assert!(tracker.modify_other_keys_enabled());
-            tracker.observe(b"\x1b[>1m");
-            assert!(tracker.modify_other_keys_enabled());
-            tracker.observe(b"\x1b[>04n");
-            assert!(!tracker.modify_other_keys_enabled());
-        }
+        tracker.observe(b"\x1b[>1m");
+        assert_eq!(tracker.modify_other_keys_level(), 1);
+        tracker.observe(b"\x1b[>04n");
+        assert_eq!(tracker.modify_other_keys_level(), 0);
     }
 
     #[test]
