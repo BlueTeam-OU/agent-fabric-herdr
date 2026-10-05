@@ -59,10 +59,7 @@ fn parse_kitty_key_sequence(data: &str) -> Option<TerminalKey> {
         // the US-layout key, so resolve the chord here as a US terminal would
         // report it. The layout's shifted character means nothing for that key.
         code = KeyCode::Char(base);
-        shifted_codepoint = shifted_codepoint.and(
-            base.is_ascii_lowercase()
-                .then(|| base.to_ascii_uppercase() as u32),
-        );
+        shifted_codepoint = shifted_codepoint.and(us_shifted_char(base).map(u32::from));
     }
     // Kitty permits the shifted alternate only while Shift is active. Normalize
     // contradictory reports here so they cannot dispatch an unshifted command.
@@ -101,6 +98,35 @@ fn command_chord_base_layout_key(
     base_layout_codepoint
         .and_then(char::from_u32)
         .filter(char::is_ascii_graphic)
+}
+
+fn us_shifted_char(base: char) -> Option<char> {
+    let shifted = match base {
+        'a'..='z' => base.to_ascii_uppercase(),
+        '1' => '!',
+        '2' => '@',
+        '3' => '#',
+        '4' => '$',
+        '5' => '%',
+        '6' => '^',
+        '7' => '&',
+        '8' => '*',
+        '9' => '(',
+        '0' => ')',
+        '`' => '~',
+        '-' => '_',
+        '=' => '+',
+        '[' => '{',
+        ']' => '}',
+        '\\' => '|',
+        ';' => ':',
+        '\'' => '"',
+        ',' => '<',
+        '.' => '>',
+        '/' => '?',
+        _ => return None,
+    };
+    Some(shifted)
 }
 
 fn parse_kitty_associated_text(value: &str) -> Option<String> {
@@ -730,6 +756,25 @@ mod tests {
                 modifiers,
                 crossterm::event::KeyEventKind::Press,
                 shifted,
+            );
+        }
+
+        // Punctuation and digit base keys take the US shifted symbol.
+        let ctrl_shift = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        for (sequence, base, shifted) in [
+            ("\x1b[1093:1061:91;6u", '[', '{'),
+            ("\x1b[1078:1046:59;6u", ';', ':'),
+            ("\x1b[1102:1070:46;6u", '.', '>'),
+            ("\x1b[1105:1025:96;6u", '`', '~'),
+            ("\x1b[1093:1061:50;6u", '2', '@'),
+        ] {
+            let key = parse_terminal_key_sequence(sequence).unwrap();
+            assert_terminal_key_eq(
+                key,
+                KeyCode::Char(base),
+                ctrl_shift,
+                crossterm::event::KeyEventKind::Press,
+                Some(shifted as u32),
             );
         }
     }
