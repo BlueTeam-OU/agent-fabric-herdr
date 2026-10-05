@@ -579,6 +579,7 @@ fn print_report(report: &Report) -> Tally {
 const KEYBOARD_PASSED_BASELINE: usize = 15_203;
 const MOUSE_PASSED_BASELINE: usize = 1_824;
 const SPLIT_IDLE_MISMATCH_BASELINE: usize = 6_730;
+const REPLY_IDLE_MISMATCH_BASELINE: usize = 77;
 
 // ---------------------------------------------------------------------------
 // Mouse
@@ -927,8 +928,37 @@ fn host_input_corpus() -> Vec<(HostProfile, Vec<u8>)> {
     corpus
 }
 
+/// Replies Herdr asks the host for at startup and on focus (colors, palette,
+/// cell size, appearance).
+const HOST_REPLIES: &[&[u8]] = &[
+    b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\",
+    b"\x1b]11;rgb:1e1e/1e1e/2e2e\x07",
+    b"\x1b]11;rgb:1e1e/1e1e/2e2e\x1b\\",
+    b"\x1b]4;1;rgb:cdcd/0000/0000\x1b\\",
+    b"\x1b]4;255;rgb:eeee/eeee/eeee\x07",
+    b"\x1b[6;20;10t",
+    b"\x1b[?997;1n",
+    b"\x1b[?997;2n",
+];
+
 fn framed_events(host: HostProfile, pieces: &[&[u8]], idle_between: bool) -> String {
+    framed_events_with(host, pieces, idle_between, false)
+}
+
+fn framed_events_with(
+    host: HostProfile,
+    pieces: &[&[u8]],
+    idle_between: bool,
+    awaiting_replies: bool,
+) -> String {
     let mut framer = HerdrPath::fresh_framer(host);
+    if awaiting_replies {
+        // Mirrors the Unix client right after it sent its host queries.
+        framer.host_color_query_sent();
+        framer.enable_host_color_scheme_change_tracking();
+        framer.enable_host_appearance_query_on_focus();
+        framer.host_cell_size_query_sent();
+    }
     let mut chunks = Vec::new();
     for piece in pieces {
         chunks.extend(framer.push(piece));
@@ -978,6 +1008,31 @@ fn split_read_robustness() {
             }
         }
     }
+    let mut reply_splits = 0usize;
+    let mut reply_burst_mismatch = Vec::new();
+    let mut reply_idle_mismatch = Vec::new();
+    for reply in HOST_REPLIES {
+        let whole = framed_events_with(HostProfile::Kitty, &[reply], false, true);
+        for cut in 1..reply.len() {
+            reply_splits += 1;
+            let pieces = [&reply[..cut], &reply[cut..]];
+            let line = format!("reply\t{}|{}", show(pieces[0]), show(pieces[1]));
+            if framed_events_with(HostProfile::Kitty, &pieces, false, true) != whole {
+                reply_burst_mismatch.push(line.clone());
+            }
+            if framed_events_with(HostProfile::Kitty, &pieces, true, true) != whole {
+                reply_idle_mismatch.push(line);
+            }
+        }
+    }
+    println!(
+        "\nhost replies: {} replies, {} splits\n  burst (no pause): {} differ\n  pause between:    {} differ",
+        HOST_REPLIES.len(),
+        reply_splits,
+        reply_burst_mismatch.len(),
+        reply_idle_mismatch.len()
+    );
+
     let pct = |bad: usize| 100.0 * (splits - bad) as f64 / splits.max(1) as f64;
     println!(
         "\nsplit reads: {} sequences, {} splits\n  burst (no pause): {:.1}% identical ({} differ)\n  pause between:    {:.1}% identical ({} differ)",
@@ -988,8 +1043,22 @@ fn split_read_robustness() {
         pct(idle_mismatch.len()),
         idle_mismatch.len()
     );
+    if let Ok(path) = std::env::var("HERDR_INPUT_CONFORMANCE_FAILURES") {
+        let lines: Vec<String> = burst_mismatch
+            .iter()
+            .chain(&reply_burst_mismatch)
+            .map(|line| format!("burst\t{line}"))
+            .chain(
+                idle_mismatch
+                    .iter()
+                    .chain(&reply_idle_mismatch)
+                    .map(|line| format!("idle\t{line}")),
+            )
+            .collect();
+        std::fs::write(path, lines.join("\n")).expect("write failures");
+    }
     assert!(
-        burst_mismatch.is_empty(),
+        burst_mismatch.is_empty() && reply_burst_mismatch.is_empty(),
         "split reads without a pause changed the decoded input"
     );
     assert!(
@@ -997,14 +1066,11 @@ fn split_read_robustness() {
         "split-read robustness regressed: {} > {SPLIT_IDLE_MISMATCH_BASELINE}",
         idle_mismatch.len()
     );
-    if let Ok(path) = std::env::var("HERDR_INPUT_CONFORMANCE_FAILURES") {
-        let lines: Vec<String> = burst_mismatch
-            .iter()
-            .map(|line| format!("burst\t{line}"))
-            .chain(idle_mismatch.iter().map(|line| format!("idle\t{line}")))
-            .collect();
-        std::fs::write(path, lines.join("\n")).expect("write failures");
-    }
+    assert!(
+        reply_idle_mismatch.len() <= REPLY_IDLE_MISMATCH_BASELINE,
+        "host-reply split robustness regressed: {} > {REPLY_IDLE_MISMATCH_BASELINE}",
+        reply_idle_mismatch.len()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
