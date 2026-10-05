@@ -1037,6 +1037,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(repo);
     }
 
+    #[test]
+    fn deferred_api_worktree_create_spawn_failure_reports_error_and_clears_pending() {
+        let repo = create_committed_repo("api-worktree-create-spawn-failure-repo");
+        let worktree_root = unique_temp_path("api-worktree-create-spawn-failure-root");
+        let mut app = app_with_parent(&repo);
+        app.state.worktree_directory = worktree_root.clone();
+        let request = Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::WorktreeCreate(WorktreeCreateParams {
+                workspace_id: Some(app.state.workspaces[0].id.clone()),
+                branch: Some("spawn-failure".into()),
+                ..WorktreeCreateParams::default()
+            }),
+        };
+
+        crate::thread_spawn::test_hook::fail_next_spawns(1);
+        let response = run_deferred_api_request(&mut app, request);
+
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "worktree_create_failed");
+        assert!(app.pending_api_worktree_creates.is_empty());
+        assert!(!worktree_root.exists());
+
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
     #[tokio::test]
     async fn deferred_api_worktree_create_completes_after_source_workspace_changes() {
         let event_hub = crate::api::EventHub::default();

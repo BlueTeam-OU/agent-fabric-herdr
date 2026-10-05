@@ -118,7 +118,7 @@ fn start_server_inner(
 
     let running = Arc::new(AtomicBool::new(true));
     let listener_running = Arc::clone(&running);
-    let thread = std::thread::spawn(move || {
+    let thread = crate::thread_spawn::spawn_named("herdr-api-accept", move || {
         run_accept_loop(
             listener.incoming(),
             &listener_running,
@@ -131,7 +131,7 @@ fn start_server_inner(
                 let connection_running = Arc::clone(&listener_running);
                 #[cfg(unix)]
                 let ssh_agents = ssh_agents.clone();
-                std::thread::spawn(move || {
+                spawn_connection_handler(move || {
                     if let Err(err) = handle_connection_with_stop(
                         stream,
                         &api_tx,
@@ -148,7 +148,7 @@ fn start_server_inner(
             },
         );
         debug!("api server thread exiting");
-    });
+    })?;
 
     Ok(ServerHandle {
         _thread: thread,
@@ -156,6 +156,14 @@ fn start_server_inner(
         identity,
         running,
     })
+}
+
+/// Starts one connection's worker. When the OS refuses a thread, only this
+/// connection is dropped; the accept loop keeps serving.
+fn spawn_connection_handler(work: impl FnOnce() + Send + 'static) {
+    if let Err(err) = crate::thread_spawn::spawn_named("herdr-api-conn", work) {
+        warn!(err = %err, "failed to spawn api connection thread; dropping connection");
+    }
 }
 
 fn run_accept_loop<S>(
@@ -214,6 +222,21 @@ mod accept_loop_tests {
         );
 
         assert_eq!(handled, vec![1, 2]);
+    }
+
+    #[test]
+    fn keeps_serving_after_connection_thread_spawn_fails() {
+        let running = AtomicBool::new(true);
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        crate::thread_spawn::test_hook::fail_next_spawns(1);
+        run_accept_loop([Ok(1), Ok(2)], &running, Duration::ZERO, |stream| {
+            let tx = tx.clone();
+            spawn_connection_handler(move || tx.send(stream).unwrap());
+        });
+        drop(tx);
+
+        assert_eq!(rx.iter().collect::<Vec<_>>(), vec![2]);
     }
 
     #[test]

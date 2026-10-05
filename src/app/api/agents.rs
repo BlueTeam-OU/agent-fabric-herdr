@@ -89,7 +89,9 @@ impl App {
         };
         match self.queue_agent_prompt(request.id, params) {
             Ok((id, agent, completion)) => {
-                std::thread::spawn(move || {
+                let spawn_error_response = respond_to.clone();
+                let request_id = id.clone();
+                let spawned = crate::thread_spawn::spawn_named("herdr-agent-prompt", move || {
                     let response = match completion.recv() {
                         Ok(Ok(())) => encode_success(id, ResponseResult::AgentPrompted { agent }),
                         Ok(Err(err)) if err.kind() == std::io::ErrorKind::TimedOut => {
@@ -100,6 +102,14 @@ impl App {
                     };
                     let _ = respond_to.send(response);
                 });
+                // The prompt is already queued; only its completion report is lost.
+                if let Err(err) = spawned {
+                    let _ = spawn_error_response.send(encode_error(
+                        request_id,
+                        "agent_prompt_failed",
+                        format!("could not wait for prompt completion: {err}"),
+                    ));
+                }
             }
             Err(response) => {
                 let _ = respond_to.send(response);

@@ -4,6 +4,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+use tracing::warn;
+
 use super::{App, GIT_REMOTE_STATUS_REFRESH_INTERVAL, GIT_REPO_DISCOVERY_REFRESH_INTERVAL};
 use crate::events::AppEvent;
 use crate::workspace::{GitStatusCacheEntry, GitStatusRefreshDemand, WorkspaceGitStatus};
@@ -58,16 +60,18 @@ impl App {
         self.start_git_status_refresh_if_due(now);
     }
 
-    fn start_restored_worktree_validation(&self) {
+    fn start_restored_worktree_validation(&mut self) {
         let jobs = Arc::new(self.pending_restored_worktree_spaces.clone());
         let next = Arc::new(AtomicUsize::new(0));
+        let worker_count = jobs.len().min(4);
+        let mut started = 0;
         // These one-shot checks are independent of the optional Git cache. A
         // stalled checkout keeps its slot; never retry it on each refresh tick.
-        for _ in 0..jobs.len().min(4) {
+        for _ in 0..worker_count {
             let jobs = Arc::clone(&jobs);
             let next = Arc::clone(&next);
             let event_tx = self.event_tx.clone();
-            std::thread::spawn(move || {
+            let spawned = crate::thread_spawn::spawn_named("herdr-worktree-check", move || {
                 while let Some((workspace_id, expected)) =
                     jobs.get(next.fetch_add(1, Ordering::Relaxed))
                 {
@@ -86,6 +90,17 @@ impl App {
                     }
                 }
             });
+            match spawned {
+                Ok(_) => started += 1,
+                Err(err) => {
+                    warn!(err = %err, "failed to spawn restored worktree check thread");
+                }
+            }
+        }
+        // Any started worker drains the shared queue. With none, keep the
+        // restored membership as-is rather than blocking worktree actions forever.
+        if worker_count > 0 && started == 0 {
+            self.pending_restored_worktree_spaces.clear();
         }
     }
 
@@ -109,18 +124,13 @@ impl App {
             return;
         }
 
-        self.git_refresh_in_flight = true;
         let event_tx = self.event_tx.clone();
         let cache = self.git_status_cache.clone();
         let mut demand = self.git_refresh_demand();
         if self.git_identity_refresh_requested {
             demand.branch = true;
         }
-        self.git_identity_refresh_requested = false;
-        if refresh_repo_discovery {
-            self.last_git_repo_discovery_refresh = now;
-        }
-        std::thread::spawn(move || {
+        let spawned = crate::thread_spawn::spawn_named("herdr-git-refresh", move || {
             let output =
                 refresh_workspace_git_statuses_with_cache_and_demand(workspaces, &cache, demand);
             let _ = event_tx.blocking_send(AppEvent::GitStatusRefreshed {
@@ -128,6 +138,17 @@ impl App {
                 cache_updates: output.cache_updates,
             });
         });
+        if let Err(err) = spawned {
+            // Keep the pending requests and retry after the normal interval.
+            warn!(err = %err, "failed to spawn git refresh thread; retrying later");
+            self.last_git_remote_status_refresh = now;
+            return;
+        }
+        self.git_refresh_in_flight = true;
+        self.git_identity_refresh_requested = false;
+        if refresh_repo_discovery {
+            self.last_git_repo_discovery_refresh = now;
+        }
     }
 
     pub(crate) fn request_git_identity_refresh(&mut self, now: Instant) {
@@ -413,6 +434,54 @@ mod tests {
         let jobs = deduplicate_git_refresh_items(items, &HashMap::from([(cache_key, cached)]));
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].cached, None);
+    }
+
+    #[test]
+    fn failed_git_refresh_spawn_retries_after_interval() {
+        let mut config = crate::config::Config::default();
+        config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
+        let mut app = test_app(&config);
+        app.state.workspaces.push(Workspace::test_new("test"));
+        let now = Instant::now();
+        app.request_git_identity_refresh(now);
+
+        crate::thread_spawn::test_hook::fail_next_spawns(1);
+        app.start_git_status_refresh_if_due(now);
+
+        assert!(!app.git_refresh_in_flight);
+        assert!(app.git_identity_refresh_requested);
+        assert_eq!(
+            app.git_refresh_deadline(),
+            Some(now + GIT_REMOTE_STATUS_REFRESH_INTERVAL)
+        );
+
+        let retry_at = now + GIT_REMOTE_STATUS_REFRESH_INTERVAL;
+        app.start_git_status_refresh_if_due(retry_at);
+        assert!(app.git_refresh_in_flight);
+        assert!(!app.git_identity_refresh_requested);
+    }
+
+    #[test]
+    fn failed_restored_worktree_check_spawns_release_pending_spaces() {
+        let mut app = test_app(&crate::config::Config::default());
+        let mut workspace = Workspace::test_new("restored");
+        let membership = crate::workspace::WorktreeSpaceMembership {
+            key: "repo".into(),
+            label: "repo".into(),
+            repo_root: "/nonexistent/repo".into(),
+            checkout_path: "/nonexistent/repo".into(),
+            is_linked_worktree: false,
+        };
+        workspace.worktree_space = Some(membership.clone());
+        app.pending_restored_worktree_spaces
+            .push((workspace.id.clone(), membership.clone()));
+        app.state.workspaces.push(workspace);
+
+        crate::thread_spawn::test_hook::fail_next_spawns(1);
+        app.start_restored_worktree_validation();
+
+        assert!(app.pending_restored_worktree_spaces.is_empty());
+        assert_eq!(app.state.workspaces[0].worktree_space, Some(membership));
     }
 
     #[test]

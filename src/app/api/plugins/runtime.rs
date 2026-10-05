@@ -115,12 +115,10 @@ impl App {
             stderr: None,
             error: None,
         };
-        self.push_plugin_command_log(log.clone());
-        self.state.plugin_commands_in_flight += 1;
         let event_tx = self.event_tx.clone();
         let installation_lease =
             crate::plugin_installations::command_lease(&self.plugin_installation_leases, plugin);
-        std::thread::spawn(move || {
+        let spawned = crate::thread_spawn::spawn_named("herdr-plugin-command", move || {
             // The worker may outlive App during normal server teardown.
             let _installation_lease = installation_lease;
             let child =
@@ -133,15 +131,18 @@ impl App {
                 Ok(mut child) => {
                     let stdout = child.stdout.take();
                     let stderr = child.stderr.take();
-                    let stdout_reader = stdout.map(|stdout| {
-                        std::thread::spawn(move || {
+                    // Without a reader the pipe is closed, so the child cannot block on it.
+                    let stdout_reader = stdout.and_then(|stdout| {
+                        crate::thread_spawn::spawn_named("herdr-plugin-stdout", move || {
                             read_capped_plugin_output(stdout, PLUGIN_COMMAND_OUTPUT_MAX_BYTES)
                         })
+                        .ok()
                     });
-                    let stderr_reader = stderr.map(|stderr| {
-                        std::thread::spawn(move || {
+                    let stderr_reader = stderr.and_then(|stderr| {
+                        crate::thread_spawn::spawn_named("herdr-plugin-stderr", move || {
                             read_capped_plugin_output(stderr, PLUGIN_COMMAND_OUTPUT_MAX_BYTES)
                         })
+                        .ok()
                     });
                     match child.wait() {
                         Ok(status) => crate::events::AppEvent::PluginCommandFinished {
@@ -181,6 +182,21 @@ impl App {
             };
             let _ = event_tx.blocking_send(finished);
         });
+        if let Err(err) = spawned {
+            tracing::warn!(err = %err, "failed to spawn plugin command thread");
+            let log = PluginCommandLogInfo {
+                status: PluginCommandStatus::Failed,
+                finished_unix_ms: Some(current_unix_ms()),
+                stdout: Some(String::new()),
+                stderr: Some(String::new()),
+                error: Some(format!("could not start plugin command: {err}")),
+                ..log
+            };
+            self.push_plugin_command_log(log.clone());
+            return Ok(log);
+        }
+        self.push_plugin_command_log(log.clone());
+        self.state.plugin_commands_in_flight += 1;
         Ok(log)
     }
 
