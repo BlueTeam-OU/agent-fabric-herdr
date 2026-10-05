@@ -397,6 +397,18 @@ impl ClientPaneInputEvent {
 
 #[cfg(any(windows, test))]
 fn vt_shifted_codepoint(bytes: &[u8], key: &crate::input::TerminalKey) -> Option<u32> {
+    // Only shifted kitty character reports (`ESC[cp:shifted...u`) carry an alternate.
+    let has_alternate_field = matches!(key.code, crossterm::event::KeyCode::Char(_))
+        && key
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::SHIFT)
+        && bytes.ends_with(b"u")
+        && bytes
+            .strip_prefix(b"\x1b[")
+            .is_some_and(|body| body.iter().take_while(|&&b| b != b';').any(|&b| b == b':'));
+    if !has_alternate_field {
+        return None;
+    }
     let parsed = crate::input::parse_terminal_key_sequence(std::str::from_utf8(bytes).ok()?)?;
     (parsed.code == key.code && parsed.modifiers == key.modifiers)
         .then_some(parsed.shifted_codepoint)
@@ -2292,6 +2304,35 @@ mod tests {
             output.extend(bytes);
         }
         assert_eq!(output, b"~", "dead key must not insert its base character");
+    }
+
+    #[test]
+    fn vt_shifted_codepoint_only_reads_shifted_kitty_alternates() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let key = |code, modifiers| crate::input::TerminalKey::new(code, modifiers);
+        let ctrl_shift = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+
+        assert_eq!(
+            vt_shifted_codepoint(b"\x1b[91:123;6u", &key(KeyCode::Char('['), ctrl_shift)),
+            Some('{' as u32)
+        );
+        // No Shift, no alternate field, or not a kitty key report: skipped.
+        for (bytes, code, modifiers) in [
+            (
+                b"\x1b[91:123;6u".as_slice(),
+                KeyCode::Char('['),
+                KeyModifiers::CONTROL,
+            ),
+            (b"\x1b[91;6u".as_slice(), KeyCode::Char('['), ctrl_shift),
+            (b"\x1b[1;2A".as_slice(), KeyCode::Up, KeyModifiers::SHIFT),
+            (b"A".as_slice(), KeyCode::Char('A'), KeyModifiers::SHIFT),
+        ] {
+            assert_eq!(
+                vt_shifted_codepoint(bytes, &key(code, modifiers)),
+                None,
+                "{bytes:?}"
+            );
+        }
     }
 
     #[test]
