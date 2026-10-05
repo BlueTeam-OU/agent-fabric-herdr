@@ -396,6 +396,14 @@ impl ClientPaneInputEvent {
 }
 
 #[cfg(any(windows, test))]
+fn vt_shifted_codepoint(bytes: &[u8], key: &crate::input::TerminalKey) -> Option<u32> {
+    let parsed = crate::input::parse_terminal_key_sequence(std::str::from_utf8(bytes).ok()?)?;
+    (parsed.code == key.code && parsed.modifiers == key.modifiers)
+        .then_some(parsed.shifted_codepoint)
+        .flatten()
+}
+
+#[cfg(any(windows, test))]
 impl ClientInputEvent {
     pub(crate) fn from_crossterm(event: crossterm::event::Event) -> Option<Self> {
         match event {
@@ -437,7 +445,14 @@ impl ClientInputEvent {
                 .with_generated_text(generated_text.clone());
                 key = match source {
                     ClientKeySource::Synthesized => key,
-                    ClientKeySource::Vt { bytes } => key.with_vt_bytes(bytes.clone()),
+                    ClientKeySource::Vt { bytes } => {
+                        // The codec has no shifted-alternate field, but the VT source
+                        // still carries it; recover it for shifted keybind matching.
+                        if let Some(shifted) = vt_shifted_codepoint(bytes, &key) {
+                            key = key.with_shifted_codepoint(shifted);
+                        }
+                        key.with_vt_bytes(bytes.clone())
+                    }
                     ClientKeySource::WindowsConsole { record } => key.with_windows_record(*record),
                 };
                 key = key
