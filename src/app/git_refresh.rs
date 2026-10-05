@@ -123,6 +123,7 @@ impl App {
         if workspaces.is_empty() {
             self.last_git_remote_status_refresh = now;
             self.git_identity_refresh_requested = false;
+            self.git_refresh_spawn_retry_pending = false;
             return;
         }
 
@@ -144,8 +145,10 @@ impl App {
             // Keep the pending requests and retry after the normal interval.
             warn!(err = %err, "failed to spawn git refresh thread; retrying later");
             self.last_git_remote_status_refresh = now;
+            self.git_refresh_spawn_retry_pending = true;
             return;
         }
+        self.git_refresh_spawn_retry_pending = false;
         self.git_refresh_in_flight = true;
         self.git_identity_refresh_requested = false;
         if refresh_repo_discovery {
