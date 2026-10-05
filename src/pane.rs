@@ -106,7 +106,12 @@ fn apply_pane_terminal_env(cmd: &mut CommandBuilder) {
     cmd.env("TERM_PROGRAM_VERSION", crate::build_info::version());
     // fish only skips its own resize repaint for terminals it recognizes as
     // reflowing. Herdr reflows too, and the competing repaint glues prompt copies.
-    if cmd.get_env(FISH_HANDLE_REFLOW_ENV_VAR).is_none() {
+    // Match the exact casing: Windows env keys are case-insensitive here, but
+    // MSYS/Cygwin fish only reads the lowercase name.
+    if !cmd
+        .iter_full_env_as_str()
+        .any(|(key, _)| key == FISH_HANDLE_REFLOW_ENV_VAR)
+    {
         cmd.env(FISH_HANDLE_REFLOW_ENV_VAR, "0");
     }
     // Host handles refer to the outer terminal, never to this pane.
@@ -4203,16 +4208,30 @@ mod tests {
     }
 
     #[test]
-    fn pane_terminal_env_keeps_user_fish_handle_reflow() {
-        let mut inherited = CommandBuilder::new("shell");
-        inherited.env(FISH_HANDLE_REFLOW_ENV_VAR, "1");
-        apply_pane_terminal_env(&mut inherited);
-        apply_pane_launch_env(&mut inherited, &PaneLaunchEnv::default());
+    fn pane_terminal_env_keeps_existing_fish_handle_reflow_entry() {
+        let mut cmd = CommandBuilder::new("shell");
+        cmd.env(FISH_HANDLE_REFLOW_ENV_VAR, "1");
+        apply_pane_terminal_env(&mut cmd);
+        apply_pane_launch_env(&mut cmd, &PaneLaunchEnv::default());
         assert_eq!(
-            inherited.get_env(FISH_HANDLE_REFLOW_ENV_VAR),
+            cmd.get_env(FISH_HANDLE_REFLOW_ENV_VAR),
             Some(OsStr::new("1"))
         );
+    }
 
+    #[test]
+    fn pane_terminal_env_sets_lowercase_fish_handle_reflow_beside_other_casing() {
+        let mut cmd = CommandBuilder::new("shell");
+        cmd.env_remove(FISH_HANDLE_REFLOW_ENV_VAR);
+        cmd.env("FISH_HANDLE_REFLOW", "1");
+        apply_pane_terminal_env(&mut cmd);
+        assert!(cmd
+            .iter_full_env_as_str()
+            .any(|entry| entry == (FISH_HANDLE_REFLOW_ENV_VAR, "0")));
+    }
+
+    #[test]
+    fn pane_launch_env_explicit_fish_handle_reflow_wins() {
         let mut explicit = CommandBuilder::new("shell");
         explicit.env_remove(FISH_HANDLE_REFLOW_ENV_VAR);
         apply_pane_terminal_env(&mut explicit);
@@ -6362,6 +6381,57 @@ mod tests {
         )
         .await
         .expect("re-entering active authority should notify detection reset");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawned_pane_process_sees_fish_handle_reflow() {
+        let output_path = std::env::temp_dir().join(format!(
+            "herdr-fish-handle-reflow-test-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let (events, _event_rx) = mpsc::channel(8);
+        let runtime = PaneRuntime::spawn_shell_command(
+            PaneId::from_raw(42),
+            24,
+            80,
+            std::env::temp_dir(),
+            &format!(
+                "printf '%s\\n' \"$fish_handle_reflow\" > '{}'",
+                output_path.display()
+            ),
+            &PaneLaunchEnv::default(),
+            AgentDetection::Disabled,
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        )
+        .unwrap();
+
+        let output = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(output) = std::fs::read_to_string(&output_path) {
+                    if output.ends_with('\n') {
+                        break output;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("pane process should write its env");
+        runtime.shutdown();
+        let _ = std::fs::remove_file(&output_path);
+
+        let expected = std::env::var(FISH_HANDLE_REFLOW_ENV_VAR).unwrap_or_else(|_| "0".into());
+        assert_eq!(output, format!("{expected}\n"));
     }
 
     #[cfg(unix)]
