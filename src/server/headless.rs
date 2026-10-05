@@ -3242,6 +3242,14 @@ impl HeadlessServer {
             }
         }
 
+        if self
+            .app
+            .restored_worktree_validation_retry_at
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.app.start_restored_worktree_validation(now);
+        }
+
         if self.has_app_client() {
             self.app.start_git_status_refresh_if_due(now);
         }

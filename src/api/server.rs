@@ -118,7 +118,7 @@ fn start_server_inner(
 
     let running = Arc::new(AtomicBool::new(true));
     let listener_running = Arc::clone(&running);
-    let thread = crate::thread_spawn::spawn_named("herdr-api-accept", move || {
+    let spawned = crate::thread_spawn::spawn_named("herdr-api-accept", move || {
         run_accept_loop(
             listener.incoming(),
             &listener_running,
@@ -148,7 +148,15 @@ fn start_server_inner(
             },
         );
         debug!("api server thread exiting");
-    })?;
+    });
+    let thread = match spawned {
+        Ok(thread) => thread,
+        Err(err) => {
+            // No ServerHandle owns the socket yet, so its Drop cleanup won't run.
+            let _ = remove_socket_file_if_owned(&path, &identity);
+            return Err(err);
+        }
+    };
 
     Ok(ServerHandle {
         _thread: thread,
@@ -1278,6 +1286,24 @@ mod tests {
             }
         });
         (api_tx, responder)
+    }
+
+    #[test]
+    fn api_accept_thread_spawn_failure_removes_bound_socket() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = unique_test_path("api-accept-spawn-failure");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("herdr.sock");
+        std::env::set_var(crate::api::SOCKET_PATH_ENV_VAR, &path);
+        let (api_tx, _api_rx) = mpsc::unbounded_channel();
+
+        crate::thread_spawn::test_hook::fail_next_spawns(1);
+        let result = start_server_inner(api_tx, EventHub::default(), None, None);
+        std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
+
+        assert!(result.is_err());
+        assert!(!path.exists(), "bound socket must be removed");
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

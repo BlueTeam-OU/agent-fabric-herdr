@@ -128,49 +128,7 @@ impl App {
                     .stderr(Stdio::piped())
                     .spawn();
             let finished = match child {
-                Ok(mut child) => {
-                    let stdout = child.stdout.take();
-                    let stderr = child.stderr.take();
-                    // Without a reader the pipe is closed, so the child cannot block on it.
-                    let stdout_reader = stdout.and_then(|stdout| {
-                        crate::thread_spawn::spawn_named("herdr-plugin-stdout", move || {
-                            read_capped_plugin_output(stdout, PLUGIN_COMMAND_OUTPUT_MAX_BYTES)
-                        })
-                        .ok()
-                    });
-                    let stderr_reader = stderr.and_then(|stderr| {
-                        crate::thread_spawn::spawn_named("herdr-plugin-stderr", move || {
-                            read_capped_plugin_output(stderr, PLUGIN_COMMAND_OUTPUT_MAX_BYTES)
-                        })
-                        .ok()
-                    });
-                    match child.wait() {
-                        Ok(status) => crate::events::AppEvent::PluginCommandFinished {
-                            log_id,
-                            finished_unix_ms: current_unix_ms(),
-                            exit_code: status.code(),
-                            stdout: stdout_reader
-                                .and_then(|reader| reader.join().ok())
-                                .unwrap_or_default(),
-                            stderr: stderr_reader
-                                .and_then(|reader| reader.join().ok())
-                                .unwrap_or_default(),
-                            error: None,
-                        },
-                        Err(err) => crate::events::AppEvent::PluginCommandFinished {
-                            log_id,
-                            finished_unix_ms: current_unix_ms(),
-                            exit_code: None,
-                            stdout: stdout_reader
-                                .and_then(|reader| reader.join().ok())
-                                .unwrap_or_default(),
-                            stderr: stderr_reader
-                                .and_then(|reader| reader.join().ok())
-                                .unwrap_or_default(),
-                            error: Some(err.to_string()),
-                        },
-                    }
-                }
+                Ok(child) => finish_plugin_child(log_id, child),
                 Err(err) => crate::events::AppEvent::PluginCommandFinished {
                     log_id,
                     finished_unix_ms: current_unix_ms(),
@@ -301,6 +259,71 @@ impl App {
     }
 }
 
+type PluginOutputReader = std::thread::JoinHandle<String>;
+
+fn finish_plugin_child(log_id: String, mut child: std::process::Child) -> crate::events::AppEvent {
+    let (stdout_reader, stderr_reader) =
+        match spawn_plugin_output_readers(child.stdout.take(), child.stderr.take()) {
+            Ok(readers) => readers,
+            Err(err) => {
+                // A missing reader would leave the plugin writing into a closed
+                // pipe, so stop it rather than report a misleading result.
+                tracing::warn!(err = %err, "failed to spawn plugin output reader");
+                let _ = child.kill();
+                let _ = child.wait();
+                return crate::events::AppEvent::PluginCommandFinished {
+                    log_id,
+                    finished_unix_ms: current_unix_ms(),
+                    exit_code: None,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    error: Some(format!("could not start output reader: {err}")),
+                };
+            }
+        };
+    let wait = child.wait();
+    let join = |reader: Option<PluginOutputReader>| {
+        reader
+            .and_then(|reader| reader.join().ok())
+            .unwrap_or_default()
+    };
+    let stdout = join(stdout_reader);
+    let stderr = join(stderr_reader);
+    let (exit_code, error) = match wait {
+        Ok(status) => (status.code(), None),
+        Err(err) => (None, Some(err.to_string())),
+    };
+    crate::events::AppEvent::PluginCommandFinished {
+        log_id,
+        finished_unix_ms: current_unix_ms(),
+        exit_code,
+        stdout,
+        stderr,
+        error,
+    }
+}
+
+fn spawn_plugin_output_readers(
+    stdout: Option<std::process::ChildStdout>,
+    stderr: Option<std::process::ChildStderr>,
+) -> std::io::Result<(Option<PluginOutputReader>, Option<PluginOutputReader>)> {
+    let stdout = stdout
+        .map(|stdout| {
+            crate::thread_spawn::spawn_named("herdr-plugin-stdout", move || {
+                read_capped_plugin_output(stdout, PLUGIN_COMMAND_OUTPUT_MAX_BYTES)
+            })
+        })
+        .transpose()?;
+    let stderr = stderr
+        .map(|stderr| {
+            crate::thread_spawn::spawn_named("herdr-plugin-stderr", move || {
+                read_capped_plugin_output(stderr, PLUGIN_COMMAND_OUTPUT_MAX_BYTES)
+            })
+        })
+        .transpose()?;
+    Ok((stdout, stderr))
+}
+
 fn current_unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -335,4 +358,33 @@ pub(super) fn read_capped_plugin_output(mut reader: impl Read, cap: usize) -> St
         ));
     }
     output
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_output_reader_spawn_failure_stops_the_command() {
+        let child = std::process::Command::new("sh")
+            .args(["-c", "sleep 30"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let started = std::time::Instant::now();
+
+        crate::thread_spawn::test_hook::fail_next_spawns(1);
+        let finished = finish_plugin_child("log".into(), child);
+
+        let crate::events::AppEvent::PluginCommandFinished {
+            exit_code, error, ..
+        } = finished
+        else {
+            panic!("expected plugin command result");
+        };
+        assert_eq!(exit_code, None);
+        assert!(error.is_some_and(|error| error.starts_with("could not start output reader")));
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    }
 }

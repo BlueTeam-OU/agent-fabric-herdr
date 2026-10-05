@@ -228,8 +228,17 @@ impl App {
     /// so pending-operation and runtime cleanup stay in one place.
     fn queue_worktree_spawn_failure(&self, finished: AppEvent) {
         tracing::warn!("failed to spawn worktree operation thread");
-        if let Err(err) = self.event_tx.try_send(finished) {
-            tracing::error!(err = %err, "could not report failed worktree operation");
+        match self.event_tx.try_send(finished) {
+            Ok(()) => {}
+            // The event loop drains this channel, so wait for room on a task
+            // instead of dropping the only completion for this request.
+            Err(tokio::sync::mpsc::error::TrySendError::Full(finished)) => {
+                let event_tx = self.event_tx.clone();
+                tokio::spawn(async move {
+                    let _ = event_tx.send(finished).await;
+                });
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
         }
     }
 
