@@ -282,6 +282,9 @@ fn finish_plugin_child(log_id: String, mut child: std::process::Child) -> crate:
             }
         };
     let wait = child.wait();
+    // Descendants can hold the pipes open after the command exits; the run
+    // ends when the command does, not when its output closes.
+    let finished_unix_ms = current_unix_ms();
     let join = |reader: Option<PluginOutputReader>| {
         reader
             .and_then(|reader| reader.join().ok())
@@ -295,7 +298,7 @@ fn finish_plugin_child(log_id: String, mut child: std::process::Child) -> crate:
     };
     crate::events::AppEvent::PluginCommandFinished {
         log_id,
-        finished_unix_ms: current_unix_ms(),
+        finished_unix_ms,
         exit_code,
         stdout,
         stderr,
@@ -386,5 +389,55 @@ mod tests {
         assert_eq!(exit_code, None);
         assert!(error.is_some_and(|error| error.starts_with("could not start output reader")));
         assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn plugin_second_output_reader_spawn_failure_stops_the_command() {
+        let child = std::process::Command::new("sh")
+            .args(["-c", "sleep 30"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let started = std::time::Instant::now();
+
+        crate::thread_spawn::test_hook::fail_spawns_after(1, 1);
+        let finished = finish_plugin_child("log".into(), child);
+
+        let crate::events::AppEvent::PluginCommandFinished {
+            exit_code, error, ..
+        } = finished
+        else {
+            panic!("expected plugin command result");
+        };
+        assert_eq!(exit_code, None);
+        assert!(error.is_some_and(|error| error.starts_with("could not start output reader")));
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn plugin_finish_time_is_taken_when_the_command_exits() {
+        // The background sleep keeps both pipes open after `sh` exits.
+        let child = std::process::Command::new("sh")
+            .args(["-c", "sleep 2 &"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let started_unix_ms = current_unix_ms();
+
+        let finished = finish_plugin_child("log".into(), child);
+
+        let crate::events::AppEvent::PluginCommandFinished {
+            finished_unix_ms,
+            exit_code,
+            ..
+        } = finished
+        else {
+            panic!("expected plugin command result");
+        };
+        assert_eq!(exit_code, Some(0));
+        assert!(current_unix_ms() - started_unix_ms >= 1500);
+        assert!(finished_unix_ms - started_unix_ms < 1500);
     }
 }
