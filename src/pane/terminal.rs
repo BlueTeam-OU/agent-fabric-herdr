@@ -637,12 +637,8 @@ impl PaneTerminal {
             .filter(|ansi| !ansi.is_empty())
     }
 
-    pub fn encode_terminal_key(
-        &self,
-        key: crate::input::TerminalKey,
-        protocol: crate::input::KeyboardProtocol,
-    ) -> Vec<u8> {
-        self.ghostty.encode_terminal_key(key, protocol)
+    pub fn encode_terminal_key(&self, key: crate::input::TerminalKey) -> Vec<u8> {
+        self.ghostty.encode_terminal_key(key)
     }
 
     pub(crate) fn encode_mouse_button(
@@ -2027,12 +2023,7 @@ impl GhosttyPaneTerminal {
             .unwrap_or((true, 0))
     }
 
-    pub fn encode_terminal_key(
-        &self,
-        key: crate::input::TerminalKey,
-        // Unused: libghostty reads the live modes.
-        _protocol: crate::input::KeyboardProtocol,
-    ) -> Vec<u8> {
+    pub fn encode_terminal_key(&self, key: crate::input::TerminalKey) -> Vec<u8> {
         #[cfg(windows)]
         if self
             .core
@@ -4705,13 +4696,10 @@ mod tests {
         let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
 
-        let encoded = pane.encode_terminal_key(
-            crate::input::TerminalKey::new(
-                crossterm::event::KeyCode::Char('a'),
-                crossterm::event::KeyModifiers::empty(),
-            ),
-            crate::input::KeyboardProtocol::Legacy,
-        );
+        let encoded = pane.encode_terminal_key(crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Char('a'),
+            crossterm::event::KeyModifiers::empty(),
+        ));
 
         assert_eq!(encoded, b"a");
     }
@@ -4728,16 +4716,15 @@ mod tests {
                 terminal.write(format!("\x1b[>{flags}u").as_bytes());
             }
             let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
-            let protocol = pane.keyboard_protocol().unwrap();
 
             for modifiers in [
                 crossterm::event::KeyModifiers::empty(),
                 crossterm::event::KeyModifiers::SHIFT,
             ] {
-                let encoded = pane.encode_terminal_key(
-                    crate::input::TerminalKey::new(crossterm::event::KeyCode::BackTab, modifiers),
-                    protocol,
-                );
+                let encoded = pane.encode_terminal_key(crate::input::TerminalKey::new(
+                    crossterm::event::KeyCode::BackTab,
+                    modifiers,
+                ));
                 assert_eq!(encoded, expected, "backtab with modifiers {modifiers:?}");
             }
         }
@@ -4745,13 +4732,10 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
-        let encoded = pane.encode_terminal_key(
-            crate::input::TerminalKey::new(
-                crossterm::event::KeyCode::Tab,
-                crossterm::event::KeyModifiers::empty(),
-            ),
-            crate::input::KeyboardProtocol::Legacy,
-        );
+        let encoded = pane.encode_terminal_key(crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Tab,
+            crossterm::event::KeyModifiers::empty(),
+        ));
         assert_eq!(encoded, b"\t");
     }
 
@@ -4765,18 +4749,12 @@ mod tests {
             crossterm::event::KeyModifiers::CONTROL,
         );
 
-        assert_eq!(
-            legacy.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy),
-            b"\t"
-        );
+        assert_eq!(legacy.encode_terminal_key(key.clone()), b"\t");
 
         let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         terminal.write(b"\x1b[>3u");
         let kitty = GhosttyPaneTerminal::new(terminal, tx).unwrap();
-        assert_eq!(
-            kitty.encode_terminal_key(key, crate::input::KeyboardProtocol::Kitty { flags: 3 }),
-            b"\x1b[9;5u"
-        );
+        assert_eq!(kitty.encode_terminal_key(key), b"\x1b[9;5u");
     }
 
     #[cfg(unix)]
@@ -4787,7 +4765,6 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
-        let protocol = crate::input::KeyboardProtocol::Legacy;
 
         for modifiers in [
             KeyModifiers::empty(),
@@ -4807,18 +4784,18 @@ mod tests {
             };
             for kind in [KeyEventKind::Press, KeyEventKind::Repeat] {
                 assert_eq!(
-                    pane.encode_terminal_key(key.clone().with_kind(kind), protocol),
+                    pane.encode_terminal_key(key.clone().with_kind(kind)),
                     expected,
                     "{modifiers:?} {kind:?}"
                 );
             }
             assert_eq!(
-                pane.encode_terminal_key(key.clone().with_repeat_count(3), protocol),
+                pane.encode_terminal_key(key.clone().with_repeat_count(3)),
                 expected.repeat(3),
                 "{modifiers:?} grouped repeat"
             );
             assert!(
-                pane.encode_terminal_key(key.with_kind(KeyEventKind::Release), protocol)
+                pane.encode_terminal_key(key.with_kind(KeyEventKind::Release))
                     .is_empty(),
                 "{modifiers:?} release"
             );
@@ -4874,7 +4851,7 @@ mod tests {
             {
                 let key = crate::input::TerminalKey::new(KeyCode::Enter, modifiers);
                 assert_eq!(
-                    pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy),
+                    pane.encode_terminal_key(key),
                     expected.as_bytes(),
                     "{modifiers:?} after {sequence:?}"
                 );
@@ -4893,10 +4870,7 @@ mod tests {
             crossterm::event::KeyModifiers::SHIFT,
         );
 
-        assert_eq!(
-            pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy),
-            b"\x1b[27;2;13~"
-        );
+        assert_eq!(pane.encode_terminal_key(key), b"\x1b[27;2;13~");
     }
 
     #[test]
@@ -4909,14 +4883,13 @@ mod tests {
             crossterm::event::KeyCode::Enter,
             crossterm::event::KeyCode::Backspace,
         ] {
-            let press = pane.encode_terminal_key(
-                crate::input::TerminalKey::new(code, crossterm::event::KeyModifiers::empty()),
-                crate::input::KeyboardProtocol::Legacy,
-            );
+            let press = pane.encode_terminal_key(crate::input::TerminalKey::new(
+                code,
+                crossterm::event::KeyModifiers::empty(),
+            ));
             let release = pane.encode_terminal_key(
                 crate::input::TerminalKey::new(code, crossterm::event::KeyModifiers::empty())
                     .with_kind(crossterm::event::KeyEventKind::Release),
-                crate::input::KeyboardProtocol::Legacy,
             );
             assert!(!press.is_empty(), "{code:?} press should emit bytes");
             assert!(
@@ -4938,10 +4911,10 @@ mod tests {
             (crossterm::event::KeyCode::Enter, b"\r".as_slice()),
             (crossterm::event::KeyCode::Backspace, b"\x7f".as_slice()),
         ] {
-            let press = pane.encode_terminal_key(
-                crate::input::TerminalKey::new(code, crossterm::event::KeyModifiers::empty()),
-                pane.keyboard_protocol().unwrap(),
-            );
+            let press = pane.encode_terminal_key(crate::input::TerminalKey::new(
+                code,
+                crossterm::event::KeyModifiers::empty(),
+            ));
             assert_eq!(
                 press, expected,
                 "{code:?} press should stay legacy-compatible without REPORT_ALL_KEYS"
@@ -4950,7 +4923,6 @@ mod tests {
             let release = pane.encode_terminal_key(
                 crate::input::TerminalKey::new(code, crossterm::event::KeyModifiers::empty())
                     .with_kind(crossterm::event::KeyEventKind::Release),
-                pane.keyboard_protocol().unwrap(),
             );
             assert!(
                 release.is_empty(),
@@ -4966,13 +4938,10 @@ mod tests {
         terminal.write(b"\x1b[>1u");
         let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
 
-        let encoded = pane.encode_terminal_key(
-            crate::input::TerminalKey::new(
-                crossterm::event::KeyCode::Char('a'),
-                crossterm::event::KeyModifiers::CONTROL,
-            ),
-            crate::input::KeyboardProtocol::Legacy,
-        );
+        let encoded = pane.encode_terminal_key(crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Char('a'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
 
         assert_eq!(encoded, b"\x1b[97;5u");
     }
@@ -5015,7 +4984,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                pane.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy),
+                pane.encode_terminal_key(key.clone()),
                 expected.as_bytes(),
                 "{key:?}"
             );
@@ -5031,13 +5000,10 @@ mod tests {
             .unwrap();
         let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
 
-        let encoded = pane.encode_terminal_key(
-            crate::input::TerminalKey::new(
-                crossterm::event::KeyCode::Up,
-                crossterm::event::KeyModifiers::empty(),
-            ),
-            crate::input::KeyboardProtocol::Legacy,
-        );
+        let encoded = pane.encode_terminal_key(crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Up,
+            crossterm::event::KeyModifiers::empty(),
+        ));
 
         assert_eq!(encoded, b"\x1bOA");
     }
@@ -5077,17 +5043,14 @@ mod tests {
         );
         assert_eq!(pane.modify_other_keys_level(), 2);
 
-        let encoded = pane.encode_terminal_key(
-            crate::input::TerminalKey::new(
-                crossterm::event::KeyCode::Up,
-                crossterm::event::KeyModifiers::empty(),
-            ),
-            crate::input::KeyboardProtocol::Legacy,
-        );
+        let encoded = pane.encode_terminal_key(crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Up,
+            crossterm::event::KeyModifiers::empty(),
+        ));
         assert_eq!(encoded, b"\x1bOA");
 
         let key = crate::input::parse_terminal_key_sequence("\x1b[13;2u").unwrap();
-        let encoded = pane.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy);
+        let encoded = pane.encode_terminal_key(key.clone());
         assert_eq!(encoded, b"\x1b[27;2;13~");
 
         let encoded = pane.encode_mouse_wheel(
@@ -5109,10 +5072,7 @@ mod tests {
         )
         .with_repeat_count(3);
 
-        assert_eq!(
-            pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy),
-            b"xxx"
-        );
+        assert_eq!(pane.encode_terminal_key(key), b"xxx");
 
         let shifted = crate::input::TerminalKey::new(
             crossterm::event::KeyCode::Char('/'),
@@ -5131,16 +5091,13 @@ mod tests {
         let legacy_expected = b"\x1b[55;8;47;1;16;3_".as_slice();
         #[cfg(not(windows))]
         let legacy_expected = b"///".as_slice();
-        assert_eq!(
-            pane.encode_terminal_key(shifted.clone(), crate::input::KeyboardProtocol::Legacy,),
-            legacy_expected
-        );
+        assert_eq!(pane.encode_terminal_key(shifted.clone()), legacy_expected);
         let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         terminal.write(b"\x1b[>15u");
         let (tx, _rx) = mpsc::channel(4);
         let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
         assert_eq!(
-            pane.encode_terminal_key(shifted, crate::input::KeyboardProtocol::Kitty { flags: 15 },),
+            pane.encode_terminal_key(shifted),
             b"\x1b[47;2u\x1b[47;2:2u\x1b[47;2:2u"
         );
     }
@@ -5151,21 +5108,17 @@ mod tests {
         let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         terminal.write(b"\x1b[>11u");
         let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
-        let protocol = pane.keyboard_protocol().unwrap();
         let release = crate::input::TerminalKey::new(
             crossterm::event::KeyCode::Up,
             crossterm::event::KeyModifiers::empty(),
         )
         .with_kind(crossterm::event::KeyEventKind::Release);
-        let expected = pane.encode_terminal_key(release.clone(), protocol);
+        let expected = pane.encode_terminal_key(release.clone());
 
         assert!(!expected.is_empty());
         let mut malformed_release = release;
         malformed_release.repeat_count = 3;
-        assert_eq!(
-            pane.encode_terminal_key(malformed_release, protocol),
-            expected
-        );
+        assert_eq!(pane.encode_terminal_key(malformed_release), expected);
     }
 
     #[test]
@@ -5175,24 +5128,18 @@ mod tests {
         let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
         let pane_id = PaneId::from_raw(1);
 
-        let before = pane.encode_terminal_key(
-            crate::input::TerminalKey::new(
-                crossterm::event::KeyCode::Up,
-                crossterm::event::KeyModifiers::empty(),
-            ),
-            crate::input::KeyboardProtocol::Legacy,
-        );
+        let before = pane.encode_terminal_key(crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Up,
+            crossterm::event::KeyModifiers::empty(),
+        ));
         assert_eq!(before, b"\x1b[A");
 
         pane.process_pty_bytes(pane_id, 0, b"\x1b[?1h", &tx);
 
-        let after = pane.encode_terminal_key(
-            crate::input::TerminalKey::new(
-                crossterm::event::KeyCode::Up,
-                crossterm::event::KeyModifiers::empty(),
-            ),
-            crate::input::KeyboardProtocol::Legacy,
-        );
+        let after = pane.encode_terminal_key(crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Up,
+            crossterm::event::KeyModifiers::empty(),
+        ));
         assert_eq!(after, b"\x1bOA");
     }
 
@@ -5207,9 +5154,9 @@ mod tests {
             crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::SHIFT,
         );
 
-        let before = pane.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy);
+        let before = pane.encode_terminal_key(key.clone());
         pane.process_pty_bytes(pane_id, 0, b"\x1b[>1u", &tx);
-        let after = pane.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy);
+        let after = pane.encode_terminal_key(key.clone());
 
         assert_ne!(before, after);
         assert_eq!(after, b"\x1b[13;6u");
@@ -5224,7 +5171,7 @@ mod tests {
         pane.process_pty_bytes(pane_id, 0, b"\x1b[>5u", &tx);
 
         let key = crate::input::parse_terminal_key_sequence("\x1b[13;2u").unwrap();
-        let encoded = pane.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy);
+        let encoded = pane.encode_terminal_key(key.clone());
 
         assert_eq!(
             pane.keyboard_protocol(),
@@ -5242,7 +5189,7 @@ mod tests {
         pane.seed_keyboard_protocol_flags(5);
 
         let key = crate::input::parse_terminal_key_sequence("\x1b[13;2u").unwrap();
-        let encoded = pane.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy);
+        let encoded = pane.encode_terminal_key(key.clone());
 
         assert_eq!(
             pane.keyboard_protocol(),
@@ -5287,10 +5234,7 @@ mod tests {
         let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
         let key = crate::input::parse_terminal_key_sequence("\x1b[13;2u").unwrap();
 
-        assert_eq!(
-            pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy),
-            b"\x1b[13;28;13;1;16;1_"
-        );
+        assert_eq!(pane.encode_terminal_key(key), b"\x1b[13;28;13;1;16;1_");
     }
 
     #[cfg(windows)]
@@ -5312,11 +5256,7 @@ mod tests {
             (crossterm::event::KeyModifiers::ALT, b"\x1b\r".as_slice()),
         ] {
             let key = crate::input::TerminalKey::new(crossterm::event::KeyCode::Enter, modifiers);
-            assert_eq!(
-                pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy),
-                expected,
-                "{modifiers:?}"
-            );
+            assert_eq!(pane.encode_terminal_key(key), expected, "{modifiers:?}");
         }
     }
 
@@ -5329,7 +5269,7 @@ mod tests {
 
         pane.seed_history_ansi("\x1b[>4;1m");
         assert_eq!(pane.modify_other_keys_level(), 0);
-        let encoded = pane.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy);
+        let encoded = pane.encode_terminal_key(key.clone());
 
         assert_eq!(encoded, b"\r");
     }
@@ -5343,7 +5283,7 @@ mod tests {
         pane.process_pty_bytes(pane_id, 0, b"\x1b[>1u", &tx);
 
         let key = crate::input::parse_terminal_key_sequence("\x1b\x7f").unwrap();
-        let encoded = pane.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy);
+        let encoded = pane.encode_terminal_key(key.clone());
 
         assert_eq!(encoded, b"\x1b[127;3u");
     }
@@ -5360,7 +5300,7 @@ mod tests {
         let crate::raw_input::RawInputEvent::Key(key) = events.remove(0) else {
             panic!("expected key event");
         };
-        let encoded = pane.encode_terminal_key(key, pane.keyboard_protocol().unwrap());
+        let encoded = pane.encode_terminal_key(key);
 
         assert_eq!(encoded, b"\x1b[102;7u");
     }
@@ -5378,22 +5318,13 @@ mod tests {
             crossterm::event::KeyCode::Backspace,
             crossterm::event::KeyModifiers::CONTROL,
         );
-        assert_eq!(
-            legacy.encode_terminal_key(
-                ctrl_backspace.clone(),
-                crate::input::KeyboardProtocol::Legacy
-            ),
-            b"\x08"
-        );
+        assert_eq!(legacy.encode_terminal_key(ctrl_backspace.clone()), b"\x08");
 
         let plain_backspace = crate::input::TerminalKey::new(
             crossterm::event::KeyCode::Backspace,
             crossterm::event::KeyModifiers::empty(),
         );
-        assert_eq!(
-            legacy.encode_terminal_key(plain_backspace, crate::input::KeyboardProtocol::Legacy),
-            b"\x7f"
-        );
+        assert_eq!(legacy.encode_terminal_key(plain_backspace), b"\x7f");
 
         let kitty = GhosttyPaneTerminal::new(
             crate::ghostty::Terminal::new(80, 24, 0).unwrap(),
@@ -5403,10 +5334,7 @@ mod tests {
         let pane_id = PaneId::from_raw(1);
         kitty.process_pty_bytes(pane_id, 0, b"\x1b[>1u", &tx);
 
-        assert_eq!(
-            kitty.encode_terminal_key(ctrl_backspace, crate::input::KeyboardProtocol::Legacy),
-            b"\x1b[127;5u"
-        );
+        assert_eq!(kitty.encode_terminal_key(ctrl_backspace), b"\x1b[127;5u");
     }
 
     #[test]
@@ -5425,20 +5353,14 @@ mod tests {
 
         first.process_pty_bytes(PaneId::from_raw(1), 0, b"\x1b[?1h", &tx);
 
-        let first_encoded = first.encode_terminal_key(
-            crate::input::TerminalKey::new(
-                crossterm::event::KeyCode::Up,
-                crossterm::event::KeyModifiers::empty(),
-            ),
-            crate::input::KeyboardProtocol::Legacy,
-        );
-        let second_encoded = second.encode_terminal_key(
-            crate::input::TerminalKey::new(
-                crossterm::event::KeyCode::Up,
-                crossterm::event::KeyModifiers::empty(),
-            ),
-            crate::input::KeyboardProtocol::Legacy,
-        );
+        let first_encoded = first.encode_terminal_key(crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Up,
+            crossterm::event::KeyModifiers::empty(),
+        ));
+        let second_encoded = second.encode_terminal_key(crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Up,
+            crossterm::event::KeyModifiers::empty(),
+        ));
 
         assert_eq!(first_encoded, b"\x1bOA");
         assert_eq!(second_encoded, b"\x1b[A");
