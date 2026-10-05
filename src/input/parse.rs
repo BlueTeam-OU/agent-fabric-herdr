@@ -132,6 +132,7 @@ fn is_non_latin_script(ch: char) -> bool {
             | 0x3400..=0x4DBF // CJK extension A
             | 0x4E00..=0x9FFF // CJK unified ideographs
             | 0xA640..=0xA69F // Cyrillic extended-B
+            | 0xAB70..=0xABBF // Cherokee supplement (lowercase)
             | 0xAC00..=0xD7AF // Hangul syllables
     )
 }
@@ -779,6 +780,21 @@ mod tests {
         for codepoint in [945, 1513, 1588, 3615, 4304, 12609, 5024, 5121, 6176] {
             let key = parse_terminal_key_sequence(&format!("\x1b[{codepoint}::97;5u")).unwrap();
             assert_eq!(key.code, KeyCode::Char('a'), "U+{codepoint:04X}");
+        }
+
+        // Kitty reports the lowercase primary: Cherokee \u{ab70} (upper \u{13a0}),
+        // Greek \u{3b1}, Cyrillic \u{444}, plain and shifted.
+        for (lower, upper) in [(0xAB70, 0x13A0), (945, 913), (1092, 1060)] {
+            let key = parse_terminal_key_sequence(&format!("\x1b[{lower}::97;5u")).unwrap();
+            assert_eq!(key.code, KeyCode::Char('a'), "U+{lower:04X}");
+            let key = parse_terminal_key_sequence(&format!("\x1b[{lower}:{upper}:97;6u")).unwrap();
+            assert_terminal_key_eq(
+                key,
+                KeyCode::Char('a'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                crossterm::event::KeyEventKind::Press,
+                Some('A' as u32),
+            );
         }
 
         let cases = [
