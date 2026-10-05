@@ -1855,10 +1855,16 @@ impl GhosttyPaneTerminal {
             .is_ok_and(|core| core.terminal.mouse_tracking_enabled().unwrap_or(false))
     }
 
+    /// libghostty tracks only level 2; like Ghostty, level 1 behaves as if the
+    /// app negotiated nothing.
     pub fn modify_other_keys_level(&self) -> u8 {
-        self.core
-            .lock()
-            .map_or(0, |core| core.kitty_keyboard.modify_other_keys_level())
+        self.core.lock().map_or(0, |core| {
+            if core.terminal.modify_other_keys_enabled().unwrap_or(false) {
+                2
+            } else {
+                0
+            }
+        })
     }
 
     pub fn sgr_pixel_mouse_enabled(&self) -> bool {
@@ -2024,20 +2030,15 @@ impl GhosttyPaneTerminal {
     pub fn encode_terminal_key(
         &self,
         key: crate::input::TerminalKey,
-        // Unused: libghostty reads the live modes. Removed with the shadow tracker.
+        // Unused: libghostty reads the live modes.
         _protocol: crate::input::KeyboardProtocol,
     ) -> Vec<u8> {
         #[cfg(windows)]
-        if self.core.lock().is_ok_and(|core| {
-            core.terminal
-                .kitty_keyboard_flags()
-                .is_ok_and(|flags| flags == 0)
-                && !core.kitty_keyboard.modify_other_keys_enabled()
-                && core
-                    .terminal
-                    .modify_other_keys_enabled()
-                    .is_ok_and(|enabled| !enabled)
-        }) {
+        if self
+            .core
+            .lock()
+            .is_ok_and(|core| keyboard_negotiated_nothing(&core.terminal))
+        {
             if let Some(bytes) = crate::platform::encode_windows_conpty_fallback(&key) {
                 return bytes;
             }
@@ -2062,15 +2063,7 @@ impl GhosttyPaneTerminal {
         let Ok(core) = self.core.lock() else {
             return Vec::new();
         };
-        let negotiated_nothing = core
-            .terminal
-            .kitty_keyboard_flags()
-            .is_ok_and(|flags| flags == 0)
-            && core.kitty_keyboard.modify_other_keys_level() == 0
-            && core
-                .terminal
-                .modify_other_keys_enabled()
-                .is_ok_and(|enabled| !enabled);
+        let negotiated_nothing = keyboard_negotiated_nothing(&core.terminal);
         let key = if negotiated_nothing {
             legacy_shell_key(key)
         } else {
@@ -2505,6 +2498,17 @@ impl GhosttyPaneTerminal {
             })
             .unwrap_or(TerminalDirtyPatchOutcome::Fallback)
     }
+}
+
+/// True when the pane's app asked for no enhanced keyboard protocol (no Kitty
+/// flags, no modifyOtherKeys 2), read from libghostty's live state.
+fn keyboard_negotiated_nothing(terminal: &crate::ghostty::Terminal) -> bool {
+    terminal
+        .kitty_keyboard_flags()
+        .is_ok_and(|flags| flags == 0)
+        && terminal
+            .modify_other_keys_enabled()
+            .is_ok_and(|enabled| !enabled)
 }
 
 fn effective_cursor_state(
@@ -4830,8 +4834,8 @@ mod tests {
         let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
         let pane_id = PaneId::from_raw(1);
+        // Like Ghostty, modifyOtherKeys level 1 behaves as if nothing was negotiated.
         let legacy = ["\r", "\r", "\r", "\x1b\r"];
-        let mode_one = ["\x1b[27;2;13~", "\x1b[27;5;13~", "\x1b[27;9;13~", "\x1b\r"];
         let mode_two = [
             "\x1b[27;2;13~",
             "\x1b[27;5;13~",
@@ -4842,7 +4846,7 @@ mod tests {
 
         for (sequence, expected) in [
             ("", legacy),
-            ("\x1b[>4;1m", mode_one),
+            ("\x1b[>4;1m", legacy),
             ("\x1b[>4;2m", mode_two),
             ("\x1b[>4n", legacy),
             ("\x1b[>4;2m", mode_two),
@@ -4852,7 +4856,7 @@ mod tests {
             ("\x1b[>4;2m\x1b[>1u", kitty),
             ("\x1b[<u", mode_two),
             ("\x1b[>4;0m", legacy),
-            ("\x1b[>4;1m", mode_one),
+            ("\x1b[>4;1m", legacy),
             ("\x1b[>04n", legacy),
             ("\x1b[>4;2m", mode_two),
             ("\x1b[>4", mode_two),
@@ -5317,17 +5321,17 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_modify_other_keys_mode_one_preserves_shift_enter() {
+    fn ghostty_modify_other_keys_mode_one_is_treated_as_unnegotiated() {
         let (tx, _rx) = mpsc::channel(4);
         let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
         let key = crate::input::parse_terminal_key_sequence("\x1b[13;2u").unwrap();
 
         pane.seed_history_ansi("\x1b[>4;1m");
-        assert_eq!(pane.modify_other_keys_level(), 1);
+        assert_eq!(pane.modify_other_keys_level(), 0);
         let encoded = pane.encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy);
 
-        assert_eq!(encoded, b"\x1b[27;2;13~");
+        assert_eq!(encoded, b"\r");
     }
 
     #[test]

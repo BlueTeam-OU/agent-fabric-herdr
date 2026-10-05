@@ -225,8 +225,10 @@ impl Oracle {
     }
 }
 
+/// Panes that negotiated nothing. Like Ghostty, modifyOtherKeys level 1 counts
+/// as nothing.
 fn is_legacy_pane(pane_mode: &[u8]) -> bool {
-    matches!(pane_mode, b"" | b"\x1b[?1h")
+    matches!(pane_mode, b"" | b"\x1b[?1h" | b"\x1b[>4;1m")
 }
 
 /// Agreed exception table: panes that negotiated no keyboard protocol keep the

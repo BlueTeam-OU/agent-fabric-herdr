@@ -6222,11 +6222,12 @@ fn direct_terminal_streams_child_keyboard_and_mouse_modes() {
             read_server_message(
                 client_control_rx
                     .recv_timeout(Duration::from_millis(100))
-                    .expect("modifyOtherKeys mode-one keyboard message")
+                    .expect("kitty flags change with modifyOtherKeys mode one")
             ),
+            // Like Ghostty, modifyOtherKeys level 1 is not a negotiated mode.
             ServerMessage::DirectTerminalKeyboardProtocol {
                 flags: 3,
-                modify_other_keys_level: 1
+                modify_other_keys_level: 0
             }
         ));
 
