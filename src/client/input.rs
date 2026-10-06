@@ -126,7 +126,7 @@ fn unix_stdin_reader_loop(
         if (framer.has_pending_input() || !pending_palette.is_empty())
             && stdin_read_ready(
                 &reader,
-                idle_flush_timeout_ms(&framer, host_mouse_capture_active.load(Ordering::Acquire)),
+                framer.idle_flush_timeout_ms(host_mouse_capture_active.load(Ordering::Acquire)),
             ) == Some(false)
         {
             let had_pending = framer.has_pending_input();
@@ -228,10 +228,8 @@ fn unix_stdin_reader_loop(
                     return;
                 }
 
-                let timeout_ms = idle_flush_timeout_ms(
-                    &framer,
-                    host_mouse_capture_active.load(Ordering::Acquire),
-                );
+                let timeout_ms =
+                    framer.idle_flush_timeout_ms(host_mouse_capture_active.load(Ordering::Acquire));
                 if stdin_read_ready(&reader, timeout_ms) == Some(false) {
                     let had_pending = framer.has_pending_input();
                     let chunks = framer.flush_timeout();
@@ -369,14 +367,6 @@ fn flush_unix_palette_input(
     event_tx
         .blocking_send(ClientLoopEvent::StdinInput(data))
         .is_ok()
-}
-
-#[cfg(unix)]
-fn idle_flush_timeout_ms(
-    framer: &crate::raw_input::RawInputByteFramer,
-    host_mouse_capture_active: bool,
-) -> i32 {
-    framer.idle_flush_timeout_ms(host_mouse_capture_active)
 }
 
 #[cfg(windows)]
@@ -601,7 +591,7 @@ mod tests {
         next: &[u8],
     ) -> Vec<Vec<u8>> {
         let first_wait =
-            std::time::Duration::from_millis(idle_flush_timeout_ms(framer, mouse_capture) as u64);
+            std::time::Duration::from_millis(framer.idle_flush_timeout_ms(mouse_capture) as u64);
         let mut chunks = Vec::new();
         if gap >= first_wait {
             chunks.extend(framer.flush_timeout());
@@ -869,23 +859,23 @@ mod tests {
         // A lone ESC or ESC[ may still be a key (Escape, Alt+[).
         for framer in [&escape, &csi] {
             assert_eq!(
-                idle_flush_timeout_ms(framer, false),
+                framer.idle_flush_timeout_ms(false),
                 crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS
             );
         }
         assert_eq!(
-            idle_flush_timeout_ms(&escape, true),
+            escape.idle_flush_timeout_ms(true),
             crate::raw_input::MOUSE_ACTIVE_ESCAPE_SEQUENCE_FLUSH_TIMEOUT_MS
         );
         assert_eq!(
-            idle_flush_timeout_ms(&csi, true),
+            csi.idle_flush_timeout_ms(true),
             crate::raw_input::MOUSE_ACTIVE_CSI_INTRODUCER_FLUSH_TIMEOUT_MS
         );
         // Anything further inside a sequence cannot be a key: wait for the rest.
         for framer in [&sgr_mouse, &default_mouse, &unrelated] {
             for mouse_capture in [false, true] {
                 assert_eq!(
-                    idle_flush_timeout_ms(framer, mouse_capture),
+                    framer.idle_flush_timeout_ms(mouse_capture),
                     crate::raw_input::INCOMPLETE_SEQUENCE_FLUSH_TIMEOUT_MS
                 );
             }

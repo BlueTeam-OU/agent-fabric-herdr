@@ -25,10 +25,10 @@ use super::cursor::CURSOR_POSITION_SETTLE;
 use super::cursor::{CursorPositionSettleState, DecscusrTracker};
 use super::{
     input::{
-        ghostty_key_event_from_terminal_key, ghostty_mouse_encoder_for_terminal,
-        ghostty_mouse_event_from_button_kind, ghostty_mouse_event_from_motion_kind,
-        ghostty_mouse_event_from_wheel_kind, ghostty_mouse_position_for_terminal, legacy_shell_key,
-        legacy_super_chord,
+        configure_key_encoder, ghostty_key_event_from_terminal_key,
+        ghostty_mouse_encoder_for_terminal, ghostty_mouse_event_from_button_kind,
+        ghostty_mouse_event_from_motion_kind, ghostty_mouse_event_from_wheel_kind,
+        ghostty_mouse_position_for_terminal, legacy_shell_key, legacy_super_chord,
     },
     kitty_keyboard::KittyKeyboardTracker,
     osc::{
@@ -1169,7 +1169,7 @@ impl GhosttyPaneTerminal {
         let initial_default_background = initial_colors.map(|colors| colors.background);
         let mut key_encoder =
             crate::ghostty::KeyEncoder::new().map_err(|e| std::io::Error::other(e.to_string()))?;
-        key_encoder.set_from_terminal(&terminal);
+        configure_key_encoder(&mut key_encoder, &terminal);
         Ok(Self {
             #[cfg(test)]
             scroll_metrics_reads: std::sync::atomic::AtomicUsize::new(0),
@@ -1429,7 +1429,7 @@ impl GhosttyPaneTerminal {
             debug!(pane = pane_id.raw(), "processed kitty graphics sequence");
         }
         if let Ok(mut key_encoder) = self.key_encoder.lock() {
-            key_encoder.set_from_terminal(&core.terminal);
+            configure_key_encoder(&mut key_encoder, &core.terminal);
         }
         let synchronized_output = core
             .terminal
@@ -1579,7 +1579,7 @@ impl GhosttyPaneTerminal {
         #[cfg(windows)]
         windows_recent_fallback::update(&mut core);
         if let Ok(mut key_encoder) = self.key_encoder.lock() {
-            key_encoder.set_from_terminal(&core.terminal);
+            configure_key_encoder(&mut key_encoder, &core.terminal);
         }
     }
 
@@ -1643,7 +1643,7 @@ impl GhosttyPaneTerminal {
         }
 
         if let Ok(mut key_encoder) = self.key_encoder.lock() {
-            key_encoder.set_from_terminal(&core.terminal);
+            configure_key_encoder(&mut key_encoder, &core.terminal);
         }
     }
 
@@ -1666,7 +1666,7 @@ impl GhosttyPaneTerminal {
         core.kitty_keyboard.observe(ansi.as_bytes());
         core.terminal.write(ansi.as_bytes());
         if let Ok(mut key_encoder) = self.key_encoder.lock() {
-            key_encoder.set_from_terminal(&core.terminal);
+            configure_key_encoder(&mut key_encoder, &core.terminal);
         }
     }
 
@@ -2067,7 +2067,7 @@ impl GhosttyPaneTerminal {
         };
         let encoded = if negotiated_nothing && legacy_super_chord(&key) {
             crate::ghostty::KeyEncoder::new().and_then(|mut encoder| {
-                encoder.set_from_terminal(&core.terminal);
+                configure_key_encoder(&mut encoder, &core.terminal);
                 encoder.set_kitty_flags(KITTY_DISAMBIGUATE);
                 encoder.encode(&event)
             })
@@ -4944,6 +4944,33 @@ mod tests {
                 "{code:?} release should not fall back to legacy bytes, got {release:?}"
             );
         }
+    }
+
+    #[test]
+    fn ghostty_alt_letters_keep_esc_prefix_on_every_platform() {
+        // libghostty treats macOS Option as a text modifier unless told otherwise;
+        // Herdr has already decoded Alt from these host bytes.
+        for (host_bytes, expected) in [
+            ("\x1bf", &b"\x1bf"[..]),
+            ("\x1bb", b"\x1bb"),
+            ("\x1bA", b"\x1bA"),
+            ("\x1b.", b"\x1b."),
+        ] {
+            let key = crate::input::parse_terminal_key_sequence(host_bytes).expect("alt key");
+            assert_eq!(
+                test_encode_key_for_app(b"", key),
+                expected,
+                "{host_bytes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ghostty_kitty_reports_keep_non_us_key_identity() {
+        // Ctrl++ on a German layout, where + is an unshifted key. The report
+        // already names the key; nothing may reinterpret it as US Shift+=.
+        let key = crate::input::parse_terminal_key_sequence("\x1b[43;5u").expect("kitty key");
+        assert_eq!(test_encode_key_for_app(b"\x1b[>1u", key), b"\x1b[43;5u");
     }
 
     #[test]

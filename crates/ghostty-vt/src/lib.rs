@@ -3093,6 +3093,23 @@ impl KeyEncoder {
         unsafe { ffi::ghostty_key_encoder_setopt_from_terminal(self.raw, terminal.raw()) }
     }
 
+    /// Whether macOS Option acts as Alt (ESC prefix) rather than a text
+    /// modifier. `set_from_terminal` resets this to false.
+    pub fn set_macos_option_as_alt(&mut self, enabled: bool) {
+        let value = if enabled {
+            ffi::GhosttyOptionAsAlt_GHOSTTY_OPTION_AS_ALT_TRUE
+        } else {
+            ffi::GhosttyOptionAsAlt_GHOSTTY_OPTION_AS_ALT_FALSE
+        };
+        unsafe {
+            ffi::ghostty_key_encoder_setopt(
+                self.raw,
+                ffi::GhosttyKeyEncoderOption_GHOSTTY_KEY_ENCODER_OPT_MACOS_OPTION_AS_ALT,
+                (&value as *const ffi::GhosttyOptionAsAlt).cast(),
+            )
+        }
+    }
+
     pub fn set_kitty_flags(&mut self, flags: u8) {
         unsafe {
             ffi::ghostty_key_encoder_setopt(

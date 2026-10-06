@@ -110,7 +110,6 @@ pub(crate) struct RawInputFramer {
 
 #[cfg(any(windows, test))]
 impl RawInputFramer {
-    #[cfg(any(windows, test))]
     pub(crate) fn for_host_input() -> Self {
         Self {
             byte_framer: RawInputByteFramer::for_host_input(),
@@ -146,12 +145,10 @@ impl RawInputFramer {
         false
     }
 
-    #[cfg(any(windows, test))]
     pub(crate) fn has_pending_bracketed_paste(&self) -> bool {
         self.byte_framer.has_pending_bracketed_paste()
     }
 
-    #[cfg(any(windows, test))]
     pub(crate) fn has_pending_default_mouse_sequence(&self) -> bool {
         starts_with_incomplete_default_mouse_sequence(&self.byte_framer.buffer)
     }
@@ -160,7 +157,6 @@ impl RawInputFramer {
         events_from_framed_chunks(self.byte_framer.flush_timeout())
     }
 
-    #[cfg(any(windows, test))]
     pub(crate) fn flush_keyboard_escape(&mut self) -> Vec<RawInputEvent> {
         if self.byte_framer.buffer.as_slice() == [ESC] {
             self.byte_framer.lone_escape_recently_flushed = true;
@@ -171,7 +167,6 @@ impl RawInputFramer {
     }
 
     /// Semantic input ends mouse recovery, unlike another idle interval.
-    #[cfg(any(windows, test))]
     pub(crate) fn flush_interrupted(&mut self) -> Vec<RawInputEvent> {
         #[cfg(windows)]
         self.byte_framer.flush_lone_escape_on_interruption();
@@ -579,17 +574,6 @@ impl RawInputByteFramer {
         // control-string path and are never forwarded as Alt keys (#344).
         if is_alt_key_introducer(&self.buffer) && !self.awaiting_host_reply() {
             chunks.push(std::mem::take(&mut self.buffer));
-            return chunks;
-        }
-        // A lone string introducer with no reply expected is a legacy Alt chord
-        // that cannot be forwarded safely. Drop just these bytes; entering
-        // control-string discard would swallow the user's next keystrokes.
-        if is_escape_key_prefix(&self.buffer)
-            && self.buffer.len() == 2
-            && !self.awaiting_host_reply()
-        {
-            tracing::debug!(bytes = ?self.buffer, "dropping lone string introducer");
-            self.buffer.clear();
             return chunks;
         }
 
@@ -1073,6 +1057,7 @@ fn is_alt_key_introducer(buffer: &[u8]) -> bool {
     matches!(buffer, [ESC, b'[' | b'O'])
 }
 
+#[cfg(any(unix, test))]
 fn is_escape_key_prefix(buffer: &[u8]) -> bool {
     match buffer {
         [ESC] => true,
@@ -2771,7 +2756,6 @@ mod tests {
     #[test]
     fn raw_input_byte_framer_discards_split_control_string_after_timeout() {
         let mut framer = RawInputByteFramer::default();
-        framer.host_color_query_sent();
 
         assert!(framer.push(b"\x1b]").is_empty());
         assert!(framer.flush_timeout().is_empty());
@@ -2782,7 +2766,6 @@ mod tests {
     #[test]
     fn raw_input_byte_framer_keeps_discarding_tail_across_timeout() {
         let mut framer = RawInputByteFramer::default();
-        framer.host_color_query_sent();
 
         assert!(framer.push(b"\x1b]").is_empty());
         assert!(framer.flush_timeout().is_empty());
@@ -2795,7 +2778,6 @@ mod tests {
     #[test]
     fn raw_input_byte_framer_releases_discard_on_implausible_tail() {
         let mut framer = RawInputByteFramer::default();
-        framer.host_color_query_sent();
 
         assert!(framer.push(b"\x1b]").is_empty());
         assert!(framer.flush_timeout().is_empty());

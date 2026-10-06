@@ -22,9 +22,11 @@ pub(super) fn ghostty_key_event_from_terminal_key(
     let mut mods = ghostty_mods_from_key_modifiers(key.modifiers);
     match key.code {
         KeyCode::Char(c) => {
-            // Legacy input reports the produced character ("%", "D"); Kitty
-            // reports the unshifted key. Both map to the same physical key.
-            let base = unshifted_char(c);
+            // An uppercase letter's key is its lowercase letter on every layout.
+            // Nothing else is inferred: Kitty reports already name the unshifted
+            // key (`+` on a German layout stays `+`), and legacy input does not
+            // say which key produced punctuation.
+            let base = unshifted_letter(c);
             if base != c {
                 mods |= crate::ghostty::MOD_SHIFT;
             }
@@ -39,7 +41,15 @@ pub(super) fn ghostty_key_event_from_terminal_key(
                 // (e.g. Shift+7 = "/" on a German layout, where `base` cannot
                 // be recovered from the character alone).
                 let reported_shifted_text = key.generated_text.is_some() && text != " ";
-                if shifted && (!text.starts_with(base) || reported_shifted_text) {
+                // A non-letter given with Shift and no reported shifted character
+                // is the produced character itself ("shift+?" is "?"). Kitty
+                // hosts report shifted alternates, so a changed character shows
+                // up there.
+                let given_shifted_char =
+                    key.shifted_codepoint.is_none() && !base.is_alphabetic() && text != " ";
+                if shifted
+                    && (!text.starts_with(base) || reported_shifted_text || given_shifted_char)
+                {
                     event.set_consumed_mods(crate::ghostty::MOD_SHIFT);
                 }
                 event.set_utf8(&text);
@@ -56,6 +66,17 @@ pub(super) fn ghostty_key_event_from_terminal_key(
     event.set_composing(key.is_windows_dead_key());
 
     Some(event)
+}
+
+/// Configure `encoder` for a pane's live terminal modes. Herdr has already
+/// decoded Alt from the host, so macOS Option must keep its Alt meaning (ESC
+/// prefix) instead of being treated as a text modifier.
+pub(super) fn configure_key_encoder(
+    encoder: &mut crate::ghostty::KeyEncoder,
+    terminal: &crate::ghostty::Terminal,
+) {
+    encoder.set_from_terminal(terminal);
+    encoder.set_macos_option_as_alt(true);
 }
 
 /// Exception table for panes that negotiated no keyboard protocol. Ghostty sends
@@ -98,58 +119,29 @@ fn key_text(key: &crate::input::TerminalKey, base: char, shifted: bool) -> Optio
     {
         return Some(text.clone());
     }
-    let produced = if shifted {
-        key.shifted_codepoint
-            .and_then(char::from_u32)
-            .or_else(|| us_shifted_char(base))
-            .unwrap_or(base)
-    } else {
-        base
+    // Without a reported shifted character, only a letter's Shift is known.
+    let produced = match key.shifted_codepoint.and_then(char::from_u32) {
+        Some(shifted_char) if shifted => shifted_char,
+        _ if shifted => shifted_letter(base),
+        _ => base,
     };
     (!produced.is_control()).then(|| produced.to_string())
 }
 
-fn unshifted_char(c: char) -> char {
-    if c.is_uppercase() {
-        let mut lower = c.to_lowercase();
-        if let (Some(lower), None) = (lower.next(), lower.next()) {
-            return lower;
-        }
-        return c;
+fn shifted_letter(c: char) -> char {
+    let mut upper = c.to_uppercase();
+    match (upper.next(), upper.next()) {
+        (Some(upper), None) if c.is_lowercase() => upper,
+        _ => c,
     }
-    ghostty_unshifted_ascii_pair(c).unwrap_or(c)
 }
 
-/// US-layout shifted character, used only when the host reported Shift without
-/// the shifted alternate.
-fn us_shifted_char(base: char) -> Option<char> {
-    if base.is_ascii_lowercase() {
-        return Some(base.to_ascii_uppercase());
+fn unshifted_letter(c: char) -> char {
+    let mut lower = c.to_lowercase();
+    match (lower.next(), lower.next()) {
+        (Some(lower), None) if c.is_uppercase() => lower,
+        _ => c,
     }
-    Some(match base {
-        '1' => '!',
-        '2' => '@',
-        '3' => '#',
-        '4' => '$',
-        '5' => '%',
-        '6' => '^',
-        '7' => '&',
-        '8' => '*',
-        '9' => '(',
-        '0' => ')',
-        '-' => '_',
-        '=' => '+',
-        '[' => '{',
-        ']' => '}',
-        '\\' => '|',
-        ';' => ':',
-        '\'' => '"',
-        ',' => '<',
-        '.' => '>',
-        '/' => '?',
-        '`' => '~',
-        _ => return None,
-    })
 }
 
 pub(super) fn ghostty_mods_from_key_modifiers(modifiers: crossterm::event::KeyModifiers) -> u16 {
@@ -463,31 +455,4 @@ fn ghostty_key_from_char(base: char) -> Option<crate::ghostty::ffi::GhosttyKey> 
         ' ' => Some(ffi::GhosttyKey_GHOSTTY_KEY_SPACE),
         _ => None,
     }
-}
-
-fn ghostty_unshifted_ascii_pair(c: char) -> Option<char> {
-    Some(match c {
-        '!' => '1',
-        '@' => '2',
-        '#' => '3',
-        '$' => '4',
-        '%' => '5',
-        '^' => '6',
-        '&' => '7',
-        '*' => '8',
-        '(' => '9',
-        ')' => '0',
-        '_' => '-',
-        '+' => '=',
-        '{' => '[',
-        '}' => ']',
-        '|' => '\\',
-        ':' => ';',
-        '"' => '\'',
-        '<' => ',',
-        '>' => '.',
-        '?' => '/',
-        '~' => '`',
-        _ => return None,
-    })
 }

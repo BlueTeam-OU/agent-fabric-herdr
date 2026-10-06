@@ -358,37 +358,24 @@ impl ClientShellState {
                 self.execute_repeat_plan(lease_key, key, plan, outcome);
             }
             KeyEventKind::Release => {
-                // A press that arrived as text ("X") is released by its key
-                // report ("x" with shifted alternate "X"); match either.
-                let shifted_lease_key =
-                    key.shifted_codepoint
-                        .and_then(char::from_u32)
-                        .map(|shifted| {
-                            crate::input::InputLeaseKey::new(
-                                LOCAL_INPUT_SOURCE,
-                                &crate::input::TerminalKey::new(
-                                    KeyCode::Char(shifted),
-                                    key.modifiers,
-                                ),
-                            )
-                        });
-                let forwarded = self.input_leases.remove_forwarded(&lease_key).or_else(|| {
-                    shifted_lease_key
-                        .as_ref()
-                        .and_then(|shifted| self.input_leases.remove_forwarded(shifted))
-                });
-                if let Some(lease) = forwarded {
-                    let release = lease
+                let Some(lease) = self.take_release_lease(&lease_key, &key) else {
+                    return;
+                };
+                let crate::input::InputLease::Forwarded(lease) = lease else {
+                    // Herdr consumed the press; its release stays with Herdr.
+                    return;
+                };
+                // A native record is released as the recorded key. A VT release
+                // report already names its key and shifted character exactly.
+                let release = if key.physical_key_id().is_some() {
+                    lease
                         .key
                         .with_modifiers(key.modifiers)
-                        .with_kind(KeyEventKind::Release);
-                    self.push_pane_key(lease.target, release, outcome);
+                        .with_kind(KeyEventKind::Release)
                 } else {
-                    let _ = self.input_leases.remove(&lease_key);
-                    if let Some(shifted) = shifted_lease_key {
-                        let _ = self.input_leases.remove(&shifted);
-                    }
-                }
+                    key
+                };
+                self.push_pane_key(lease.target, release, outcome);
             }
         }
     }
@@ -1056,6 +1043,45 @@ impl ClientShellState {
         }
         self.focused_pane_id()
             .map(crate::protocol::ClientClipboardImageTarget::Pane)
+    }
+
+    /// The tracked press for a release. A press that arrived as text ("A") is
+    /// reported released as its key ("a", shifted alternate "A"), possibly after
+    /// Shift was let go, so the shifted alternate and the letter's other case
+    /// also match.
+    fn take_release_lease(
+        &mut self,
+        lease_key: &crate::input::InputLeaseKey<u8>,
+        key: &crate::input::TerminalKey,
+    ) -> Option<crate::input::InputLease<ClientInputContext, ClientInputTarget>> {
+        if let Some(lease) = self.input_leases.remove(lease_key) {
+            return Some(lease);
+        }
+        let KeyCode::Char(c) = key.code else {
+            return None;
+        };
+        fn single(mut chars: impl Iterator<Item = char>) -> Option<char> {
+            match (chars.next(), chars.next()) {
+                (Some(only), None) => Some(only),
+                _ => None,
+            }
+        }
+        let other_case = if c.is_lowercase() {
+            single(c.to_uppercase())
+        } else {
+            single(c.to_lowercase())
+        }
+        .filter(|other| *other != c);
+        key.shifted_codepoint
+            .and_then(char::from_u32)
+            .into_iter()
+            .chain(other_case)
+            .find_map(|candidate| {
+                self.input_leases.remove(&crate::input::InputLeaseKey::new(
+                    LOCAL_INPUT_SOURCE,
+                    &crate::input::TerminalKey::new(KeyCode::Char(candidate), key.modifiers),
+                ))
+            })
     }
 
     fn popup_input_target(&self) -> Option<ClientInputTarget> {

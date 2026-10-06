@@ -282,6 +282,59 @@ fn invalid_experimental_reload_keeps_input_source_preference() {
     assert!(!shell.switch_ascii_input_source_in_prefix);
 }
 
+fn pane_key_events(
+    outcome: &ClientShellInput,
+) -> Vec<(
+    crate::protocol::ClientKeyCode,
+    crate::protocol::ClientKeyKind,
+)> {
+    outcome
+        .requests
+        .iter()
+        .filter_map(|request| match request {
+            ClientMessage::ClientShellPaneInput { events, .. } => Some(events),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|event| match event {
+            ClientPaneInputEvent::Key { code, kind, .. } => Some((code.clone(), *kind)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn text_press_release_survives_shift_released_first_and_never_becomes_a_repeat() {
+    use crate::protocol::{ClientKeyCode, ClientKeyKind};
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_host_reports_key_releases(true);
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+
+    // Shift+A arrives as text; Shift is let go before A, so the release names
+    // plain `a` with no shifted alternate.
+    let press = state.handle_input_bytes(b"A");
+    assert_eq!(
+        pane_key_events(&press),
+        [(ClientKeyCode::Char('A'), ClientKeyKind::Press)]
+    );
+    let release = state.handle_input_bytes(b"\x1b[97;1:3u");
+    assert_eq!(
+        pane_key_events(&release),
+        [(ClientKeyCode::Char('a'), ClientKeyKind::Release)]
+    );
+
+    // A text press whose release never arrived must not turn the next press
+    // into a repeat routed to the old target.
+    let _ = state.handle_input_bytes(b"%");
+    let again = state.handle_input_bytes(b"%");
+    assert_eq!(
+        pane_key_events(&again),
+        [(ClientKeyCode::Char('%'), ClientKeyKind::Press)]
+    );
+}
+
 #[test]
 fn physical_release_uses_the_leased_press_code_with_current_modifiers() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));

@@ -69,8 +69,11 @@ where
         lease_key: &InputLeaseKey<Source>,
         key: TerminalKey,
     ) -> TerminalKey {
+        // A VT text press is always a new press: hosts send text repeats as
+        // text, and a stale lease (release reported after Shift was let go)
+        // must not turn the next press into a repeat routed to an old target.
         if key.kind != crossterm::event::KeyEventKind::Press
-            || (key.generated_text.is_some() && !key.has_physical_identity())
+            || (key.generated_text.is_some() && key.physical_key_id().is_none())
         {
             return key;
         }
@@ -170,16 +173,6 @@ where
             self.insert_consumed(lease_key, ConsumedInputLease::SuppressRepeats);
         }
         allowed
-    }
-
-    pub(crate) fn remove_forwarded(
-        &mut self,
-        key: &InputLeaseKey<Source>,
-    ) -> Option<ForwardedInputLease<Target>> {
-        match self.leases.remove(key) {
-            Some(InputLease::Forwarded(lease)) => Some(lease),
-            Some(InputLease::Consumed(_)) | None => None,
-        }
     }
 
     #[cfg(test)]
@@ -375,7 +368,10 @@ mod tests {
             leases.plan_repeat(lease_key, &repeated, Some(&context)),
             RepeatPlan::Forwarded(10)
         ));
-        assert!(leases.remove_forwarded(&lease_key).is_some());
+        assert!(matches!(
+            leases.remove(&lease_key),
+            Some(InputLease::Forwarded(_))
+        ));
     }
 
     #[test]
@@ -408,7 +404,7 @@ mod tests {
             leases.complete_press(lease_key, &key, Some(&context), Some(&context), Some(10)),
             RepeatPlan::Ignore
         ));
-        assert_eq!(leases.remove_forwarded(&lease_key), None);
+        assert!(leases.remove(&lease_key).is_none());
     }
 
     #[test]
