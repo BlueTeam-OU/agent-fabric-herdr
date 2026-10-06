@@ -1130,7 +1130,7 @@ impl WindowsInputMapper {
         kind: crate::protocol::ClientKeyKind,
         oem_char: Option<char>,
     ) -> Option<crate::protocol::ClientInputEvent> {
-        let modifiers = windows_key_modifiers(key.control_key_state);
+        let modifiers = windows_record_modifiers(key);
         if key.virtual_key_code == 0 {
             let codepoint = self.utf16_unit_to_char(key.unicode)?;
             if !codepoint.is_control() {
@@ -1186,6 +1186,7 @@ impl WindowsInputMapper {
                 .or_else(|| {
                     windows_virtual_key_to_char_code(key.virtual_key_code, key.unicode, modifiers)
                 })
+                .or_else(|| oem_char.map(crate::protocol::ClientKeyCode::Char))
         };
 
         code.map(|code| {
@@ -1503,12 +1504,10 @@ fn ctrl_key_code(vk: u16, u: u16, oem: Option<char>) -> Option<crate::protocol::
     })
 }
 
+/// Punctuation keys report no character under Ctrl or a non-producing AltGr.
+/// Ask the current layout which key it is so the record is still forwarded.
 fn resolve_ctrl_oem_char(key: WindowsKeyRecord) -> Option<char> {
-    if key.virtual_key_code == 0xbf
-        && key.unicode == 0
-        && windows_key_modifiers(key.control_key_state)
-            .contains(crossterm::event::KeyModifiers::CONTROL)
-    {
+    if is_oem_virtual_key(key.virtual_key_code) && key.unicode == 0 {
         #[cfg(windows)]
         return crate::platform::resolve_base_printable_key(
             key.virtual_key_code,
@@ -1516,6 +1515,28 @@ fn resolve_ctrl_oem_char(key: WindowsKeyRecord) -> Option<char> {
         );
     }
     None
+}
+
+fn is_oem_virtual_key(vk: u16) -> bool {
+    matches!(vk, 0xba..=0xc0 | 0xdb..=0xdf | 0xe2)
+}
+
+/// Modifiers for a key record. AltGr is a character shift on character keys
+/// (which may also be dead keys that report no character yet, #3948). On keys
+/// that never type a character it is the Ctrl+Alt chord Windows reports.
+fn windows_record_modifiers(key: WindowsKeyRecord) -> crossterm::event::KeyModifiers {
+    const RIGHT_ALT_PRESSED: u32 = 0x0001;
+    const LEFT_CTRL_PRESSED: u32 = 0x0008;
+    let modifiers = windows_key_modifiers(key.control_key_state);
+    let alt_gr = key.control_key_state & (RIGHT_ALT_PRESSED | LEFT_CTRL_PRESSED)
+        == (RIGHT_ALT_PRESSED | LEFT_CTRL_PRESSED);
+    let character_key = matches!(key.virtual_key_code, 0x30..=0x39 | 0x41..=0x5a)
+        || is_oem_virtual_key(key.virtual_key_code);
+    if alt_gr && key.unicode == 0 && !character_key {
+        modifiers | crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT
+    } else {
+        modifiers
+    }
 }
 
 #[cfg(windows)]
@@ -3081,6 +3102,28 @@ mod tests {
                 "repeat_count={repeat_count}"
             );
         }
+    }
+
+    #[test]
+    fn altgr_is_ctrl_alt_only_on_keys_that_never_type_characters() {
+        let altgr = |virtual_key_code: u16, unicode: u16| WindowsKeyRecord {
+            key_down: true,
+            repeat_count: 1,
+            virtual_key_code,
+            virtual_scan_code: 0,
+            unicode,
+            control_key_state: 0x0009,
+        };
+        let ctrl_alt =
+            crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT;
+
+        // PageUp and Space type nothing: the chord must not look like a plain key.
+        assert_eq!(windows_record_modifiers(altgr(0x21, 0)), ctrl_alt);
+        assert_eq!(windows_record_modifiers(altgr(0x20, 0)), ctrl_alt);
+        // Character keys keep AltGr as a character shift, dead keys included.
+        assert!(windows_record_modifiers(altgr(0x34, 0)).is_empty());
+        assert!(windows_record_modifiers(altgr(0xba, 0)).is_empty());
+        assert!(windows_record_modifiers(altgr(0x51, u16::from(b'@'))).is_empty());
     }
 
     #[test]

@@ -1442,8 +1442,7 @@ mod windows_records {
         );
     }
 
-    // Ratchet (may only go down). Remaining: modified keys that produce no
-    // character (Ctrl/AltGr + punctuation, AltGr + Space/PageUp/PageDown) are
-    // dropped instead of forwarded as records.
-    const WINDOWS_RECORD_FAILURES_BASELINE: usize = 57;
+    // Ratchet (may only go down). Remaining: Ctrl+[ is forwarded as a plain
+    // Escape record rather than its own key record.
+    const WINDOWS_RECORD_FAILURES_BASELINE: usize = 1;
 }
