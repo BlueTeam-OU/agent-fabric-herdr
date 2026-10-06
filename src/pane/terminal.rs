@@ -5344,7 +5344,8 @@ mod tests {
                 b"\x1b[13;28;13;1;16;1_".as_slice(),
             ),
             (crossterm::event::KeyModifiers::CONTROL, b"\r".as_slice()),
-            (crossterm::event::KeyModifiers::SUPER, b"\r".as_slice()),
+            // Super chords never reach a plain shell (no command-line submit).
+            (crossterm::event::KeyModifiers::SUPER, b"".as_slice()),
             (crossterm::event::KeyModifiers::ALT, b"\x1b\r".as_slice()),
         ] {
             let key = crate::input::TerminalKey::new(crossterm::event::KeyCode::Enter, modifiers);
