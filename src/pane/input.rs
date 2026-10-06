@@ -35,7 +35,11 @@ pub(super) fn ghostty_key_event_from_terminal_key(
             event.set_unshifted_codepoint(base as u32);
             let shifted = mods & crate::ghostty::MOD_SHIFT != 0;
             if let Some(text) = key_text(key, base, shifted) {
-                if shifted && !text.starts_with(base) {
+                // Text the host reported with Shift held already includes Shift
+                // (e.g. Shift+7 = "/" on a German layout, where `base` cannot
+                // be recovered from the character alone).
+                let reported_shifted_text = key.generated_text.is_some() && text != " ";
+                if shifted && (!text.starts_with(base) || reported_shifted_text) {
                     event.set_consumed_mods(crate::ghostty::MOD_SHIFT);
                 }
                 event.set_utf8(&text);

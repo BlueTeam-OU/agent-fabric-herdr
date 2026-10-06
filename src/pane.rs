@@ -42,6 +42,8 @@ use self::agent_detection::{
     AGENT_PENDING_IDLE_RECHECK, AGENT_STARTUP_GRACE_WINDOW,
 };
 use self::background_agent::{AgentJobStatus, AgentJobTracker};
+#[cfg(test)]
+pub(crate) use self::terminal::test_encode_key_for_app;
 #[cfg(unix)]
 pub use self::terminal::InputState;
 use self::terminal::{GhosttyPaneTerminal, PaneTerminal};

@@ -3603,6 +3603,21 @@ fn should_probe_host_terminal_theme_restore(core: &GhosttyPaneCore) -> bool {
         .unwrap_or(false)
 }
 
+/// Encode one `key` the way a Unix server's pane does after its app wrote
+/// `app_output` (for example a Kitty keyboard push): the libghostty path,
+/// without the Windows ConPTY record fallback (covered by the Windows harness).
+#[cfg(test)]
+pub(crate) fn test_encode_key_for_app(
+    app_output: &[u8],
+    key: crate::input::TerminalKey,
+) -> Vec<u8> {
+    let (tx, _rx) = mpsc::channel(4);
+    let terminal = crate::ghostty::Terminal::new(80, 24, 0).expect("terminal");
+    let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).expect("pane terminal");
+    pane.process_pty_bytes(PaneId::from_raw(1), 0, app_output, &tx);
+    pane.encode_terminal_key_once(key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

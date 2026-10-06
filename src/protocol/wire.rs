@@ -2225,11 +2225,7 @@ mod tests {
         };
         assert!(key.is_windows_dead_key());
         assert_eq!(key.windows_record(), None);
-        assert!(crate::input::encode_terminal_key(
-            key,
-            crate::input::KeyboardProtocol::Kitty { flags: 1 },
-        )
-        .is_empty());
+        assert!(crate::pane::test_encode_key_for_app(b"\x1b[>1u", key).is_empty());
     }
 
     #[tokio::test]
@@ -2307,10 +2303,7 @@ mod tests {
         };
 
         assert!(roundtripped.has_physical_identity());
-        let encoded = crate::input::encode_terminal_key(
-            roundtripped,
-            crate::input::KeyboardProtocol::Kitty { flags: 8 },
-        );
+        let encoded = crate::pane::test_encode_key_for_app(b"\x1b[>8u", roundtripped);
         assert_ne!(encoded, b"/");
         assert!(encoded.starts_with(b"\x1b["));
     }

@@ -3157,10 +3157,12 @@ mod tests {
             events
                 .into_iter()
                 .flat_map(|event| match event.to_raw_input_event() {
-                    crate::raw_input::RawInputEvent::Key(key) => crate::input::encode_terminal_key(
-                        key,
-                        crate::input::KeyboardProtocol::Kitty { flags },
-                    ),
+                    crate::raw_input::RawInputEvent::Key(key) => {
+                        crate::pane::test_encode_key_for_app(
+                            format!("\x1b[>{flags}u").as_bytes(),
+                            key,
+                        )
+                    }
                     crate::raw_input::RawInputEvent::Text(text) => {
                         text.as_str().as_bytes().to_vec()
                     }
@@ -3291,23 +3293,14 @@ mod tests {
         let crate::raw_input::RawInputEvent::Key(key) = events[0].to_raw_input_event() else {
             panic!("expected translated key");
         };
+        assert_eq!(crate::pane::test_encode_key_for_app(b"", key.clone()), b"/");
         assert_eq!(
-            crate::input::encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy),
+            crate::pane::test_encode_key_for_app(b"\x1b[>7u", key.clone()),
             b"/"
         );
         assert_eq!(
-            crate::input::encode_terminal_key(
-                key.clone(),
-                crate::input::KeyboardProtocol::Kitty { flags: 7 },
-            ),
-            b"/"
-        );
-        assert_eq!(
-            crate::input::encode_terminal_key(
-                key,
-                crate::input::KeyboardProtocol::Kitty { flags: 15 },
-            ),
-            b"\x1b[47;2:1u"
+            crate::pane::test_encode_key_for_app(b"\x1b[>15u", key),
+            b"\x1b[47;2u"
         );
     }
 
@@ -3416,7 +3409,7 @@ mod tests {
             assert_eq!(key.modifiers.bits(), modifiers, "{name}: modifiers");
             assert_eq!(key.generated_text.as_deref(), text, "{name}: text");
             assert_eq!(
-                crate::input::encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy),
+                crate::pane::test_encode_key_for_app(b"", key),
                 expected,
                 "{name}: encoding"
             );

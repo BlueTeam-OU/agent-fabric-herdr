@@ -1241,10 +1241,7 @@ mod windows_tests {
         };
         assert_eq!(key.code, KeyCode::Char('d'));
         assert_eq!(key.modifiers, KeyModifiers::CONTROL);
-        assert_eq!(
-            crate::input::encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy),
-            b"\x04"
-        );
+        assert_eq!(crate::pane::test_encode_key_for_app(b"", key), b"\x04");
     }
 
     #[test]

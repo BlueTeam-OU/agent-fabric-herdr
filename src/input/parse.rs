@@ -405,7 +405,6 @@ mod tests {
     use crossterm::event::{KeyCode, KeyModifiers, ModifierKeyCode};
 
     use super::*;
-    use crate::input::{encode_terminal_key, KeyboardProtocol};
 
     fn assert_terminal_key_eq(
         actual: TerminalKey,
@@ -586,7 +585,7 @@ mod tests {
             crossterm::event::KeyEventKind::Press,
             None,
         );
-        assert_eq!(encode_terminal_key(key, KeyboardProtocol::Legacy), b"\x1bA");
+        assert_eq!(crate::pane::test_encode_key_for_app(b"", key), b"\x1bA");
     }
 
     #[test]
@@ -600,10 +599,7 @@ mod tests {
             crossterm::event::KeyEventKind::Press,
             None,
         );
-        assert_eq!(
-            encode_terminal_key(key, KeyboardProtocol::Legacy),
-            b"\x1b\x06"
-        );
+        assert_eq!(crate::pane::test_encode_key_for_app(b"", key), b"\x1b\x06");
     }
 
     #[test]
@@ -954,7 +950,7 @@ mod tests {
     #[test]
     fn legacy_lf_roundtrips_as_lf() {
         let key = parse_terminal_key_sequence("\n").unwrap();
-        assert_eq!(encode_terminal_key(key, KeyboardProtocol::Legacy), b"\n");
+        assert_eq!(crate::pane::test_encode_key_for_app(b"", key), b"\n");
     }
 
     #[test]
