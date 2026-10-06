@@ -63,15 +63,14 @@ pub(super) fn setup_terminal_with_capabilities(
     #[cfg(windows)]
     let windows_ssh_session = is_ssh_session();
     #[cfg(windows)]
-    let mut windows_virtual_terminal_input =
-        if windows_vti_input_backend_enabled() && windows_ssh_session {
-            enable_windows_virtual_terminal_input(
-                &terminal_guard.restore_claimed,
-                &terminal_guard.restore_windows_input_mode,
-            )
-        } else {
-            WindowsVirtualTerminalInputSetup::default()
-        };
+    let mut windows_virtual_terminal_input = if windows_ssh_session {
+        enable_windows_virtual_terminal_input(
+            &terminal_guard.restore_claimed,
+            &terminal_guard.restore_windows_input_mode,
+        )
+    } else {
+        WindowsVirtualTerminalInputSetup::default()
+    };
 
     let (host_escape_disambiguation_active, buffered_host_input) = if enable_client_protocols {
         terminal_guard.reset_keyboard_enhancements = true;
@@ -94,7 +93,7 @@ pub(super) fn setup_terminal_with_capabilities(
     };
 
     #[cfg(windows)]
-    if enable_client_protocols && windows_vti_input_backend_enabled() && !windows_ssh_session {
+    if enable_client_protocols && !windows_ssh_session {
         windows_virtual_terminal_input = enable_windows_virtual_terminal_input(
             &terminal_guard.restore_claimed,
             &terminal_guard.restore_windows_input_mode,
@@ -103,7 +102,6 @@ pub(super) fn setup_terminal_with_capabilities(
 
     #[cfg(windows)]
     if enable_client_protocols
-        && windows_vti_input_backend_enabled()
         && windows_virtual_terminal_input.active
         && windows_win32_input_mode_enabled()
     {
@@ -495,13 +493,6 @@ pub(super) fn is_ssh_session() -> bool {
     std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some()
 }
 
-#[cfg(windows)]
-pub(super) fn windows_vti_input_backend_enabled() -> bool {
-    std::env::var("HERDR_WINDOWS_INPUT_BACKEND")
-        .map(|backend| !backend.eq_ignore_ascii_case("crossterm"))
-        .unwrap_or(true)
-}
-
 #[cfg(any(windows, test))]
 pub(super) fn windows_virtual_terminal_input_mode(mode: u32) -> u32 {
     mode | 0x0200
@@ -555,8 +546,7 @@ fn set_windows_native_mouse_capture<W: io::Write>(
 
 #[cfg(windows)]
 fn windows_uses_vt_mouse_reporting() -> bool {
-    windows_vti_input_backend_enabled()
-        && (is_ssh_session() || crate::platform::windows_virtual_terminal_input_active())
+    is_ssh_session() || crate::platform::windows_virtual_terminal_input_active()
 }
 
 pub(super) fn set_mouse_capture(enabled: bool, sgr_pixels: bool) -> io::Result<()> {
@@ -666,7 +656,7 @@ fn restore_terminal_state(
         write_terminal_restore_postlude(&mut io::stdout(), reset_host_color_scheme_reports);
 
     #[cfg(windows)]
-    if windows_vti_input_backend_enabled() && windows_win32_input_mode_enabled() {
+    if windows_win32_input_mode_enabled() {
         let _ = disable_windows_win32_input_mode(&mut io::stdout());
     }
 

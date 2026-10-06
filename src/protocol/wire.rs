@@ -397,29 +397,6 @@ impl ClientPaneInputEvent {
 
 #[cfg(any(windows, test))]
 impl ClientInputEvent {
-    pub(crate) fn from_crossterm(event: crossterm::event::Event) -> Option<Self> {
-        match event {
-            crossterm::event::Event::Key(key) => Some(Self::Key {
-                code: ClientKeyCode::from_crossterm(key.code)?,
-                modifiers: key.modifiers.bits(),
-                kind: ClientKeyKind::from_crossterm(key.kind),
-                repeat_count: 1,
-                generated_text: None,
-                source: ClientKeySource::Synthesized,
-            }),
-            crossterm::event::Event::Mouse(mouse) => Some(Self::Mouse {
-                kind: ClientMouseKind::from_crossterm(mouse.kind)?,
-                column: mouse.column,
-                row: mouse.row,
-                modifiers: mouse.modifiers.bits(),
-            }),
-            crossterm::event::Event::Paste(text) => Some(Self::Paste { text }),
-            crossterm::event::Event::FocusGained => Some(Self::FocusGained),
-            crossterm::event::Event::FocusLost => Some(Self::FocusLost),
-            crossterm::event::Event::Resize(_, _) => None,
-        }
-    }
-
     pub(crate) fn to_raw_input_event(&self) -> crate::raw_input::RawInputEvent {
         match self {
             Self::Key {

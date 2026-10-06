@@ -105,7 +105,7 @@ impl RawInputFramer {
         Self::events_from_chunks(self.byte_framer.push(data))
     }
 
-    #[cfg(any(windows, test))]
+    #[cfg(all(test, unix))]
     pub(crate) fn has_pending_input(&self) -> bool {
         self.byte_framer.has_pending_input()
     }
@@ -305,6 +305,7 @@ impl RawInputByteFramer {
         self.host_appearance_query_on_focus = true;
     }
 
+    #[cfg(any(unix, test))]
     pub(crate) fn has_pending_input(&self) -> bool {
         !self.buffer.is_empty()
     }

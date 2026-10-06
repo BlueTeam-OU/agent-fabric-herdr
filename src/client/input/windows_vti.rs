@@ -106,19 +106,48 @@ fn push_platform_input_events(
 }
 
 #[cfg(windows)]
+/// The console input buffer: standard input when it is the console, otherwise
+/// the attached console's `CONIN$` (stdin redirected, e.g. mintty).
 pub(super) fn console_input_handle() -> std::io::Result<windows_sys::Win32::Foundation::HANDLE> {
-    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Foundation::{
+        GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
     use windows_sys::Win32::System::Console::{GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE};
 
-    let handle: HANDLE = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
-    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-        return Err(std::io::Error::last_os_error());
+    let is_console = |handle: HANDLE| {
+        let mut mode = 0;
+        !handle.is_null()
+            && handle != INVALID_HANDLE_VALUE
+            && unsafe { GetConsoleMode(handle, &mut mode) } != 0
+    };
+
+    // SAFETY: querying the process standard input handle has no preconditions.
+    let stdin: HANDLE = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+    if is_console(stdin) {
+        return Ok(stdin);
     }
-    let mut mode = 0;
-    if unsafe { GetConsoleMode(handle, &mut mode) } == 0 {
-        return Err(std::io::Error::last_os_error());
+    let name: Vec<u16> = "CONIN$".encode_utf16().chain(Some(0)).collect();
+    // SAFETY: `name` is NUL-terminated and outlives the call; the handle is owned
+    // by the reader for the rest of the process.
+    let conin = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if is_console(conin) {
+        Ok(conin)
+    } else {
+        Err(std::io::Error::last_os_error())
     }
-    Ok(handle)
 }
 
 #[cfg(windows)]

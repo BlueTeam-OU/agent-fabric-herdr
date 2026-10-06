@@ -86,7 +86,7 @@ fn refresh_host_mouse_capture(enabled: bool, sgr_pixels: bool) {
 }
 
 #[cfg(windows)]
-use terminal_setup::{is_ssh_session, windows_vti_input_backend_enabled};
+use terminal_setup::is_ssh_session;
 #[cfg(test)]
 use terminal_setup::{
     should_enable_host_color_scheme_reports, windows_virtual_terminal_input_mode,
@@ -1984,7 +1984,7 @@ async fn run_client_loop(
                         let mouse_mode_changed = enabled != state.mouse_capture_active
                             || next_sgr_pixels != host_sgr_pixels_active.load(Ordering::Acquire);
                         #[cfg(windows)]
-                        if enabled && windows_vti_input_backend_enabled() && is_ssh_session() {
+                        if enabled && is_ssh_session() {
                             _terminal_guard
                                 .recover_windows_virtual_terminal_input()
                                 .map_err(ClientError::ConnectionFailed)?;
@@ -1994,7 +1994,7 @@ async fn run_client_loop(
                                 .map_err(ClientError::ConnectionFailed)?;
                         }
                         #[cfg(windows)]
-                        if enabled && windows_vti_input_backend_enabled() && !is_ssh_session() {
+                        if enabled && !is_ssh_session() {
                             _terminal_guard
                                 .recover_windows_virtual_terminal_input()
                                 .map_err(ClientError::ConnectionFailed)?;
