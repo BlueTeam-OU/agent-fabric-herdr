@@ -113,21 +113,19 @@ impl ClientShellState {
         data: &[u8],
         geometry: crate::input::mouse::HostGeometry,
     ) -> ClientShellInput {
-        let Some((x, y)) = crate::input::mouse::parse_report(data) else {
+        let Some(report) = crate::raw_input::parse_sgr_mouse_report(data) else {
             return ClientShellInput::default();
         };
-        let Some((column, row)) = geometry.cell(x, y) else {
+        let Some((column, row)) = geometry.cell(report.x, report.y) else {
             return ClientShellInput::default();
         };
-        let Some(cell_report) = crate::input::mouse::report_at_cell(data, column, row) else {
-            return ClientShellInput::default();
-        };
-        let events = crate::raw_input::parse_raw_input_bytes_sync(&cell_report);
-        if events.len() != 1 || !matches!(events[0], RawInputEvent::Mouse(_)) {
-            return ClientShellInput::default();
-        }
-        self.host_mouse_pixels = Some(crate::input::mouse::HostPixels { x, y, geometry });
-        let outcome = self.handle_raw_events(events);
+        self.host_mouse_pixels = Some(crate::input::mouse::HostPixels {
+            x: report.x,
+            y: report.y,
+            geometry,
+        });
+        let outcome =
+            self.handle_raw_events(vec![RawInputEvent::Mouse(report.at_cell(column, row))]);
         self.host_mouse_pixels = None;
         outcome
     }

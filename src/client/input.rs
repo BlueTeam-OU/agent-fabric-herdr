@@ -351,7 +351,7 @@ fn classify_unix_input(
     sgr_pixels: bool,
     geometry: Option<crate::input::mouse::HostGeometry>,
 ) -> Option<ClientLoopEvent> {
-    if sgr_pixels && crate::input::mouse::parse_report(&data).is_some() {
+    if sgr_pixels && crate::raw_input::parse_sgr_mouse_report(&data).is_some() {
         return geometry.map(|geometry| ClientLoopEvent::PixelMouse(data, geometry));
     }
     Some(ClientLoopEvent::StdinInput(data))

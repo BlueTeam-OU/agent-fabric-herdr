@@ -1387,34 +1387,64 @@ fn parse_default_mouse(sequence: &[u8]) -> Option<MouseEvent> {
 }
 
 fn parse_sgr_mouse(sequence: &str) -> Option<MouseEvent> {
-    let body = sequence.strip_prefix("\x1b[<")?;
-    let final_char = body.chars().last()?;
-    if final_char != 'M' && final_char != 'm' {
+    let report = parse_sgr_mouse_report(sequence.as_bytes())?;
+    let column = u16::try_from(report.x.checked_sub(1)?).ok()?;
+    let row = u16::try_from(report.y.checked_sub(1)?).ok()?;
+    Some(report.at_cell(column, row))
+}
+
+/// One SGR mouse report (`CSI < Cb ; x ; y M/m`) with its raw 1-based
+/// coordinates: cells normally, pixels when the host reports SGR pixels (1016).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SgrMouseReport {
+    kind: MouseEventKind,
+    modifiers: KeyModifiers,
+    pub(crate) x: u32,
+    pub(crate) y: u32,
+}
+
+impl SgrMouseReport {
+    /// The report as a mouse event at a 0-based cell.
+    pub(crate) fn at_cell(self, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: self.kind,
+            column,
+            row,
+            modifiers: self.modifiers,
+        }
+    }
+}
+
+pub(crate) fn parse_sgr_mouse_report(sequence: &[u8]) -> Option<SgrMouseReport> {
+    let body = sequence.strip_prefix(b"\x1b[<")?;
+    let (&final_byte, payload) = body.split_last()?;
+    if final_byte != b'M' && final_byte != b'm' {
         return None;
     }
-
-    let payload = &body[..body.len() - 1];
-    let mut parts = payload.split(';');
-    let cb = parts.next()?.parse::<u8>().ok()?;
-    let column = parts.next()?.parse::<u16>().ok()?.checked_sub(1)?;
-    let row = parts.next()?.parse::<u16>().ok()?.checked_sub(1)?;
+    let mut parts = payload.split(|byte| *byte == b';');
+    let cb = u8::try_from(parse_report_number(parts.next()?)?).ok()?;
+    let x = parse_report_number(parts.next()?)?;
+    let y = parse_report_number(parts.next()?)?;
+    if parts.next().is_some() {
+        return None;
+    }
     let (kind, modifiers) = parse_mouse_cb(cb)?;
-
-    let kind = if final_char == 'm' {
-        match kind {
-            MouseEventKind::Down(button) => MouseEventKind::Up(button),
-            other => other,
-        }
-    } else {
-        kind
+    let kind = match (final_byte, kind) {
+        (b'm', MouseEventKind::Down(button)) => MouseEventKind::Up(button),
+        (_, kind) => kind,
     };
-
-    Some(MouseEvent {
+    Some(SgrMouseReport {
         kind,
-        column,
-        row,
         modifiers,
+        x,
+        y,
     })
+}
+
+fn parse_report_number(value: &[u8]) -> Option<u32> {
+    (!value.is_empty() && value.iter().all(u8::is_ascii_digit))
+        .then(|| std::str::from_utf8(value).ok()?.parse().ok())
+        .flatten()
 }
 
 fn parse_mouse_cb(cb: u8) -> Option<(MouseEventKind, KeyModifiers)> {
@@ -1556,6 +1586,24 @@ mod tests {
             b"\x1b[200~one\x1b[201~\x1b[200~two\x1b[201~"
         ));
         assert!(!is_complete_text_bracketed_paste(b"\x1b[200~\xff\x1b[201~"));
+    }
+
+    #[test]
+    fn sgr_mouse_report_parser_accepts_only_complete_reports() {
+        for (input, expected) in [
+            (b"\x1b[<35;321;241M".as_slice(), Some((321, 241))),
+            (b"\x1b[<0;1;2m".as_slice(), Some((1, 2))),
+            (b"key".as_slice(), None),
+            (b"\x1b[<0;1;2Mkey".as_slice(), None),
+            (b"\x1b[<0;1M".as_slice(), None),
+            (b"\x1b[<0;1;2;3M".as_slice(), None),
+        ] {
+            assert_eq!(
+                parse_sgr_mouse_report(input).map(|report| (report.x, report.y)),
+                expected,
+                "{input:?}"
+            );
+        }
     }
 
     #[test]
