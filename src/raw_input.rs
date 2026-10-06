@@ -600,7 +600,7 @@ impl RawInputByteFramer {
             return chunks;
         }
 
-        // A legacy host sends Alt+[ and Alt+O as ESC plus that byte. When nothing
+        // A legacy host sends Alt+[, Alt+O and Alt+Escape as ESC plus that byte. When nothing
         // followed and no reply is expected, it was the key. String introducers
         // (OSC, DCS, APC, PM, SOS) also start host replies, so they keep the
         // control-string path and are never forwarded as Alt keys (#344).
@@ -1099,15 +1099,20 @@ fn is_host_reply_event(event: &RawInputEvent) -> bool {
     )
 }
 
+/// ESC plus a byte that can also start a longer sequence: Alt+[, Alt+O, and
+/// Alt+Escape (ESC ESC, kept whole where doubled escapes are preserved).
 fn is_alt_key_introducer(buffer: &[u8]) -> bool {
-    matches!(buffer, [ESC, b'[' | b'O'])
+    matches!(buffer, [ESC, b'[' | b'O' | ESC])
 }
 
 #[cfg(any(unix, test))]
 fn is_escape_key_prefix(buffer: &[u8]) -> bool {
     match buffer {
         [ESC] => true,
-        [ESC, introducer] => matches!(introducer, b'[' | b'O' | b'P' | b']' | b'X' | b'^' | b'_'),
+        [ESC, introducer] => matches!(
+            introducer,
+            b'[' | b'O' | b'P' | b']' | b'X' | b'^' | b'_' | 0x1b
+        ),
         _ => false,
     }
 }
@@ -2830,6 +2835,29 @@ mod tests {
         assert!(framer.push(b"a").is_empty());
         assert!(framer.flush_timeout().is_empty());
         assert_eq!(framer.push(b"b"), vec![b"b".to_vec()]);
+    }
+
+    #[test]
+    fn preserved_doubled_escape_is_alt_escape_after_a_short_wait() {
+        // macOS keeps legacy ESC ESC whole: Alt+Escape (and Ctrl+Alt+3).
+        let mut framer = RawInputByteFramer::with_host_input_policy(true);
+        assert!(framer.push(b"\x1b\x1b").is_empty());
+        assert_eq!(
+            framer.idle_flush_timeout_ms(false),
+            RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS
+        );
+        let chunks = framer.flush_timeout();
+        assert_eq!(chunks, vec![b"\x1b\x1b".to_vec()]);
+        let events = events_from_framed_chunks(chunks);
+        assert!(
+            matches!(&events[..], [RawInputEvent::Key(key)]
+                if key.code == KeyCode::Esc && key.modifiers == KeyModifiers::ALT),
+            "{events:?}"
+        );
+        assert_eq!(framer.push(b"a"), vec![b"a".to_vec()]);
+        // A longer Alt sequence still joins up within the window.
+        assert!(framer.push(b"\x1b\x1b").is_empty());
+        assert_eq!(framer.push(b"[A"), vec![b"\x1b\x1b[A".to_vec()]);
     }
 
     #[test]
