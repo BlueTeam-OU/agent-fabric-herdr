@@ -6084,18 +6084,24 @@ async fn client_shell_requests_host_pixels_for_an_unfocused_pixel_pane() {
         })
     );
 
-    server.stream_host_mouse_capture_mode();
-    let mouse_modes: Vec<_> = control_rx
-        .try_iter()
-        .map(read_server_message)
-        .filter_map(|message| match message {
-            ServerMessage::MouseCapture {
+    // Control messages arrive asynchronously; wait for the mode instead of
+    // reading the channel once.
+    let mut mouse_modes = Vec::new();
+    for _ in 0..20 {
+        server.stream_host_mouse_capture_mode();
+        while let Ok(bytes) = control_rx.recv_timeout(Duration::from_millis(50)) {
+            if let ServerMessage::MouseCapture {
                 enabled,
                 sgr_pixels,
-            } => Some((enabled, sgr_pixels)),
-            _ => None,
-        })
-        .collect();
+            } = read_server_message(bytes)
+            {
+                mouse_modes.push((enabled, sgr_pixels));
+            }
+        }
+        if mouse_modes.last() == Some(&(true, true)) {
+            break;
+        }
+    }
     assert_eq!(mouse_modes.last(), Some(&(true, true)), "{mouse_modes:?}");
     shutdown_test_runtimes(&mut server);
 }
