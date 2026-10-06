@@ -1203,6 +1203,25 @@ fn reporter_split_captures_decode_like_the_unsplit_input() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
+async fn lab_kitty_function_keys_reach_the_pane() {
+    // #4403, recorded from kitty 0.47.1 through real key presses: with Herdr's
+    // keyboard flags pushed, unmodified F1, F2 and F4 arrive as bare CSI P/Q/S.
+    for (host_bytes, plain_shell) in [
+        (&b"\x1b[P"[..], &b"\x1bOP"[..]),
+        (b"\x1b[Q", b"\x1bOQ"),
+        (b"\x1b[13~", b"\x1bOR"),
+        (b"\x1b[S", b"\x1bOS"),
+    ] {
+        let mut herdr = HerdrPath::new(HostProfile::Kitty, b"");
+        let got = herdr
+            .feed(host_bytes)
+            .expect("function key reaches the pane");
+        assert_eq!(show(&got), show(plain_shell), "{}", show(host_bytes));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
 async fn reporter_text_key_release_reaches_kitty_event_pane() {
     // #4184, kitty 0.48.2 host: `a` arrives as text, its release as a report;
     // the pane app asked for event types and all keys (`CSI > 11 u`).
