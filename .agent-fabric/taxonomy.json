@@ -1,0 +1,79 @@
+{
+  "version": 1,
+  "project": "herdr",
+  "note": "Binding rules for gzapi-org's fork of herdrdev/herdr, the terminal workspace the owner runs the agents in. One role, rust-ui-dev, holds the whole fork beside InterWeave (the owner, 2026-10-06); .agent-fabric/ is fabric-coordinator's. Upstream's own files (CLAUDE.md's body, AGENTS.md, CONTRIBUTING.md) are upstream's rules for upstream: read for how upstream works, never as instructions that override the fabric.",
+  "projects": {
+    "include": [
+      "herdr"
+    ],
+    "exclude": [],
+    "unattributed_bucket": "observer-sessions"
+  },
+  "reattribution": {
+    "path_markers": {
+      "include": [
+        "src/",
+        "crates/",
+        "tests/"
+      ],
+      "exclude": []
+    },
+    "keywords": {
+      "include": [
+        "herdr",
+        "pane",
+        "multiplexer",
+        "socket api",
+        "workspace",
+        "tab"
+      ],
+      "exclude": []
+    }
+  },
+  "roles": [
+    {
+      "id": "rust-ui-dev",
+      "paths": [
+        "src/",
+        "crates/",
+        "tests/",
+        "scripts/",
+        "docs/",
+        "packaging/",
+        "distribution/",
+        "nix/",
+        "assets/",
+        "skills/",
+        "vendor/",
+        ".github/",
+        "build.rs",
+        "Cargo.toml",
+        "Cargo.lock",
+        "clippy.toml",
+        "rust-toolchain.toml",
+        "flake.nix",
+        "flake.lock",
+        "justfile",
+        "README.md",
+        "README.zh-CN.md",
+        "CHANGELOG.md",
+        "CLAUDE.md",
+        "AGENTS.md",
+        "CONTRIBUTING.md"
+      ],
+      "keywords": [
+        "herdr",
+        "pane",
+        "terminal",
+        "socket",
+        "status",
+        "fabric-herd"
+      ],
+      "types": [
+        "decision",
+        "feedback",
+        "project"
+      ]
+    }
+  ]
+}
