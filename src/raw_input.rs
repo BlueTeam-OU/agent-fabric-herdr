@@ -1,5 +1,4 @@
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-#[cfg(windows)]
 use std::time::{Duration, Instant};
 
 /// Parse raw terminal input bytes into a list of `RawInputEvent`s.
@@ -221,6 +220,9 @@ pub(crate) struct RawInputByteFramer {
     host_color_tail_split_st: bool,
     host_cell_size_replies_awaited: u16,
     host_appearance_reply_awaited: bool,
+    /// Last query sent or reply received. Hosts may answer only part of a
+    /// query (or none of it), so the reply counters alone never expire.
+    host_reply_activity_at: Option<Instant>,
     held_pending_host_reply_esc: bool,
     host_color_scheme_change_tracking: bool,
     host_appearance_query_on_focus: bool,
@@ -232,6 +234,9 @@ pub(crate) struct RawInputByteFramer {
 }
 
 const HOST_COLOR_QUERY_REPLIES: u16 = 258;
+/// How long after the last query or reply Herdr still treats `ESC[` / `ESC]`
+/// as a possible host reply instead of a key.
+const HOST_REPLY_QUIET_WINDOW: Duration = Duration::from_secs(1);
 #[cfg(any(unix, test))]
 const HOST_CELL_SIZE_QUERY_REPLIES: u16 = 1;
 const MAX_ORPHANED_SGR_MOUSE_TAIL_BYTES: usize = 32;
@@ -281,6 +286,7 @@ impl RawInputByteFramer {
     fn host_color_query_sent_with_replies(&mut self, replies: u16) {
         self.host_color_replies_awaited = self.host_color_replies_awaited.saturating_add(replies);
         self.held_pending_host_reply_esc = false;
+        self.host_reply_activity_at = Some(Instant::now());
     }
 
     #[cfg(windows)]
@@ -294,6 +300,7 @@ impl RawInputByteFramer {
     fn host_appearance_query_sent(&mut self) {
         self.host_appearance_reply_awaited = true;
         self.held_pending_host_reply_esc = false;
+        self.host_reply_activity_at = Some(Instant::now());
     }
 
     /// Same hold window as `host_color_query_sent`, for the XTWINOPS cell size
@@ -302,12 +309,41 @@ impl RawInputByteFramer {
     pub(crate) fn host_cell_size_query_sent(&mut self) {
         self.host_cell_size_replies_awaited = HOST_CELL_SIZE_QUERY_REPLIES;
         self.held_pending_host_reply_esc = false;
+        self.host_reply_activity_at = Some(Instant::now());
     }
 
     fn awaiting_host_reply(&self) -> bool {
-        self.host_color_replies_awaited > 0
+        (self.host_color_replies_awaited > 0
             || self.host_cell_size_replies_awaited > 0
-            || self.host_appearance_reply_awaited
+            || self.host_appearance_reply_awaited)
+            && self
+                .host_reply_activity_at
+                .is_some_and(|at| at.elapsed() < HOST_REPLY_QUIET_WINDOW)
+    }
+
+    /// Stop expecting replies the host never sent, so their reply handling no
+    /// longer holds or discards what is now ordinary input.
+    fn expire_unanswered_host_queries(&mut self) {
+        if self.awaiting_host_reply() || self.host_reply_activity_at.is_none() {
+            return;
+        }
+        // The Windows default color query keeps its own reply deadline.
+        #[cfg(windows)]
+        if self.host_default_color_query_deadline.is_some() {
+            return;
+        }
+        self.host_color_replies_awaited = 0;
+        self.host_cell_size_replies_awaited = 0;
+        self.host_appearance_reply_awaited = false;
+        self.held_pending_host_reply_esc = false;
+        self.host_reply_activity_at = None;
+    }
+
+    #[cfg(test)]
+    fn age_host_reply_activity(&mut self, by: Duration) {
+        self.host_reply_activity_at = self
+            .host_reply_activity_at
+            .and_then(|at| at.checked_sub(by));
     }
 
     #[cfg(any(unix, test))]
@@ -388,6 +424,7 @@ impl RawInputByteFramer {
 
     pub(crate) fn flush_timeout(&mut self) -> Vec<Vec<u8>> {
         let mut chunks = self.drain_available_chunks();
+        self.expire_unanswered_host_queries();
 
         #[cfg(windows)]
         let host_color_query_expired = self
@@ -777,6 +814,10 @@ impl RawInputByteFramer {
                     self.host_color_query_sent();
                 }
             }
+            if is_host_reply_event(&event) && self.host_reply_activity_at.is_some() {
+                // Long reply bursts (256 palette entries) stay protected.
+                self.host_reply_activity_at = Some(Instant::now());
+            }
             self.held_pending_host_reply_esc = false;
             chunks.push(self.buffer[..consumed].to_vec());
             self.buffer.drain(..consumed);
@@ -1051,6 +1092,16 @@ fn starts_with_incomplete_host_cell_size_report(buffer: &[u8]) -> bool {
         && height.is_none_or(|value| value.iter().all(u8::is_ascii_digit))
         && width.is_none_or(|value| value.iter().all(u8::is_ascii_digit))
         && !(height.is_some_and(<[u8]>::is_empty) && width.is_some())
+}
+
+fn is_host_reply_event(event: &RawInputEvent) -> bool {
+    matches!(
+        event,
+        RawInputEvent::HostDefaultColor { .. }
+            | RawInputEvent::HostPaletteColors { .. }
+            | RawInputEvent::HostCellSizeReport { .. }
+            | RawInputEvent::HostColorSchemeChanged(_)
+    )
 }
 
 fn is_alt_key_introducer(buffer: &[u8]) -> bool {
@@ -3044,6 +3095,43 @@ mod tests {
         assert!(alt_bracket.push(b"\x1b[").is_empty());
         assert!(alt_bracket.flush_timeout().is_empty());
         assert_eq!(alt_bracket.flush_timeout(), vec![b"\x1b[".to_vec()]);
+    }
+
+    #[test]
+    fn unanswered_host_query_stops_holding_alt_bracket() {
+        // Many hosts answer only part of the 256-entry palette query, or no
+        // cell size query at all. Once nothing arrives for a while, ESC[ is a
+        // key again: a short wait, released alone, next key not swallowed.
+        let mut framer = RawInputByteFramer::default();
+        framer.host_color_query_sent();
+        framer.host_cell_size_query_sent();
+        framer.age_host_reply_activity(HOST_REPLY_QUIET_WINDOW);
+
+        assert!(framer.push(b"\x1b[").is_empty());
+        assert_eq!(
+            framer.idle_flush_timeout_ms(false),
+            RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS
+        );
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b[".to_vec()]);
+        assert_eq!(framer.push(b"a"), vec![b"a".to_vec()]);
+    }
+
+    #[test]
+    fn host_reply_burst_keeps_split_protection_alive() {
+        let mut framer = RawInputByteFramer::default();
+        framer.host_color_query_sent();
+        framer.age_host_reply_activity(HOST_REPLY_QUIET_WINDOW);
+        // A reply arriving late still refreshes the window for the next one.
+        assert_eq!(
+            framer.push(b"\x1b]4;1;rgb:cd/00/00\x1b\\").len(),
+            1,
+            "palette reply"
+        );
+        assert!(framer.push(b"\x1b]").is_empty());
+        assert_eq!(
+            framer.idle_flush_timeout_ms(false),
+            INCOMPLETE_SEQUENCE_FLUSH_TIMEOUT_MS
+        );
     }
 
     #[test]
