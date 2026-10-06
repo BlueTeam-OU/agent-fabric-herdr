@@ -104,7 +104,7 @@ impl ClientShellState {
 
     #[cfg(test)]
     pub(crate) fn handle_input_bytes(&mut self, data: &[u8]) -> ClientShellInput {
-        self.handle_raw_events(crate::raw_input::parse_raw_input_bytes_sync(data))
+        self.handle_raw_events(crate::raw_input::parse_framed_input(data))
     }
 
     #[cfg(any(unix, test))]

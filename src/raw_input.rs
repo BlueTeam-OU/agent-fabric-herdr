@@ -6,11 +6,29 @@ use std::time::{Duration, Instant};
 ///
 /// This directly extracts events without going through a channel, making it
 /// suitable for synchronous use.
-#[cfg(any(unix, test))]
+#[cfg(test)]
 pub fn parse_raw_input_bytes_sync(data: &[u8]) -> Vec<RawInputEvent> {
     let mut framer = RawInputFramer::default();
     let mut events = framer.push(data);
     events.extend(framer.flush_timeout());
+    events
+}
+
+/// Decode bytes the byte framer already split into complete input. This applies
+/// no timing policy of its own: the reader decided where each event ends.
+#[cfg(any(unix, test))]
+pub(crate) fn parse_framed_input(data: &[u8]) -> Vec<RawInputEvent> {
+    let mut events = Vec::new();
+    let mut rest = data;
+    while !rest.is_empty() {
+        let Some((event, consumed)) = extract_one_event(rest) else {
+            // A lone ESC or Alt introducer the reader released as a key.
+            events.extend(events_from_framed_chunks(vec![rest.to_vec()]));
+            break;
+        };
+        events.push(event);
+        rest = &rest[consumed..];
+    }
     events
 }
 
@@ -83,11 +101,14 @@ pub enum RawInputEvent {
     Unsupported,
 }
 
+/// Byte framer plus event decoding, for the Windows input pump.
+#[cfg(any(windows, test))]
 #[derive(Default)]
 pub(crate) struct RawInputFramer {
     byte_framer: RawInputByteFramer,
 }
 
+#[cfg(any(windows, test))]
 impl RawInputFramer {
     #[cfg(any(windows, test))]
     pub(crate) fn for_host_input() -> Self {
@@ -102,7 +123,7 @@ impl RawInputFramer {
     }
 
     pub(crate) fn push(&mut self, data: &[u8]) -> Vec<RawInputEvent> {
-        Self::events_from_chunks(self.byte_framer.push(data))
+        events_from_framed_chunks(self.byte_framer.push(data))
     }
 
     #[cfg(all(test, unix))]
@@ -136,14 +157,14 @@ impl RawInputFramer {
     }
 
     pub(crate) fn flush_timeout(&mut self) -> Vec<RawInputEvent> {
-        Self::events_from_chunks(self.byte_framer.flush_timeout())
+        events_from_framed_chunks(self.byte_framer.flush_timeout())
     }
 
     #[cfg(any(windows, test))]
     pub(crate) fn flush_keyboard_escape(&mut self) -> Vec<RawInputEvent> {
         if self.byte_framer.buffer.as_slice() == [ESC] {
             self.byte_framer.lone_escape_recently_flushed = true;
-            Self::events_from_chunks(vec![std::mem::take(&mut self.byte_framer.buffer)])
+            events_from_framed_chunks(vec![std::mem::take(&mut self.byte_framer.buffer)])
         } else {
             self.flush_timeout()
         }
@@ -157,32 +178,33 @@ impl RawInputFramer {
         let mut chunks = self.byte_framer.flush_timeout();
         self.byte_framer.timed_out_mouse_prefix = None;
         chunks.extend(self.byte_framer.drain_available_chunks());
-        Self::events_from_chunks(chunks)
+        events_from_framed_chunks(chunks)
     }
+}
 
-    fn events_from_chunks(chunks: Vec<Vec<u8>>) -> Vec<RawInputEvent> {
-        chunks
-            .into_iter()
-            .filter_map(|chunk| {
-                if chunk.as_slice() == [ESC] {
-                    return Some(RawInputEvent::Key(
-                        TerminalKey::new(crossterm::event::KeyCode::Esc, KeyModifiers::empty())
-                            .with_vt_bytes(chunk),
-                    ));
-                }
-                // The byte framer released this introducer as a key on its own.
-                if is_alt_key_introducer(&chunk) {
-                    let text = std::str::from_utf8(&chunk).ok()?;
-                    return parse_terminal_key_sequence(text)
-                        .map(|key| RawInputEvent::Key(key.with_vt_bytes(chunk.clone())));
-                }
-                extract_one_event(&chunk).map(|(event, _consumed)| {
-                    tracing::debug!(raw_bytes = ?chunk, event = ?event, "raw input event parsed");
-                    event
-                })
+/// Events for chunks the byte framer released as complete input.
+fn events_from_framed_chunks(chunks: Vec<Vec<u8>>) -> Vec<RawInputEvent> {
+    chunks
+        .into_iter()
+        .filter_map(|chunk| {
+            if chunk.as_slice() == [ESC] {
+                return Some(RawInputEvent::Key(
+                    TerminalKey::new(crossterm::event::KeyCode::Esc, KeyModifiers::empty())
+                        .with_vt_bytes(chunk),
+                ));
+            }
+            // The byte framer released this introducer as a key on its own.
+            if is_alt_key_introducer(&chunk) {
+                let text = std::str::from_utf8(&chunk).ok()?;
+                return parse_terminal_key_sequence(text)
+                    .map(|key| RawInputEvent::Key(key.with_vt_bytes(chunk.clone())));
+            }
+            extract_one_event(&chunk).map(|(event, _consumed)| {
+                tracing::debug!(raw_bytes = ?chunk, event = ?event, "raw input event parsed");
+                event
             })
-            .collect()
-    }
+        })
+        .collect()
 }
 
 #[derive(Default)]

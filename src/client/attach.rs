@@ -153,7 +153,7 @@ impl AttachEscapeState {
 
 #[cfg(unix)]
 fn single_attach_key(data: &[u8]) -> Option<crate::input::TerminalKey> {
-    let mut events = crate::raw_input::parse_raw_input_bytes_sync(data);
+    let mut events = crate::raw_input::parse_framed_input(data);
     if events.len() != 1 {
         return None;
     }
@@ -193,7 +193,7 @@ fn attach_scroll_action(
     viewport_rows: u16,
     mouse_scroll_lines: usize,
 ) -> Option<AttachSemanticAction> {
-    let mut events = crate::raw_input::parse_raw_input_bytes_sync(data);
+    let mut events = crate::raw_input::parse_framed_input(data);
     if events.len() != 1 {
         return None;
     }

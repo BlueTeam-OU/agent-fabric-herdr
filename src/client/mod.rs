@@ -810,7 +810,7 @@ async fn run_client_loop(
                 );
                 if state.shell.is_some() {
                     if will_query_host_cell_size {
-                        let events = crate::raw_input::parse_raw_input_bytes_sync(&data);
+                        let events = crate::raw_input::parse_framed_input(&data);
                         if let Some((width_px, height_px)) = reported_cell_size_from_events(&events)
                         {
                             store_reported_cell_size(&reported_cell_size, width_px, height_px);
@@ -851,7 +851,7 @@ async fn run_client_loop(
                             continue;
                         }
                     }
-                    let events = crate::raw_input::parse_raw_input_bytes_sync(&data);
+                    let events = crate::raw_input::parse_framed_input(&data);
                     if crate::raw_input::events_require_host_mode_refresh(&events) {
                         refresh_host_mouse_capture(
                             state.mouse_capture_active,
@@ -926,7 +926,7 @@ async fn run_client_loop(
                         AttachInputAction::None => continue,
                     }
                 } else {
-                    let events = crate::raw_input::parse_raw_input_bytes_sync(&data);
+                    let events = crate::raw_input::parse_framed_input(&data);
                     if crate::raw_input::events_require_host_surface_redraw(
                         &events,
                         state.redraw_on_focus_gained,
