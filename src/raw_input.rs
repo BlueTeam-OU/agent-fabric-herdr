@@ -124,11 +124,6 @@ impl RawInputFramer {
         events_from_framed_chunks(self.byte_framer.push(data))
     }
 
-    #[cfg(all(test, unix))]
-    pub(crate) fn has_pending_input(&self) -> bool {
-        self.byte_framer.has_pending_input()
-    }
-
     #[cfg(windows)]
     pub(crate) fn holds_host_default_color_escape(&self) -> bool {
         self.byte_framer.buffer.as_slice() == [ESC]

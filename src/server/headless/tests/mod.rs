@@ -6037,6 +6037,8 @@ async fn client_shell_release_cleanup_does_not_promote_and_survives_disconnect()
     shutdown_test_runtimes(&mut server);
 }
 
+// Pixel mouse is a Unix client capability.
+#[cfg(unix)]
 #[tokio::test]
 async fn client_shell_requests_host_pixels_for_an_unfocused_pixel_pane() {
     // #4750: host reports go to the pane under the pointer, focused or not.

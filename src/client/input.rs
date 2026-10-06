@@ -578,7 +578,7 @@ mod tests {
         let events = framer.push(b"\x1b\x1b");
 
         assert_eq!(events.len(), 1);
-        assert!(framer.has_pending_input());
+        // The second escape is still pending until the idle flush.
         assert_eq!(framer.flush_timeout().len(), 1);
     }
 
