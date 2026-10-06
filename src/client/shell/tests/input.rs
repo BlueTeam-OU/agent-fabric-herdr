@@ -336,6 +336,34 @@ fn text_press_release_survives_shift_released_first_and_never_becomes_a_repeat()
 }
 
 #[test]
+fn shifted_punctuation_release_after_shift_reaches_the_pane() {
+    use crate::protocol::{ClientKeyCode, ClientKeyKind};
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_host_reports_key_releases(true);
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+
+    // "?" arrives as text; with Shift let go first the release names only the
+    // unshifted key, which no layout-free rule can relate to "?".
+    let _ = state.handle_input_bytes(b"?");
+    let release = state.handle_input_bytes(b"\x1b[47;1:3u");
+    assert_eq!(
+        pane_key_events(&release),
+        [(ClientKeyCode::Char('/'), ClientKeyKind::Release)]
+    );
+    // Nothing is left to be released later as a stale "?".
+    let blur = state.handle_input_bytes(b"\x1b[O");
+    assert!(pane_key_events(&blur).is_empty());
+
+    // With two text keys held the release is ambiguous and nothing is taken.
+    let _ = state.handle_input_bytes(b"?");
+    let _ = state.handle_input_bytes(b"!");
+    let ambiguous = state.handle_input_bytes(b"\x1b[47;1:3u");
+    assert!(pane_key_events(&ambiguous).is_empty());
+}
+
+#[test]
 fn physical_release_uses_the_leased_press_code_with_current_modifiers() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot()));

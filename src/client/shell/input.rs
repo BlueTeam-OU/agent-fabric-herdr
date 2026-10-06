@@ -1082,6 +1082,9 @@ impl ClientShellState {
                     &crate::input::TerminalKey::new(KeyCode::Char(candidate), key.modifiers),
                 ))
             })
+            // Shifted punctuation ("?") released after Shift: the report names
+            // only the unshifted key ("/"), which depends on the layout.
+            .or_else(|| self.input_leases.remove_sole_text_press(LOCAL_INPUT_SOURCE))
     }
 
     fn popup_input_target(&self) -> Option<ClientInputTarget> {
