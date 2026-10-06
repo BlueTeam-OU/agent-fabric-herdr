@@ -240,7 +240,7 @@ fn is_legacy_pane(pane_mode: &[u8]) -> bool {
 
 /// Agreed exception table: panes that negotiated no keyboard protocol keep the
 /// classic bytes for keys where Ghostty's escape sequences break shells, and
-/// get Super chords as basic Kitty reports (see `is_legacy_pane` use above).
+/// get no Super chords (see `is_legacy_pane` use above).
 fn legacy_shell_exception(pane_mode: &[u8], key: &str, mods: u16) -> Option<Vec<u8>> {
     if !is_legacy_pane(pane_mode) {
         return None;
@@ -461,7 +461,6 @@ fn run_keyboard_conformance() -> Report {
         for &(pane_name, pane_mode) in PANE_MODES {
             let mut host_oracle = Oracle::new(host.setup(pane_mode));
             let mut direct_oracle = Oracle::new(pane_mode);
-            let mut disambiguate_oracle = Oracle::new(b"\x1b[>1u");
 
             let mut cases = Vec::new();
             for def in KEYS {
@@ -476,7 +475,7 @@ fn run_keyboard_conformance() -> Report {
                     if let Some(classic) = legacy_shell_exception(pane_mode, def.name, mods) {
                         press = classic;
                     } else if is_legacy_pane(pane_mode) && mods & ghostty::MOD_SUPER != 0 {
-                        press = disambiguate_oracle.keystroke(*def, mods).0;
+                        press = Vec::new();
                     }
                     // A host that never reports releases gives nobody a release to forward.
                     let expected = if host_bytes.1.is_empty() {

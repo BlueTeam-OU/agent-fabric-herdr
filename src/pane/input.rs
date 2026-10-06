@@ -1,12 +1,23 @@
 /// Build the key event the Ghostty app would build from an OS key event, so
 /// libghostty can encode it for the pane's current keyboard modes: physical
 /// key, modifiers, the layout text, the unshifted codepoint, and Shift marked
-/// consumed when it produced the text.
+/// consumed when it produced the text. `legacy_pane` is true when the pane
+/// negotiated no keyboard protocol.
+///
+/// Hyper and Meta have no Ghostty equivalent, so those chords are not
+/// forwarded rather than typed as their bare key.
 pub(super) fn ghostty_key_event_from_terminal_key(
     key: &crate::input::TerminalKey,
+    legacy_pane: bool,
 ) -> Option<crate::ghostty::KeyEvent> {
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, KeyModifiers};
 
+    if key
+        .modifiers
+        .intersects(KeyModifiers::HYPER | KeyModifiers::META)
+    {
+        return None;
+    }
     let mut event = crate::ghostty::KeyEvent::new().ok()?;
     event.set_action(match key.kind {
         crossterm::event::KeyEventKind::Press => {
@@ -51,6 +62,18 @@ pub(super) fn ghostty_key_event_from_terminal_key(
                     && (!text.starts_with(base) || reported_shifted_text || given_shifted_char)
                 {
                     event.set_consumed_mods(crate::ghostty::MOD_SHIFT);
+                }
+                // Legacy Alt prefixes the produced text, but libghostty on macOS
+                // prefixes the unshifted codepoint for non-ASCII text (it
+                // assumes Option translated it). Herdr already decoded Alt, so
+                // the text is the key's real output: Alt+Shift+ö is ESC Ö.
+                if legacy_pane
+                    && key.modifiers.contains(KeyModifiers::ALT)
+                    && !key.modifiers.contains(KeyModifiers::CONTROL)
+                {
+                    if let Some(produced) = single_char(&text).filter(|c| !c.is_ascii()) {
+                        event.set_unshifted_codepoint(produced as u32);
+                    }
                 }
                 event.set_utf8(&text);
             }
@@ -103,11 +126,20 @@ pub(super) fn legacy_shell_key(key: crate::input::TerminalKey) -> crate::input::
 }
 
 /// Second exception for panes that negotiated nothing: legacy encoding has no
-/// Super, so Ghostty would deliver Cmd+C as a bare "c" (#3710). Encode Super
-/// chords as basic Kitty (disambiguate) reports instead.
+/// Super, so these chords are not forwarded. Typing the bare key turns Cmd+C
+/// into "c" (#3710), and a Kitty report prints as garbage in plain shells
+/// (#4356). Ghostty on macOS sends nothing for them either.
 pub(super) fn legacy_super_chord(key: &crate::input::TerminalKey) -> bool {
     key.modifiers
         .contains(crossterm::event::KeyModifiers::SUPER)
+}
+
+fn single_char(text: &str) -> Option<char> {
+    let mut chars = text.chars();
+    match (chars.next(), chars.next()) {
+        (Some(only), None) => Some(only),
+        _ => None,
+    }
 }
 
 /// Text the key produced on the user's layout, before Ctrl/Alt transformations.

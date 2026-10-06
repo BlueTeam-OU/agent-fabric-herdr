@@ -44,7 +44,6 @@ const DEFAULT_DETECTION_ROWS: usize = 24;
 const KITTY_GRAPHICS_REDRAW_SETTLE: Duration = Duration::from_millis(20);
 const CURSOR_POSITION_SETTLE_ENABLED: bool = cfg!(windows);
 const MODE_MOUSE_X10: u16 = 9;
-const KITTY_DISAMBIGUATE: u8 = 1;
 const MODE_MOUSE_PRESS_RELEASE: u16 = 1000;
 const MODE_MOUSE_BUTTON_MOTION: u16 = 1002;
 const MODE_MOUSE_ANY_MOTION: u16 = 1003;
@@ -2061,24 +2060,19 @@ impl GhosttyPaneTerminal {
             key
         };
 
-        let Some(event) = ghostty_key_event_from_terminal_key(&key) else {
-            debug!(code = ?key.code, "key has no libghostty equivalent; not forwarded");
+        drop(core);
+        if negotiated_nothing && legacy_super_chord(&key) {
+            debug!(code = ?key.code, "super chord in a pane without keyboard protocol; not forwarded");
+            return Vec::new();
+        }
+        let Some(event) = ghostty_key_event_from_terminal_key(&key, negotiated_nothing) else {
+            debug!(code = ?key.code, modifiers = ?key.modifiers, "key has no libghostty equivalent; not forwarded");
             return Vec::new();
         };
-        let encoded = if negotiated_nothing && legacy_super_chord(&key) {
-            crate::ghostty::KeyEncoder::new().and_then(|mut encoder| {
-                configure_key_encoder(&mut encoder, &core.terminal);
-                encoder.set_kitty_flags(KITTY_DISAMBIGUATE);
-                encoder.encode(&event)
-            })
-        } else {
-            drop(core);
-            let Ok(mut encoder) = self.key_encoder.lock() else {
-                return Vec::new();
-            };
-            encoder.encode(&event)
+        let Ok(mut encoder) = self.key_encoder.lock() else {
+            return Vec::new();
         };
-        encoded.unwrap_or_else(|err| {
+        encoder.encode(&event).unwrap_or_else(|err| {
             warn!(?err, code = ?key.code, "libghostty key encoding failed");
             Vec::new()
         })
@@ -4960,6 +4954,55 @@ mod tests {
             assert_eq!(
                 test_encode_key_for_app(b"", key),
                 expected,
+                "{host_bytes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hyper_and_meta_chords_are_never_typed_as_their_bare_key() {
+        // iTerm2 can report Ctrl as Meta (#4476): `CSI 97;33u`. Typing "a"
+        // would run a command in vim normal mode; libghostty has no Meta.
+        for host_bytes in ["\x1b[97;33u", "\x1b[120;17u"] {
+            let key = crate::input::parse_terminal_key_sequence(host_bytes).expect("kitty key");
+            for app_output in [&b""[..], b"\x1b[>1u", b"\x1b[>31u"] {
+                assert!(
+                    test_encode_key_for_app(app_output, key.clone()).is_empty(),
+                    "{host_bytes:?} after {app_output:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn super_chords_reach_only_panes_that_negotiated_a_keyboard_protocol() {
+        // Super+Space from a Kitty host (#4356) and Cmd+C (#3710).
+        for (host_bytes, kitty) in [
+            ("\x1b[32;9u", &b"\x1b[32;9u"[..]),
+            ("\x1b[99;9u", b"\x1b[99;9u"),
+        ] {
+            let key = crate::input::parse_terminal_key_sequence(host_bytes).expect("kitty key");
+            assert!(
+                test_encode_key_for_app(b"", key.clone()).is_empty(),
+                "{host_bytes:?} in a plain shell"
+            );
+            assert_eq!(
+                test_encode_key_for_app(b"\x1b[>1u", key),
+                kitty,
+                "{host_bytes:?} in a Kitty pane"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_alt_prefixes_the_produced_non_ascii_text() {
+        // A legacy host's Alt+Shift+\u{f6}. libghostty on macOS would prefix the
+        // unshifted "\u{f6}" instead.
+        for host_bytes in ["\x1b\u{d6}", "\x1b\u{f6}"] {
+            let key = crate::input::parse_terminal_key_sequence(host_bytes).expect("alt key");
+            assert_eq!(
+                test_encode_key_for_app(b"", key),
+                host_bytes.as_bytes(),
                 "{host_bytes:?}"
             );
         }

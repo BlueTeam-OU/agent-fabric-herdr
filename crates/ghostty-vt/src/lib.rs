@@ -3110,16 +3110,6 @@ impl KeyEncoder {
         }
     }
 
-    pub fn set_kitty_flags(&mut self, flags: u8) {
-        unsafe {
-            ffi::ghostty_key_encoder_setopt(
-                self.raw,
-                ffi::GhosttyKeyEncoderOption_GHOSTTY_KEY_ENCODER_OPT_KITTY_FLAGS,
-                (&flags as *const u8).cast(),
-            )
-        }
-    }
-
     pub fn encode(&mut self, event: &KeyEvent) -> Result<Vec<u8>, Error> {
         encode_with_retry(|buf, len, out_len| unsafe {
             ffi::ghostty_key_encoder_encode(self.raw, event.raw, buf, len, out_len)
