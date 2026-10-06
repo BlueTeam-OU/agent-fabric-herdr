@@ -336,6 +336,44 @@ fn text_press_release_survives_shift_released_first_and_never_becomes_a_repeat()
 }
 
 #[test]
+fn raw_backspace_follows_the_host_tty_erase_character() {
+    use crate::protocol::{ClientKeyCode, ClientKeyKind};
+
+    // #3244: MobaXterm sends 0x08 for Backspace and its tty says erase is ^H.
+    for (erase, plain, alt) in [
+        (
+            Some(0x08),
+            ClientKeyCode::Backspace,
+            ClientKeyCode::Backspace,
+        ),
+        (
+            Some(0x7f),
+            ClientKeyCode::Char('h'),
+            ClientKeyCode::Char('h'),
+        ),
+        (None, ClientKeyCode::Char('h'), ClientKeyCode::Char('h')),
+    ] {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        state.set_host_erase_byte(erase);
+        state.set_snapshot(Box::new(snapshot()));
+        state.set_pane_surface(surface());
+
+        let press = state.handle_input_bytes(b"\x08");
+        assert_eq!(
+            pane_key_events(&press),
+            [(plain.clone(), ClientKeyKind::Press)],
+            "erase {erase:?}"
+        );
+        let alt_press = state.handle_input_bytes(b"\x1b\x08");
+        assert_eq!(
+            pane_key_events(&alt_press),
+            [(alt, ClientKeyKind::Press)],
+            "alt, erase {erase:?}"
+        );
+    }
+}
+
+#[test]
 fn shifted_punctuation_release_after_shift_reaches_the_pane() {
     use crate::protocol::{ClientKeyCode, ClientKeyKind};
 

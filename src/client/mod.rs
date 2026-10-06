@@ -476,6 +476,7 @@ async fn run_client_loop(
     let mut federated = endpoint_catalog.has_enabled_ssh();
     if let Some(shell) = state.shell.as_mut() {
         shell.set_host_reports_key_releases(config.host_escape_disambiguation_active);
+        shell.set_host_erase_byte(crate::platform::terminal_erase_byte());
         shell.set_graphics_cell_size(initial_cell_width_px, initial_cell_height_px);
         shell.set_endpoint_catalog(&endpoint_catalog.ssh);
         shell.set_endpoint_methods_for(

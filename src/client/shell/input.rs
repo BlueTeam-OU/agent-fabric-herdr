@@ -102,6 +102,27 @@ impl ClientShellState {
         self.host_reports_key_releases = reports;
     }
 
+    pub(crate) fn set_host_erase_byte(&mut self, erase: Option<u8>) {
+        self.host_erase_is_ctrl_h = erase == Some(0x08);
+    }
+
+    /// A raw 0x08 (or ESC 0x08) from a host whose erase character is `^H` is
+    /// its Backspace key (#3244).
+    fn host_erase_key(&self, key: crate::input::TerminalKey) -> crate::input::TerminalKey {
+        if !self.host_erase_is_ctrl_h {
+            return key;
+        }
+        let alt = match key.vt_bytes() {
+            Some([0x08]) => KeyModifiers::empty(),
+            Some([0x1b, 0x08]) => KeyModifiers::ALT,
+            _ => return key,
+        };
+        let bytes = key.vt_bytes().map(<[u8]>::to_vec).unwrap_or_default();
+        crate::input::TerminalKey::new(KeyCode::Backspace, alt)
+            .with_kind(key.kind)
+            .with_vt_bytes(bytes)
+    }
+
     #[cfg(test)]
     pub(crate) fn handle_input_bytes(&mut self, data: &[u8]) -> ClientShellInput {
         self.handle_raw_events(crate::raw_input::parse_framed_input(data))
@@ -185,7 +206,10 @@ impl ClientShellState {
                 push_host_theme_update(&mut outcome.requests, update);
             }
             match event {
-                RawInputEvent::Key(key) => self.handle_key(key, &mut outcome),
+                RawInputEvent::Key(key) => {
+                    let key = self.host_erase_key(key);
+                    self.handle_key(key, &mut outcome)
+                }
                 RawInputEvent::Text(text) => {
                     let text = text.into_string();
                     if matches!(

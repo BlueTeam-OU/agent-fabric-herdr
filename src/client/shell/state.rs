@@ -910,6 +910,9 @@ pub(crate) struct ClientShellState {
     /// The host terminal reports key releases (Kitty event types), so text
     /// presses can be tracked until their release arrives.
     pub(super) host_reports_key_releases: bool,
+    /// The host tty's erase character is `^H`: a raw 0x08 is Backspace, not
+    /// Ctrl+H (MobaXterm, PuTTY-style terminals; tmux reads VERASE the same way).
+    pub(super) host_erase_is_ctrl_h: bool,
     pub(super) replaying_url_click: bool,
     pub(super) selection: Option<crate::selection::Selection<String>>,
     pub(super) last_pane_click: Option<ClientPaneClick>,
@@ -1076,6 +1079,7 @@ impl ClientShellState {
             link_hover: None,
             url_click_consumes_until_up: false,
             host_reports_key_releases: false,
+            host_erase_is_ctrl_h: false,
             replaying_url_click: false,
             selection: None,
             last_pane_click: None,
