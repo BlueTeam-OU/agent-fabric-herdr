@@ -175,25 +175,28 @@ where
         allowed
     }
 
-    /// The forwarded text press from `source` when it is the only one held.
+    /// The forwarded text press from `source` when it is the only key held.
     /// A text press ("?") names a character, not a key, so its release ("/"
-    /// after Shift was let go) cannot be matched by identity. With a single
-    /// candidate the match is certain; with several, nothing is taken.
+    /// after Shift was let go) cannot be matched by identity. When it is the
+    /// only tracked key the match is certain; with any other press held,
+    /// forwarded or consumed by Herdr, nothing is taken.
     pub(crate) fn remove_sole_text_press(
         &mut self,
         source: Source,
     ) -> Option<InputLease<Context, Target>> {
-        let mut candidates = self.leases.iter().filter(|(lease_key, lease)| {
-            lease_key.source == source
-                && matches!(lease, InputLease::Forwarded(lease)
-                    if lease.key.generated_text.is_some()
-                        && lease.key.physical_key_id().is_none())
-        });
-        let (only, None) = (candidates.next(), candidates.next()) else {
+        let mut held = self
+            .leases
+            .iter()
+            .filter(|(lease_key, _)| lease_key.source == source);
+        let (Some((lease_key, lease)), None) = (held.next(), held.next()) else {
             return None;
         };
-        let lease_key = *only?.0;
-        self.leases.remove(&lease_key)
+        let is_text_press = matches!(lease, InputLease::Forwarded(lease)
+            if lease.key.generated_text.is_some() && lease.key.physical_key_id().is_none());
+        let lease_key = *lease_key;
+        is_text_press
+            .then(|| self.leases.remove(&lease_key))
+            .flatten()
     }
 
     #[cfg(test)]

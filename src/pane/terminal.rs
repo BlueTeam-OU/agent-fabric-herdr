@@ -2054,17 +2054,17 @@ impl GhosttyPaneTerminal {
             return Vec::new();
         };
         let negotiated_nothing = keyboard_negotiated_nothing(&core.terminal);
+        drop(core);
+        // Before the shell table: Super+Enter must not become a plain Enter.
+        if negotiated_nothing && legacy_super_chord(&key) {
+            debug!(code = ?key.code, "super chord in a pane without keyboard protocol; not forwarded");
+            return Vec::new();
+        }
         let key = if negotiated_nothing {
             legacy_shell_key(key)
         } else {
             key
         };
-
-        drop(core);
-        if negotiated_nothing && legacy_super_chord(&key) {
-            debug!(code = ?key.code, "super chord in a pane without keyboard protocol; not forwarded");
-            return Vec::new();
-        }
         let Some(event) = ghostty_key_event_from_terminal_key(&key, negotiated_nothing) else {
             debug!(code = ?key.code, modifiers = ?key.modifiers, "key has no libghostty equivalent; not forwarded");
             return Vec::new();
@@ -4786,7 +4786,11 @@ mod tests {
             KeyModifiers::ALT | KeyModifiers::CONTROL | KeyModifiers::SUPER,
         ] {
             let key = crate::input::TerminalKey::new(KeyCode::Enter, modifiers);
-            let expected = if modifiers.contains(KeyModifiers::ALT) {
+            // Super chords never reach a plain shell, so Cmd+Enter cannot run
+            // the command line.
+            let expected = if modifiers.contains(KeyModifiers::SUPER) {
+                b"".as_slice()
+            } else if modifiers.contains(KeyModifiers::ALT) {
                 b"\x1b\r".as_slice()
             } else {
                 b"\r".as_slice()
@@ -4821,7 +4825,8 @@ mod tests {
         let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
         let pane_id = PaneId::from_raw(1);
         // Like Ghostty, modifyOtherKeys level 1 behaves as if nothing was negotiated.
-        let legacy = ["\r", "\r", "\r", "\x1b\r"];
+        // Super+Enter is not forwarded to panes without a keyboard protocol.
+        let legacy = ["\r", "\r", "", "\x1b\r"];
         let mode_two = [
             "\x1b[27;2;13~",
             "\x1b[27;5;13~",
@@ -4977,9 +4982,11 @@ mod tests {
     #[test]
     fn super_chords_reach_only_panes_that_negotiated_a_keyboard_protocol() {
         // Super+Space from a Kitty host (#4356) and Cmd+C (#3710).
+        // Super+Enter must not become a plain Enter that runs the command line.
         for (host_bytes, kitty) in [
             ("\x1b[32;9u", &b"\x1b[32;9u"[..]),
             ("\x1b[99;9u", b"\x1b[99;9u"),
+            ("\x1b[13;9u", b"\x1b[13;9u"),
         ] {
             let key = crate::input::parse_terminal_key_sequence(host_bytes).expect("kitty key");
             assert!(

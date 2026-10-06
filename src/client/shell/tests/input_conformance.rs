@@ -472,10 +472,11 @@ fn run_keyboard_conformance() -> Report {
                         .fold(0, |acc, (_, (bit, _))| acc | bit);
                     let host_bytes = host_oracle.keystroke(*def, mods);
                     let (mut press, release) = direct_oracle.keystroke(*def, mods);
-                    if let Some(classic) = legacy_shell_exception(pane_mode, def.name, mods) {
-                        press = classic;
-                    } else if is_legacy_pane(pane_mode) && mods & ghostty::MOD_SUPER != 0 {
+                    if is_legacy_pane(pane_mode) && mods & ghostty::MOD_SUPER != 0 {
                         press = Vec::new();
+                    } else if let Some(classic) = legacy_shell_exception(pane_mode, def.name, mods)
+                    {
+                        press = classic;
                     }
                     // A host that never reports releases gives nobody a release to forward.
                     let expected = if host_bytes.1.is_empty() {

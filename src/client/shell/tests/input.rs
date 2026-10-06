@@ -402,6 +402,28 @@ fn shifted_punctuation_release_after_shift_reaches_the_pane() {
 }
 
 #[test]
+fn unmatched_release_never_takes_a_held_key_while_herdr_owns_another_press() {
+    use crate::protocol::{ClientKeyCode, ClientKeyKind};
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_host_reports_key_releases(true);
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+
+    // Hold `a` in the pane, then press the prefix: Herdr owns that press.
+    let _ = state.handle_input_bytes(b"a");
+    let _ = state.handle_input_bytes(b"\x1b[98;5u");
+    // A release the leases cannot name must not be charged to the held `a`.
+    let stray = state.handle_input_bytes(b"\x1b[47;1:3u");
+    assert!(pane_key_events(&stray).is_empty());
+    let release = state.handle_input_bytes(b"\x1b[97;1:3u");
+    assert_eq!(
+        pane_key_events(&release),
+        [(ClientKeyCode::Char('a'), ClientKeyKind::Release)]
+    );
+}
+
+#[test]
 fn physical_release_uses_the_leased_press_code_with_current_modifiers() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot()));

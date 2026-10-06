@@ -217,16 +217,16 @@ fn query_host_escape_disambiguation() -> (HostTerminalProbe, Vec<u8>) {
         }
     }
 
-    (
-        HostTerminalProbe {
-            escape_disambiguation: host_escape_disambiguation_confirmed(&responses),
-            sgr_pixel_mouse: responses
-                .primary_device_attributes
-                .then_some(responses.sgr_pixel_mouse)
-                .flatten(),
-        },
-        buffered_input,
-    )
+    (host_terminal_probe(&responses), buffered_input)
+}
+
+#[cfg(not(windows))]
+fn host_terminal_probe(responses: &HostKeyboardProbeResponses) -> HostTerminalProbe {
+    HostTerminalProbe {
+        escape_disambiguation: host_escape_disambiguation_confirmed(responses),
+        // An explicit mode answer stands even if the probe timed out later.
+        sgr_pixel_mouse: responses.sgr_pixel_mouse,
+    }
 }
 
 #[cfg(not(windows))]
@@ -932,6 +932,17 @@ mod tests {
                 assert_eq!(buffered, b"xy", "{reply:?} split {split}");
             }
         }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn host_probe_keeps_a_pixel_mouse_answer_without_device_attributes() {
+        let mut buffered = b"\x1b[?1016;0$y".to_vec();
+        let mut responses = HostKeyboardProbeResponses::default();
+        consume_host_keyboard_probe_responses(&mut buffered, &mut responses);
+
+        assert!(!responses.primary_device_attributes);
+        assert_eq!(host_terminal_probe(&responses).sgr_pixel_mouse, Some(false));
     }
 
     #[cfg(not(windows))]
