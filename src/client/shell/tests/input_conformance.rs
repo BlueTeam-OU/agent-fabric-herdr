@@ -538,6 +538,13 @@ fn run_keyboard_conformance() -> Report {
                     && herdr.runtime.plain_page_keys_use_host_scrollback() == Some(true);
                 let (Some(press), Some(release), false) = (press, release, page_key_scrolls_herdr)
                 else {
+                    report.owned.push(format!(
+                        "{}\t{}\t{}+{}",
+                        host.name(),
+                        pane_name,
+                        mods_name(*mods),
+                        def.name
+                    ));
                     tally.herdr_owned += 1;
                     herdr.reset_client();
                     continue;
@@ -1137,6 +1144,76 @@ fn split_read_robustness() {
     assert!(
         reply_idle_mismatch.is_empty(),
         "split host replies changed after a {SPLIT_PAUSE_MS}ms pause: {reply_idle_mismatch:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Reporter captures: exact bytes and timing from real terminals in issues.
+// ---------------------------------------------------------------------------
+
+/// (issue, host, reads, gap between reads in ms, Herdr awaiting host replies)
+type SplitCapture = (
+    &'static str,
+    HostProfile,
+    &'static [&'static [u8]],
+    i32,
+    bool,
+);
+
+#[cfg(unix)]
+#[test]
+fn reporter_split_captures_decode_like_the_unsplit_input() {
+    let captures: &[SplitCapture] = &[
+        // Alacritty 0.17 on Windows over SSH: the space release split after
+        // `ESC[32;1`, the tail arrived 36 ms later (client log in the issue).
+        (
+            "#4856",
+            HostProfile::Kitty,
+            &[b"\x1b[115;1:3u\x1b[32;1", b":3u"],
+            36,
+            false,
+        ),
+        // tmux 3.6 relays each OSC 4 palette reply from the outer terminal
+        // with arbitrary gaps; the tail of `e4e4` gray entries leaked.
+        (
+            "#4025",
+            HostProfile::Kitty,
+            &[b"\x1b]4;254;rgb:e4", b"e4/e4e4/e4e4\x1b\\"],
+            200,
+            true,
+        ),
+        (
+            "#4025",
+            HostProfile::Legacy,
+            &[b"\x1b", b"]4;254;rgb:e4e4/e4e4/e4e4\x07"],
+            200,
+            true,
+        ),
+    ];
+    for &(issue, host, reads, gap_ms, awaiting) in captures {
+        let whole = reads.concat();
+        assert_eq!(
+            framed_events_with(host, reads, Some(gap_ms), awaiting),
+            framed_events_with(host, &[&whole], None, awaiting),
+            "{issue}: {} read(s) {gap_ms}ms apart",
+            reads.len()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn reporter_text_key_release_reaches_kitty_event_pane() {
+    // #4184, kitty 0.48.2 host: `a` arrives as text, its release as a report;
+    // the pane app asked for event types and all keys (`CSI > 11 u`).
+    let mut herdr = HerdrPath::new(HostProfile::Kitty, b"\x1b[>11u");
+    let press = herdr.feed(b"a").expect("press reaches the pane");
+    let release = herdr
+        .feed(b"\x1b[97;1:3u")
+        .expect("release reaches the pane");
+    assert_eq!(
+        show(&[press, release].concat()),
+        show(b"\x1b[97u\x1b[97;1:3u")
     );
 }
 
