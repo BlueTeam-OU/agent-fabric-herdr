@@ -209,11 +209,20 @@ fn socket_access_from_unparsed_config(content: &str) -> super::SocketAccess {
     }
 }
 
+/// Whether a line assigns the key in any TOML spelling: bare, quoted, or the
+/// last segment of a dotted key (`server.socket_access`). Comments do not.
 fn assigns_socket_access(content: &str) -> bool {
     content.lines().any(|line| {
-        line.trim_start()
-            .strip_prefix("socket_access")
-            .is_some_and(|rest| rest.trim_start().starts_with('='))
+        let line = line.trim_start();
+        if line.starts_with('#') {
+            return false;
+        }
+        let Some((key, _)) = line.split_once('=') else {
+            return false;
+        };
+        key.rsplit('.')
+            .next()
+            .is_some_and(|last| last.trim().trim_matches(['"', '\'']) == "socket_access")
     })
 }
 
@@ -808,6 +817,23 @@ mod tests {
             socket_access_from_unparsed_config("[ui\n"),
             crate::config::SocketAccess::All
         );
+    }
+
+    #[test]
+    fn every_spelling_of_the_key_is_a_setting_in_an_unreadable_file() {
+        for assignment in [
+            "socket_access = \"outside_panes\"",
+            "server.socket_access = \"outside_panes\"",
+            "\"socket_access\" = \"outside_panes\"",
+            "server . 'socket_access'=\"outside_panes\"",
+        ] {
+            let content = format!("{assignment}\n[ui\n");
+            assert_eq!(
+                socket_access_from_unparsed_config(&content),
+                crate::config::SocketAccess::Unrecognized,
+                "{assignment}"
+            );
+        }
     }
 
     #[test]

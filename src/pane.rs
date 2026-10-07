@@ -180,6 +180,9 @@ fn apply_pane_launch_env(cmd: &mut CommandBuilder, launch_env: &PaneLaunchEnv) {
         "CLAUDE_CODE_CHILD_SESSION",
         "CLAUDE_CODE_SESSION_ID",
         "CLAUDE_CODE_MESSAGING_TOKEN",
+        // Only the popup path marks a popup, through its launch env below; a
+        // server started from a popup must not pass the marker to its panes.
+        crate::HERDR_POPUP_ENV_VAR,
     ] {
         cmd.env_remove(key);
     }
@@ -4148,6 +4151,27 @@ mod tests {
             Some(OsStr::new("fake-api-key"))
         );
         assert_eq!(cmd.get_env("DISPLAY"), Some(OsStr::new(":42")));
+    }
+
+    #[test]
+    fn a_pane_never_inherits_the_popup_marker_but_a_popup_sets_it() {
+        let mut pane = CommandBuilder::new("shell");
+        pane.env(crate::HERDR_POPUP_ENV_VAR, crate::HERDR_ENV_VALUE);
+        apply_pane_launch_env(&mut pane, &PaneLaunchEnv::default());
+        assert!(pane.get_env(crate::HERDR_POPUP_ENV_VAR).is_none());
+
+        let mut popup = CommandBuilder::new("shell");
+        apply_pane_launch_env(
+            &mut popup,
+            &PaneLaunchEnv::from_extra(vec![(
+                crate::HERDR_POPUP_ENV_VAR.to_owned(),
+                crate::HERDR_ENV_VALUE.to_owned(),
+            )]),
+        );
+        assert_eq!(
+            popup.get_env(crate::HERDR_POPUP_ENV_VAR),
+            Some(OsStr::new(crate::HERDR_ENV_VALUE))
+        );
     }
 
     #[test]

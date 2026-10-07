@@ -11,8 +11,10 @@
 //!
 //! Same-account processes are not a security boundary; this stops the routine
 //! route (the `herdr` CLI, an integration hook, a script run in a pane). A
-//! process that detaches into a new session *and* clears its environment
-//! escapes it, and so does anything started outside Herdr (cron, a service).
+//! process that clears its environment *and* then detaches into a new session
+//! or outlives its pane's shell escapes it (recognising those would need the
+//! server to remember every pane session it ever spawned), and so does
+//! anything started outside Herdr (cron, a service).
 
 // Only Linux reads process facts today; elsewhere every peer is unidentified.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]

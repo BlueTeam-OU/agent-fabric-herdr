@@ -63,6 +63,16 @@ impl SocketAccessGate {
         Self::with_placement(mode, crate::platform::process_place)
     }
 
+    /// A gate whose revalidation places every peer with `place`, for tests of
+    /// the connection paths that cannot put a real process inside a pane.
+    #[cfg(test)]
+    pub(crate) fn placing_peers_with(
+        mode: SocketAccess,
+        place: fn(Option<u32>) -> PeerPlace,
+    ) -> Self {
+        Self::with_placement(mode, place)
+    }
+
     fn with_placement(mode: SocketAccess, place: fn(Option<u32>) -> PeerPlace) -> Self {
         Self {
             mode: Arc::new(AtomicU8::new(encode(mode.effective()))),

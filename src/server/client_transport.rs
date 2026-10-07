@@ -706,6 +706,14 @@ pub(crate) fn handle_client_handshake(
         }
     };
 
+    // Registered before it is judged, so a reload landing between the two
+    // cannot miss it; the guard keeps the connection answerable to later
+    // reloads for the life of the read loop below.
+    let _admitted = socket_access.admit(
+        crate::platform::local_stream_peer_pid(&stream),
+        crate::socket_access::ConnectionKind::Client,
+        crate::platform::local_stream_revoker(&stream),
+    );
     // Placed after the hello, on this connection's thread, so the refusal can
     // answer in the shape the client reads and `/proc` never blocks accept.
     if let Some(refusal) = crate::socket_access::client_refusal(socket_access.mode(), || {
@@ -731,13 +739,6 @@ pub(crate) fn handle_client_handshake(
         }
         return Ok(());
     }
-    // The read loop below runs for the life of the connection; the guard keeps
-    // it answerable to a reload that tightens access until it ends.
-    let _admitted = socket_access.admit(
-        crate::platform::local_stream_peer_pid(&stream),
-        crate::socket_access::ConnectionKind::Client,
-        crate::platform::local_stream_revoker(&stream),
-    );
 
     let (
         client_cols,
@@ -1923,6 +1924,56 @@ mod tests {
                 ..
             } if request_id == "req-2"
         ));
+    }
+
+    #[test]
+    fn a_reload_that_stops_admitting_an_attached_client_disconnects_it() {
+        let (mut client_stream, server_stream, _path) = local_stream_pair("client-revoked");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let handshake_quit = should_quit.clone();
+        let gate = crate::socket_access::SocketAccessGate::placing_peers_with(
+            crate::config::SocketAccess::All,
+            |_| crate::platform::PeerPlace::InsidePane,
+        );
+        let handshake_gate = gate.clone();
+        let (ended_tx, ended_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = handle_client_handshake(
+                server_stream,
+                44,
+                &server_event_tx,
+                &handshake_quit,
+                &handshake_gate,
+            );
+            let _ = ended_tx.send(result.is_ok());
+        });
+        protocol::write_message(
+            &mut client_stream,
+            &ClientMessage::TerminalHello {
+                version: PROTOCOL_VERSION,
+                cols: 100,
+                rows: 30,
+                cell_width_px: 8,
+                cell_height_px: 16,
+                pixel_mouse: false,
+            },
+        )
+        .expect("write hello");
+        let _welcome: ServerMessage =
+            protocol::read_message(&mut client_stream, MAX_FRAME_SIZE).expect("read welcome");
+        let _connected = server_event_rx.blocking_recv().expect("client connected");
+
+        gate.set(crate::config::SocketAccess::OutsidePanes);
+
+        assert_eq!(
+            ended_rx.recv_timeout(Duration::from_secs(5)),
+            Ok(true),
+            "the server's read loop ends when access is withdrawn"
+        );
+        let after: Result<ServerMessage, _> =
+            protocol::read_message(&mut client_stream, MAX_FRAME_SIZE);
+        assert!(after.is_err(), "the client sees the connection end");
     }
 
     #[test]

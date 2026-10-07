@@ -394,6 +394,15 @@ fn handle_connection_with_stop(
     let changes_ui = request_changes_ui(&request);
     crate::logging::api_request_started(&request_id, method, changes_ui);
 
+    // Registered before it is judged: a reload that lands between the two then
+    // either sees this connection or set the mode the judgement reads.
+    // Streams and waits can outlive a reload; the guard keeps the connection
+    // answerable to one until the request finishes.
+    let _admitted = socket_access.admit(
+        crate::platform::local_stream_peer_pid(&stream),
+        crate::socket_access::ConnectionKind::Api(api_request_kind(&request.method)),
+        crate::platform::local_stream_revoker(&stream),
+    );
     if let Some(refusal) = crate::socket_access::api_refusal(
         socket_access.mode(),
         api_request_kind(&request.method),
@@ -410,13 +419,6 @@ fn handle_connection_with_stop(
             &error_response_json(request_id, crate::socket_access::REFUSED_CODE, refusal),
         );
     }
-    // Streams and waits can outlive a reload that tightens access; the guard
-    // keeps this connection answerable to it until the request finishes.
-    let _admitted = socket_access.admit(
-        crate::platform::local_stream_peer_pid(&stream),
-        crate::socket_access::ConnectionKind::Api(api_request_kind(&request.method)),
-        crate::platform::local_stream_revoker(&stream),
-    );
 
     match request.method {
         #[cfg(unix)]
