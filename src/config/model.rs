@@ -952,6 +952,10 @@ pub struct UiConfig {
     pub mouse_capture: bool,
     /// Copy text selected with the mouse. Default: true.
     pub copy_on_select: bool,
+    /// Ctrl+C copies a selection and Ctrl+V pastes clipboard text into the
+    /// focused pane; with nothing selected or no text, the key reaches the pane.
+    /// Default: true.
+    pub clipboard_shortcuts: bool,
     /// Host cursor policy. Default: auto.
     pub host_cursor: HostCursorModeConfig,
     /// Modifier that lets right-click gestures pass through to pane apps. Empty disables it.
@@ -1237,6 +1241,7 @@ impl Default for UiConfig {
             mobile_width_threshold: DEFAULT_MOBILE_WIDTH_THRESHOLD,
             mouse_capture: true,
             copy_on_select: true,
+            clipboard_shortcuts: true,
             host_cursor: HostCursorModeConfig::Auto,
             right_click_passthrough_modifier: RightClickPassthroughModifierConfig::default(),
             redraw_on_focus_gained: true,

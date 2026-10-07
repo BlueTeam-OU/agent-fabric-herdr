@@ -356,6 +356,7 @@ fn client_double_click_selects_word_and_copies_only_after_release() {
 fn word_drag_state(copy_on_select: bool) -> ClientShellState {
     let mut config = Config::default();
     config.ui.copy_on_select = copy_on_select;
+    config.ui.clipboard_shortcuts = false;
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
     state.set_snapshot(Box::new(snapshot()));
     let mut pane_surface = surface();

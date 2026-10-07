@@ -54,9 +54,16 @@ impl ClientContextMenuOverlay {
                 source_pane_id,
                 has_manual_label,
                 right_click_passthrough,
+                has_selection,
                 ..
             } => {
-                let mut items = vec![item("Rename pane", Action::RenamePane)];
+                // Clipboard first: the most frequent pane actions, nearest the pointer.
+                let mut items = Vec::new();
+                if *has_selection {
+                    items.push(item("Copy", Action::Copy));
+                }
+                items.push(item("Paste", Action::Paste));
+                items.push(item("Rename pane", Action::RenamePane));
                 if *has_manual_label {
                     items.push(item("Clear pane name", Action::ClearPaneName));
                 }
@@ -153,6 +160,10 @@ impl ClientShellState {
             .focused_pane_id
             .clone()
             .filter(|focused| focused != &pane_id);
+        let has_selection = self
+            .selection
+            .as_ref()
+            .is_some_and(|selection| selection.pane_id == pane_id && selection.is_visible());
         self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
             target: ClientContextMenuTarget::Pane {
                 pane_id,
@@ -160,6 +171,7 @@ impl ClientShellState {
                 source_pane_id,
                 has_manual_label: pane.label.is_some(),
                 right_click_passthrough: pane.right_click_passthrough,
+                has_selection,
             },
             x,
             y,
@@ -449,6 +461,34 @@ impl ClientShellState {
             ),
             ClientContextMenuAction::ClosePane => {
                 self.push_endpoint_method(Method::PaneClose(PaneTarget { pane_id }), outcome)
+            }
+            ClientContextMenuAction::Copy => {
+                self.request_selection_copy(outcome, true);
+                self.selection = None;
+                self.stop_selection_autoscroll();
+                self.selection_highlight_clear_deadline = None;
+            }
+            ClientContextMenuAction::Paste => {
+                match (self.read_clipboard_text)().filter(|text| !text.is_empty()) {
+                    Some(text) => {
+                        super::push_target_event(
+                            ClientInputTarget::Pane(pane_id.clone()),
+                            crate::protocol::ClientPaneInputEvent::Paste(text),
+                            outcome,
+                        );
+                        // What follows a paste (Enter) belongs to the pane it went to.
+                        self.push_endpoint_method(
+                            Method::PaneFocus(PaneTarget { pane_id }),
+                            outcome,
+                        );
+                    }
+                    None => {
+                        outcome.repaint |= self.show_clipboard_notice(
+                            "clipboard has no text to paste",
+                            std::time::Instant::now(),
+                        );
+                    }
+                }
             }
             _ => {}
         }

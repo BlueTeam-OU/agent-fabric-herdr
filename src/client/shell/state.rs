@@ -30,6 +30,7 @@ pub(crate) struct ClientShellConfig {
     pub(super) toast_delay_seconds: u64,
     pub(super) toast_position: crate::config::ToastHerdrPosition,
     pub(super) copy_on_select: bool,
+    pub(super) clipboard_shortcuts: bool,
     pub(super) clipboard_toast_enabled: bool,
     pub(super) clipboard_toast_position: crate::config::ToastClipboardPosition,
     pub(super) theme_name: String,
@@ -525,6 +526,8 @@ pub(super) enum ClientContextMenuAction {
     Zoom,
     ToggleRightClickPassthrough,
     ClosePane,
+    Copy,
+    Paste,
 }
 
 #[derive(Debug)]
@@ -547,6 +550,8 @@ pub(super) enum ClientContextMenuTarget {
         source_pane_id: Option<String>,
         has_manual_label: bool,
         right_click_passthrough: bool,
+        /// A selection in this pane was visible when the menu opened.
+        has_selection: bool,
     },
 }
 
@@ -913,6 +918,9 @@ pub(crate) struct ClientShellState {
     pub(super) selection_autoscroll: Option<ClientSelectionAutoscroll>,
     pub(super) selection_autoscroll_deadline: Option<std::time::Instant>,
     pub(super) selection_highlight_clear_deadline: Option<std::time::Instant>,
+    /// Reads the system clipboard's text for Ctrl+V and the menu's Paste.
+    /// A field so tests can stand in for the clipboard.
+    pub(super) read_clipboard_text: fn() -> Option<String>,
     pub(super) word_selection_gesture: Option<ClientWordSelection>,
     pub(super) word_selection_generation: u64,
     pub(super) copy_mode: Option<ClientCopyModeState>,
@@ -980,6 +988,19 @@ pub(super) struct WorkspaceEntry {
     pub(super) index: usize,
     pub(super) indented: bool,
     pub(super) last_child: bool,
+}
+
+/// Tests never read the developer's clipboard; a test that needs text sets
+/// `read_clipboard_text` itself.
+fn default_clipboard_text_reader() -> fn() -> Option<String> {
+    #[cfg(test)]
+    {
+        || None
+    }
+    #[cfg(not(test))]
+    {
+        crate::platform::read_clipboard_text
+    }
 }
 
 impl ClientShellState {
@@ -1078,6 +1099,7 @@ impl ClientShellState {
             selection_autoscroll: None,
             selection_autoscroll_deadline: None,
             selection_highlight_clear_deadline: None,
+            read_clipboard_text: default_clipboard_text_reader(),
             word_selection_gesture: None,
             word_selection_generation: 0,
             copy_mode: None,
@@ -1807,11 +1829,16 @@ impl ClientShellState {
     }
 
     pub(crate) fn show_copy_feedback(&mut self, now: std::time::Instant) -> bool {
+        self.show_clipboard_notice("copied to clipboard", now)
+    }
+
+    /// A short clipboard notice where "copied to clipboard" appears.
+    pub(crate) fn show_clipboard_notice(&mut self, message: &str, now: std::time::Instant) -> bool {
         if !self.config.clipboard_toast_enabled {
             return false;
         }
         self.copy_feedback = Some(crate::app::state::CopyFeedback {
-            message: "copied to clipboard".to_owned(),
+            message: message.to_owned(),
         });
         self.copy_feedback_deadline = Some(now + std::time::Duration::from_secs(2));
         true

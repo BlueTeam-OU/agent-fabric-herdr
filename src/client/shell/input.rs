@@ -452,6 +452,38 @@ impl ClientShellState {
         }
     }
 
+    /// Ctrl+V with text on the clipboard pastes it into the focused pane, as
+    /// the outer terminal's own paste would. Without text the key is not
+    /// consumed, so a pane app that reads Ctrl+V itself (an agent's image
+    /// paste, vim's block selection) still gets it. A configured Ctrl+V
+    /// binding was resolved before this and wins.
+    fn paste_clipboard_into_focused_pane(
+        &mut self,
+        key: &crate::input::TerminalKey,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        if !self.config.clipboard_shortcuts || !is_modal_paste_shortcut(key) {
+            return false;
+        }
+        // A repeat reaches routing only after its press was consumed here:
+        // holding Ctrl+V pastes once.
+        if key.kind == KeyEventKind::Repeat {
+            return true;
+        }
+        let Some(pane_id) = self.focused_pane_id() else {
+            return false;
+        };
+        let Some(text) = (self.read_clipboard_text)().filter(|text| !text.is_empty()) else {
+            return false;
+        };
+        super::push_target_event(
+            ClientInputTarget::Pane(pane_id),
+            ClientPaneInputEvent::Paste(text),
+            outcome,
+        );
+        true
+    }
+
     pub(super) fn modal_paste_target_active(&self) -> bool {
         if self.popup_pending
             || self.popup_input_target().is_some()
@@ -551,7 +583,7 @@ impl ClientShellState {
         self.word_selection_gesture = None;
         if self.mode != ClientShellMode::Copy
             && self.copy_or_terminal_mode() != ClientShellMode::Copy
-            && !self.config.copy_on_select
+            && (self.config.clipboard_shortcuts || !self.config.copy_on_select)
             && is_retained_selection_copy_key(key)
             && self
                 .selection
@@ -585,6 +617,9 @@ impl ClientShellState {
                 if self.config.keybinds.matches_prefix(key) {
                     self.mode = ClientShellMode::Prefix;
                     outcome.repaint = true;
+                    return None;
+                }
+                if self.paste_clipboard_into_focused_pane(key, outcome) {
                     return None;
                 }
                 self.focused_pane_id().map(ClientInputTarget::Pane)

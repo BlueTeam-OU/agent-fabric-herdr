@@ -1129,7 +1129,19 @@ fn read_clipboard_text_commands() -> Vec<ClipboardCommand> {
     commands
 }
 
+/// How long a clipboard text read may take. The read runs on the client's
+/// input path (Ctrl+V, field paste), and an X11 or Wayland selection owner
+/// that stops answering would otherwise freeze the client until it recovered.
+const CLIPBOARD_TEXT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
 fn read_clipboard_text_with_command(command: &ClipboardCommand) -> Option<String> {
+    read_clipboard_text_with_command_within(command, CLIPBOARD_TEXT_READ_TIMEOUT)
+}
+
+fn read_clipboard_text_with_command_within(
+    command: &ClipboardCommand,
+    timeout: std::time::Duration,
+) -> Option<String> {
     const MAX_CLIPBOARD_TEXT_BYTES: usize = 1024 * 1024;
 
     let mut child = Command::new(command.program)
@@ -1141,18 +1153,18 @@ fn read_clipboard_text_with_command(command: &ClipboardCommand) -> Option<String
         .ok()?;
 
     let stdout = child.stdout.take()?;
-    let read = match read_limited_reader(stdout, MAX_CLIPBOARD_TEXT_BYTES) {
-        Ok(LimitedRead::Oversized) => {
+    let (read_tx, read_rx) = std::sync::mpsc::channel();
+    let reader = crate::thread_spawn::spawn_named("herdr-clipboard-read", move || {
+        let _ = read_tx.send(read_limited_reader(stdout, MAX_CLIPBOARD_TEXT_BYTES));
+    });
+    let read = match reader.ok().and_then(|_| read_rx.recv_timeout(timeout).ok()) {
+        Some(Ok(LimitedRead::Oversized) | Err(_)) | None => {
+            // Killing the command closes its end of the pipe, which ends the reader.
             let _ = child.kill();
             let _ = child.wait();
             return None;
         }
-        Ok(read) => read,
-        Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
+        Some(Ok(read)) => read,
     };
 
     let status = child.wait().ok()?;
@@ -2113,6 +2125,24 @@ mod tests {
         assert_eq!(commands[1].program, "wl-paste");
         assert_eq!(commands[2].program, "xclip");
         assert_eq!(commands[3].program, "xsel");
+    }
+
+    #[test]
+    fn read_clipboard_text_with_command_gives_up_on_a_stalled_owner() {
+        let command = ClipboardCommand {
+            program: "sleep",
+            args: &["30"],
+        };
+        let started = std::time::Instant::now();
+
+        assert_eq!(
+            read_clipboard_text_with_command_within(
+                &command,
+                std::time::Duration::from_millis(100)
+            ),
+            None
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]
