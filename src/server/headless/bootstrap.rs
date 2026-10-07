@@ -35,12 +35,17 @@ pub fn run_server() -> io::Result<()> {
     let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
     let event_hub = api::EventHub::default();
     let server_stop = crate::server::shutdown::ServerStop::default();
+    // The API socket opens before the App exists, so the gate is made here and
+    // handed to the App, which updates it on reload.
+    let socket_access =
+        crate::socket_access::SocketAccessGate::new(loaded_config.config.server.socket_access);
 
     // Start the JSON API socket server.
     let _api_server = match api::start_server_with_stop_control(
         api_tx.clone(),
         event_hub.clone(),
         server_stop.clone(),
+        socket_access.clone(),
     ) {
         Ok(server) => server,
         Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
@@ -64,6 +69,7 @@ pub fn run_server() -> io::Result<()> {
             config::config_diagnostic_summary(&loaded_config.diagnostics),
             api_rx,
             event_hub,
+            socket_access,
         )?;
         seed_startup_workspace_if_empty(&mut app);
 
@@ -178,6 +184,7 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
             api_tx.clone(),
             event_hub.clone(),
             server_stop.clone(),
+            app.socket_access.clone(),
         )?;
         let mut server = HeadlessServer::new(
             app,

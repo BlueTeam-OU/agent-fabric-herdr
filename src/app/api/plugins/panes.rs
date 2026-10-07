@@ -358,6 +358,7 @@ fn plugin_pane_protected_env_key(key: &str) -> bool {
         key,
         crate::api::SOCKET_PATH_ENV_VAR
             | "HERDR_ENV"
+            | crate::HERDR_POPUP_ENV_VAR
             | "HERDR_PLUGIN_ID"
             | "HERDR_PLUGIN_ROOT"
             | "HERDR_PLUGIN_CONFIG_DIR"

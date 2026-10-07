@@ -22,6 +22,7 @@ use crate::ipc::{
     socket_file_identity, LocalStream, LocalStreamRead, SocketFileIdentity,
 };
 use crate::server::shutdown::{ServerStop, ShutdownReason};
+use crate::socket_access::{ApiRequestKind, SocketAccessGate};
 
 #[cfg(test)]
 mod subscription_socket_tests;
@@ -63,8 +64,15 @@ pub(crate) fn start_server_with_stop_control(
     api_tx: ApiRequestSender,
     event_hub: EventHub,
     server_stop: ServerStop,
+    socket_access: SocketAccessGate,
 ) -> std::io::Result<ServerHandle> {
-    start_server_inner(api_tx, event_hub, default_capabilities(), Some(server_stop))
+    start_server_inner(
+        api_tx,
+        event_hub,
+        default_capabilities(),
+        Some(server_stop),
+        socket_access,
+    )
 }
 
 fn default_capabilities() -> Option<ServerCapabilities> {
@@ -83,6 +91,7 @@ fn start_server_inner(
     event_hub: EventHub,
     mut capabilities: Option<ServerCapabilities>,
     server_stop: Option<ServerStop>,
+    socket_access: SocketAccessGate,
 ) -> std::io::Result<ServerHandle> {
     let path = socket_path();
     prepare_socket_path(&path)?;
@@ -129,6 +138,7 @@ fn start_server_inner(
                 let event_hub = event_hub.clone();
                 let capabilities = capabilities.clone();
                 let server_stop = server_stop.clone();
+                let socket_access = socket_access.clone();
                 let connection_running = Arc::clone(&listener_running);
                 #[cfg(unix)]
                 let ssh_agents = ssh_agents.clone();
@@ -140,6 +150,7 @@ fn start_server_inner(
                         &connection_running,
                         capabilities,
                         server_stop.as_ref(),
+                        &socket_access,
                         #[cfg(unix)]
                         ssh_agents.as_ref(),
                     ) {
@@ -320,6 +331,7 @@ fn handle_connection(
         running,
         capabilities,
         None,
+        &SocketAccessGate::default(),
         #[cfg(unix)]
         None,
     )
@@ -332,6 +344,7 @@ fn handle_connection_with_stop(
     running: &Arc<AtomicBool>,
     capabilities: Option<ServerCapabilities>,
     server_stop: Option<&ServerStop>,
+    socket_access: &SocketAccessGate,
     #[cfg(unix)] ssh_agents: Option<&crate::platform::ssh_agent::SshAgentRegistry>,
 ) -> std::io::Result<()> {
     if let Err(err) = stream.set_send_timeout(Some(STREAM_WRITE_TIMEOUT)) {
@@ -380,6 +393,32 @@ fn handle_connection_with_stop(
     let method = api_method_name(&request.method);
     let changes_ui = request_changes_ui(&request);
     crate::logging::api_request_started(&request_id, method, changes_ui);
+
+    // Registered before it is judged: a reload that lands between the two then
+    // either sees this connection or set the mode the judgement reads.
+    // Streams and waits can outlive a reload; the guard keeps the connection
+    // answerable to one until the request finishes.
+    let _admitted = socket_access.admit(
+        crate::platform::local_stream_peer_pid(&stream),
+        crate::socket_access::ConnectionKind::Api(api_request_kind(&request.method)),
+        crate::platform::local_stream_revoker(&stream),
+    );
+    if let Some(refusal) = crate::socket_access::api_refusal(
+        socket_access.mode(),
+        api_request_kind(&request.method),
+        || crate::platform::local_stream_peer_place(&stream),
+    ) {
+        warn!(
+            method,
+            caller = crate::platform::local_stream_peer_description(&stream).as_deref(),
+            "api request refused by server.socket_access"
+        );
+        crate::logging::api_request_failed(&request_id, method, &refusal);
+        return write_text_line_allow_disconnect(
+            &mut stream,
+            &error_response_json(request_id, crate::socket_access::REFUSED_CODE, refusal),
+        );
+    }
 
     match request.method {
         #[cfg(unix)]
@@ -599,6 +638,18 @@ fn handle_request(
     }
 
     dispatch_to_app(request, api_tx, None, response_write_complete, None)
+}
+
+/// Requests not named here are `Control`: a method added later is guarded by
+/// default and must be opened deliberately.
+fn api_request_kind(method: &Method) -> ApiRequestKind {
+    match method {
+        Method::Ping(_) => ApiRequestKind::Status,
+        Method::ServerStop(_)
+        | Method::ServerLiveHandoff(_)
+        | Method::ServerSshAgentRegister(_) => ApiRequestKind::Lifecycle,
+        _ => ApiRequestKind::Control,
+    }
 }
 
 pub(crate) fn api_method_name(method: &Method) -> &'static str {
@@ -1207,6 +1258,7 @@ mod tests {
                 &Arc::new(AtomicBool::new(true)),
                 None,
                 None,
+                &SocketAccessGate::default(),
                 Some(&worker_registry),
             )
             .unwrap();
@@ -1306,7 +1358,13 @@ mod tests {
         let (api_tx, _api_rx) = mpsc::unbounded_channel();
 
         crate::thread_spawn::test_hook::fail_next_spawns(1);
-        let result = start_server_inner(api_tx, EventHub::default(), None, None);
+        let result = start_server_inner(
+            api_tx,
+            EventHub::default(),
+            None,
+            None,
+            SocketAccessGate::default(),
+        );
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
 
         assert!(result.is_err());
@@ -1456,6 +1514,122 @@ mod tests {
         assert_eq!(response["id"], "unknown");
         assert_eq!(response["error"]["code"], "invalid_request");
         assert!(api_rx.try_recv().is_err());
+    }
+
+    fn handle_connection_under(
+        access: crate::config::SocketAccess,
+        name: &str,
+        request: &[u8],
+    ) -> (
+        serde_json::Value,
+        mpsc::UnboundedReceiver<ApiRequestMessage>,
+    ) {
+        let (mut client, server, _path) = local_stream_pair(name);
+        let (api_tx, api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        client.write_all(request).unwrap();
+        client.flush().unwrap();
+        handle_connection_with_stop(
+            server,
+            &api_tx,
+            &EventHub::default(),
+            &Arc::new(AtomicBool::new(true)),
+            None,
+            None,
+            &SocketAccessGate::new(access),
+            #[cfg(unix)]
+            None,
+        )
+        .unwrap();
+        let response = read_line(&mut client);
+        (serde_json::from_str(&response).unwrap(), api_rx)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tightening_access_ends_an_admitted_connection_on_a_real_socket() {
+        use std::io::Read as _;
+
+        let (mut client, server, _path) = local_stream_pair("revoked-on-reload");
+        let gate = SocketAccessGate::new(crate::config::SocketAccess::All);
+        let _admitted = gate.admit(
+            crate::platform::local_stream_peer_pid(&server),
+            crate::socket_access::ConnectionKind::Api(ApiRequestKind::Control),
+            crate::platform::local_stream_revoker(&server),
+        );
+        client
+            .set_recv_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+
+        // client_only refuses control from every place, wherever the test runs.
+        gate.set(crate::config::SocketAccess::ClientOnly);
+
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            client.read(&mut byte).unwrap(),
+            0,
+            "the server side shut down"
+        );
+    }
+
+    #[test]
+    fn request_kinds_open_only_status_and_lifecycle() {
+        let kind = |method: &str, params: &str| {
+            let request: Request = serde_json::from_str(&format!(
+                r#"{{"id":"k","method":"{method}","params":{params}}}"#
+            ))
+            .unwrap();
+            api_request_kind(&request.method)
+        };
+        assert_eq!(kind("ping", "{}"), ApiRequestKind::Status);
+        assert_eq!(kind("server.stop", "{}"), ApiRequestKind::Lifecycle);
+        assert_eq!(kind("server.live_handoff", "{}"), ApiRequestKind::Lifecycle);
+        assert_eq!(
+            kind("server.ssh_agent.register", r#"{"socket_path":"/tmp/a"}"#),
+            ApiRequestKind::Lifecycle
+        );
+        for control in ["workspace.list", "server.reload_config", "events.subscribe"] {
+            let params = if control == "events.subscribe" {
+                r#"{"subscriptions":[]}"#
+            } else {
+                "{}"
+            };
+            assert_eq!(kind(control, params), ApiRequestKind::Control, "{control}");
+        }
+    }
+
+    #[test]
+    fn client_only_refuses_control_requests_before_they_reach_the_app() {
+        // client_only refuses control from every place, so this holds wherever
+        // the test process runs.
+        let (response, mut api_rx) = handle_connection_under(
+            crate::config::SocketAccess::ClientOnly,
+            "client-only-control",
+            b"{\"id\":\"ws\",\"method\":\"workspace.list\",\"params\":{}}\n",
+        );
+        assert_eq!(response["id"], "ws");
+        assert_eq!(
+            response["error"]["code"],
+            crate::socket_access::REFUSED_CODE
+        );
+        assert!(
+            api_rx.try_recv().is_err(),
+            "a refused request reached the app"
+        );
+    }
+
+    #[test]
+    fn every_mode_still_answers_status() {
+        for access in [
+            crate::config::SocketAccess::OutsidePanes,
+            crate::config::SocketAccess::ClientOnly,
+        ] {
+            let (response, _api_rx) = handle_connection_under(
+                access,
+                "guarded-ping",
+                b"{\"id\":\"p\",\"method\":\"ping\",\"params\":{}}\n",
+            );
+            assert_eq!(response["result"]["type"], "pong", "{access:?}");
+        }
     }
 
     #[test]

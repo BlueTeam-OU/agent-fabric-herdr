@@ -256,6 +256,7 @@ fn spawn_windows_client_accept_thread(
     listener: LocalListener,
     should_quit: Arc<AtomicBool>,
     server_event_tx: mpsc::Sender<ServerEvent>,
+    socket_access: crate::socket_access::SocketAccessGate,
 ) -> io::Result<std::thread::JoinHandle<()>> {
     crate::thread_spawn::spawn_named("herdr-client-accept", move || {
         let mut next_client_id = 1_u64;
@@ -282,12 +283,14 @@ fn spawn_windows_client_accept_thread(
 
             let should_quit = should_quit.clone();
             let server_event_tx = server_event_tx.clone();
+            let socket_access = socket_access.clone();
             let spawned = crate::thread_spawn::spawn_named("herdr-client-conn", move || {
                 if let Err(err) = crate::server::client_transport::handle_client_handshake(
                     stream,
                     client_id,
                     &server_event_tx,
                     &should_quit,
+                    &socket_access,
                 ) {
                     debug!(client_id, err = %err, "client handshake failed");
                 }
@@ -329,7 +332,12 @@ impl HeadlessServer {
         // Channel for server events from client threads.
         let (server_event_tx, server_event_rx) = mpsc::channel(64);
         #[cfg(windows)]
-        spawn_windows_client_accept_thread(listener, should_quit.clone(), server_event_tx.clone())?;
+        spawn_windows_client_accept_thread(
+            listener,
+            should_quit.clone(),
+            server_event_tx.clone(),
+            app.socket_access.clone(),
+        )?;
 
         let server_keybindings = app_keybindings(&app);
         let headless_size = app.state.headless_size;
@@ -1018,6 +1026,7 @@ impl HeadlessServer {
             &mut self.next_client_id,
             &self.should_quit,
             &self.server_event_tx,
+            &self.app.socket_access,
         )
     }
 

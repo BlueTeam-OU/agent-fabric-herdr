@@ -147,6 +147,8 @@ pub struct App {
     session_writer: Arc<std::sync::Mutex<crate::persist::SessionWriter>>,
     pane_exit_checkpoint_pending: bool,
     pub(crate) detached_process_children: Vec<std::process::Child>,
+    /// `server.socket_access`, shared with the socket accept paths.
+    pub(crate) socket_access: crate::socket_access::SocketAccessGate,
     tab_bar_status_generation: u64,
     tab_bar_datetimes: Vec<tab_bar_status::TabBarDatetimeRuntime>,
     tab_bar_commands: Vec<tab_bar_status::TabBarCommandRuntime>,
@@ -381,8 +383,15 @@ impl App {
         api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
         event_hub: crate::api::EventHub,
     ) -> Self {
-        Self::try_new(config, policy, config_diagnostic, api_rx, event_hub)
-            .expect("test app startup")
+        Self::try_new(
+            config,
+            policy,
+            config_diagnostic,
+            api_rx,
+            event_hub,
+            crate::socket_access::SocketAccessGate::new(config.server.socket_access),
+        )
+        .expect("test app startup")
     }
 
     pub fn try_new(
@@ -391,6 +400,8 @@ impl App {
         config_diagnostic: Option<String>,
         api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
         event_hub: crate::api::EventHub,
+        // The listeners' gate, not a new one: reloads must reach the sockets.
+        socket_access: crate::socket_access::SocketAccessGate,
     ) -> std::io::Result<Self> {
         let prefix_keys = config.prefix_keys();
         crate::kitty_graphics::set_enabled(config.kitty_graphics_enabled());
@@ -660,6 +671,7 @@ impl App {
             session_writer,
             pane_exit_checkpoint_pending: false,
             detached_process_children: Vec::new(),
+            socket_access,
             tab_bar_status_generation: 0,
             tab_bar_datetimes: Vec::new(),
             tab_bar_commands: Vec::new(),
@@ -704,6 +716,7 @@ impl App {
             config_diagnostic,
             api_rx,
             event_hub,
+            crate::socket_access::SocketAccessGate::new(config.server.socket_access),
         )?;
         if !crate::plugin_installations::retain_startup(
             &mut app.plugin_installation_leases,
@@ -960,6 +973,8 @@ impl App {
                 diagnostics.push(format!("{diagnostic}; keeping current [server] settings"));
             } else {
                 self.state.headless_size = config.headless_size();
+                self.socket_access.set(config.server.socket_access);
+                diagnostics.extend(config.unrecognized_socket_access_diagnostic());
             }
         }
 
@@ -1746,6 +1761,41 @@ mod tests {
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         restore_xdg_state_home(original_xdg_state_home);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reload_config_updates_socket_access_for_running_listeners() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-socket-access");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        // The accept paths hold clones; a reload must reach them, not a copy.
+        let listener_view = app.socket_access.clone();
+        assert_eq!(listener_view.mode(), crate::config::SocketAccess::All);
+
+        std::fs::write(&path, "[server]\nsocket_access = \"outside_panes\"\n").unwrap();
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(
+            listener_view.mode(),
+            crate::config::SocketAccess::OutsidePanes
+        );
+
+        std::fs::write(&path, "[server]\nsocket_access = \"outside-panes\"\n").unwrap();
+        let report = app.reload_config();
+        assert_eq!(
+            listener_view.mode(),
+            crate::config::SocketAccess::ClientOnly
+        );
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("server.socket_access")));
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

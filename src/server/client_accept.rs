@@ -7,6 +7,7 @@ use tracing::{debug, error, warn};
 
 use crate::ipc::LocalListener;
 use crate::server::client_transport::{self, ServerEvent};
+use crate::socket_access::SocketAccessGate;
 
 /// Accepts pending thin-client connections and starts their handshake readers.
 pub(crate) fn accept_pending_client_connections(
@@ -14,6 +15,7 @@ pub(crate) fn accept_pending_client_connections(
     next_client_id: &mut u64,
     should_quit: &Arc<AtomicBool>,
     server_event_tx: &mpsc::Sender<ServerEvent>,
+    socket_access: &SocketAccessGate,
 ) -> io::Result<()> {
     loop {
         if should_quit.load(Ordering::Acquire) {
@@ -31,12 +33,14 @@ pub(crate) fn accept_pending_client_connections(
 
                 let should_quit = should_quit.clone();
                 let server_event_tx = server_event_tx.clone();
+                let socket_access = socket_access.clone();
                 let spawned = crate::thread_spawn::spawn_named("herdr-client-conn", move || {
                     if let Err(err) = client_transport::handle_client_handshake(
                         stream,
                         client_id,
                         &server_event_tx,
                         &should_quit,
+                        &socket_access,
                     ) {
                         debug!(client_id, err = %err, "client handshake failed");
                     }

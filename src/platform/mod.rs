@@ -92,6 +92,32 @@ pub(crate) fn local_stream_peer_description(_stream: &crate::ipc::LocalStream) -
     None
 }
 
+/// Windows named pipes have no peer placement here yet; guarded socket access
+/// refuses every caller it cannot place.
+#[cfg(not(unix))]
+pub(crate) fn local_stream_peer_pid(_stream: &crate::ipc::LocalStream) -> Option<u32> {
+    None
+}
+
+#[cfg(not(unix))]
+pub(crate) fn process_place(_pid: Option<u32>) -> PeerPlace {
+    PeerPlace::Unidentified
+}
+
+/// Without a way to end a named-pipe connection from another thread here, a
+/// connection admitted before a reload tightened access stays open on Windows.
+#[cfg(not(unix))]
+pub(crate) fn local_stream_revoker(
+    _stream: &crate::ipc::LocalStream,
+) -> Box<dyn Fn() + Send + Sync> {
+    Box::new(|| {})
+}
+
+/// Places the process on the other end of a local socket for socket access.
+pub(crate) fn local_stream_peer_place(stream: &crate::ipc::LocalStream) -> PeerPlace {
+    process_place(local_stream_peer_pid(stream))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {
     Hangup,
@@ -373,8 +399,12 @@ pub(crate) mod unix_image_files;
 #[cfg(unix)]
 pub(crate) use unix_common::{
     begin_cli_output, end_cli_output, forward_remote_bridge_stdio, ignore_server_hangup,
-    local_stream_peer_description, spawn_server_signal_monitor, RemoteBridgeWake,
+    local_stream_peer_description, local_stream_peer_pid, local_stream_revoker, process_place,
+    spawn_server_signal_monitor, RemoteBridgeWake,
 };
+
+mod peer_place;
+pub(crate) use peer_place::PeerPlace;
 
 mod client_state;
 pub(crate) use client_state::{create_private_state_file, replace_file, sync_parent_directory};

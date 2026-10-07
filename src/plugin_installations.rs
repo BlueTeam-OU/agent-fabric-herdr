@@ -423,6 +423,7 @@ mod tests {
                 None,
                 rx,
                 crate::api::EventHub::default(),
+                Default::default(),
             )
             .expect("corrupt registry must not prevent server startup");
             assert!(app.state.installed_plugins.is_empty());
@@ -444,6 +445,7 @@ mod tests {
                 None,
                 rx,
                 crate::api::EventHub::default(),
+                Default::default(),
             )
             .expect("plugin pin errors must not prevent server startup");
             assert!(!app.plugin_installation_cleanup_allowed);

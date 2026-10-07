@@ -672,6 +672,7 @@ pub(crate) fn handle_client_handshake(
     client_id: u64,
     server_event_tx: &mpsc::Sender<ServerEvent>,
     should_quit: &Arc<AtomicBool>,
+    socket_access: &crate::socket_access::SocketAccessGate,
 ) -> io::Result<()> {
     if should_quit.load(Ordering::Acquire) {
         return Ok(());
@@ -704,6 +705,40 @@ pub(crate) fn handle_client_handshake(
             return Ok(());
         }
     };
+
+    // Registered before it is judged, so a reload landing between the two
+    // cannot miss it; the guard keeps the connection answerable to later
+    // reloads for the life of the read loop below.
+    let _admitted = socket_access.admit(
+        crate::platform::local_stream_peer_pid(&stream),
+        crate::socket_access::ConnectionKind::Client,
+        crate::platform::local_stream_revoker(&stream),
+    );
+    // Placed after the hello, on this connection's thread, so the refusal can
+    // answer in the shape the client reads and `/proc` never blocks accept.
+    if let Some(refusal) = crate::socket_access::client_refusal(socket_access.mode(), || {
+        crate::platform::local_stream_peer_place(&stream)
+    }) {
+        warn!(
+            client_id,
+            caller = crate::platform::local_stream_peer_description(&stream).as_deref(),
+            "client connection refused by server.socket_access"
+        );
+        match hello {
+            ClientMessage::EndpointControl { ref kind, .. } if kind == ENDPOINT_HELLO_KIND => {
+                write_endpoint_rejection(&mut stream, crate::socket_access::REFUSED_CODE, refusal);
+            }
+            _ => {
+                let welcome = ServerMessage::Welcome {
+                    version: PROTOCOL_VERSION,
+                    encoding: RenderEncoding::TerminalAnsi,
+                    error: Some(refusal),
+                };
+                let _ = protocol::write_message(&mut stream, &welcome);
+            }
+        }
+        return Ok(());
+    }
 
     let (
         client_cols,
@@ -1891,6 +1926,58 @@ mod tests {
         ));
     }
 
+    // Windows has no revoker yet; its connections stay open (documented).
+    #[cfg(unix)]
+    #[test]
+    fn a_reload_that_stops_admitting_an_attached_client_disconnects_it() {
+        let (mut client_stream, server_stream, _path) = local_stream_pair("client-revoked");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let handshake_quit = should_quit.clone();
+        let gate = crate::socket_access::SocketAccessGate::placing_peers_with(
+            crate::config::SocketAccess::All,
+            |_| crate::platform::PeerPlace::InsidePane,
+        );
+        let handshake_gate = gate.clone();
+        let (ended_tx, ended_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = handle_client_handshake(
+                server_stream,
+                44,
+                &server_event_tx,
+                &handshake_quit,
+                &handshake_gate,
+            );
+            let _ = ended_tx.send(result.is_ok());
+        });
+        protocol::write_message(
+            &mut client_stream,
+            &ClientMessage::TerminalHello {
+                version: PROTOCOL_VERSION,
+                cols: 100,
+                rows: 30,
+                cell_width_px: 8,
+                cell_height_px: 16,
+                pixel_mouse: false,
+            },
+        )
+        .expect("write hello");
+        let _welcome: ServerMessage =
+            protocol::read_message(&mut client_stream, MAX_FRAME_SIZE).expect("read welcome");
+        let _connected = server_event_rx.blocking_recv().expect("client connected");
+
+        gate.set(crate::config::SocketAccess::OutsidePanes);
+
+        assert_eq!(
+            ended_rx.recv_timeout(Duration::from_secs(5)),
+            Ok(true),
+            "the server's read loop ends when access is withdrawn"
+        );
+        let after: Result<ServerMessage, _> =
+            protocol::read_message(&mut client_stream, MAX_FRAME_SIZE);
+        assert!(after.is_err(), "the client sees the connection end");
+    }
+
     #[test]
     fn handshake_negotiates_terminal_ansi_encoding() {
         let (mut client_stream, server_stream, _path) = local_stream_pair("client-handshake-ansi");
@@ -1898,7 +1985,13 @@ mod tests {
         let should_quit = Arc::new(AtomicBool::new(false));
         let handshake_quit = should_quit.clone();
         let handle = std::thread::spawn(move || {
-            handle_client_handshake(server_stream, 42, &server_event_tx, &handshake_quit)
+            handle_client_handshake(
+                server_stream,
+                42,
+                &server_event_tx,
+                &handshake_quit,
+                &Default::default(),
+            )
         });
 
         protocol::write_message(
@@ -1966,7 +2059,13 @@ mod tests {
         let should_quit = Arc::new(AtomicBool::new(false));
         let handshake_quit = should_quit.clone();
         let handle = std::thread::spawn(move || {
-            handle_client_handshake(server_stream, 43, &server_event_tx, &handshake_quit)
+            handle_client_handshake(
+                server_stream,
+                43,
+                &server_event_tx,
+                &handshake_quit,
+                &Default::default(),
+            )
         });
 
         protocol::write_message(&mut client_stream, &endpoint_hello(80, 29))
@@ -2029,7 +2128,13 @@ mod tests {
         let should_quit = Arc::new(AtomicBool::new(false));
         let handshake_quit = should_quit.clone();
         let handle = std::thread::spawn(move || {
-            handle_client_handshake(server_stream, 43, &server_event_tx, &handshake_quit)
+            handle_client_handshake(
+                server_stream,
+                43,
+                &server_event_tx,
+                &handshake_quit,
+                &Default::default(),
+            )
         });
 
         protocol::write_message(&mut client_stream, &endpoint_hello(0, 29))

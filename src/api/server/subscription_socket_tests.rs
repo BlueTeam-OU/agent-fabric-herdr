@@ -354,3 +354,51 @@ fn lagging_subscription_closes_without_interrupting_other_clients() {
     assert_eq!(response["id"], "ordinary");
     assert_eq!(response["result"]["type"], "workspace_list");
 }
+
+// Windows has no revoker yet; its connections stay open (documented).
+#[cfg(unix)]
+#[test]
+fn a_reload_that_stops_admitting_a_subscription_ends_it() {
+    let mut test = SocketTest::new();
+    let path = std::env::temp_dir().join(format!("herdr-sub-revoked-{}", std::process::id()));
+    let listener = bind_local_listener(&path).unwrap();
+    test.paths.push(path.clone());
+    let stream = crate::ipc::connect_local_stream(&path).unwrap();
+    let server = listener.accept().unwrap();
+    let mut client = Client {
+        stream,
+        buffered: Vec::new(),
+    };
+    set_local_stream_polling(&mut client.stream, true).unwrap();
+    let gate = crate::socket_access::SocketAccessGate::placing_peers_with(
+        crate::config::SocketAccess::All,
+        |_| crate::platform::PeerPlace::InsidePane,
+    );
+    let connection_gate = gate.clone();
+    let (api_tx, hub, running) = (
+        test.api_tx.clone(),
+        test.hub.clone(),
+        Arc::clone(&test.running),
+    );
+    test.workers.push(std::thread::spawn(move || {
+        handle_connection_with_stop(
+            server,
+            &api_tx,
+            &hub,
+            &running,
+            None,
+            None,
+            &connection_gate,
+            #[cfg(unix)]
+            None,
+        )
+    }));
+    client.subscribe("revoked", json!([{"type": "workspace.renamed"}]));
+    client.assert_started("revoked");
+
+    gate.set(crate::config::SocketAccess::OutsidePanes);
+
+    assert_eq!(client.next_line(Instant::now() + RESPONSE_TIMEOUT), None);
+    // The server side leaves on its next write.
+    test.hub.push(renamed_event(0));
+}

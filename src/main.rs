@@ -2,6 +2,9 @@ use std::io;
 
 pub(crate) const HERDR_ENV_VAR: &str = "HERDR_ENV";
 pub(crate) const HERDR_ENV_VALUE: &str = "1";
+/// Set on popup commands, which run in a PTY like a pane but are the
+/// person's own configured commands: socket access places them outside panes.
+pub(crate) const HERDR_POPUP_ENV_VAR: &str = "HERDR_POPUP";
 const NESTED_HERDR_MESSAGES: [&str; 6] = [
     "inception detected. we need to go deeper... said no one ever.",
     "recursion is a pathway to many abilities some consider to be... unnatural.",
@@ -52,6 +55,7 @@ mod render_signal;
 mod selection;
 mod server;
 mod session;
+mod socket_access;
 mod sound;
 mod terminal;
 mod terminal_effects;
@@ -228,6 +232,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Windows only: allow ordinary same-account clients to control an elevated server.
 # Requires a server restart.
 # allow_unelevated_clients = false
+# Who may use the API and client sockets: "all", "outside_panes" (refuse
+# processes inside panes) or "client_only" (the attached client only).
+# socket_access = "all"
 # headless_cols = 120
 # headless_rows = 40
 

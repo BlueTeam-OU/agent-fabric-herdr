@@ -171,14 +171,53 @@ impl Config {
             }
             Err(err) => {
                 warn!(err = %err, "config parse error, using defaults");
+                let mut config = Self::default();
+                config.server.socket_access = socket_access_from_unparsed_config(&content);
+                let mut diagnostics = vec![format!("config parse error: {err}; using defaults")];
+                diagnostics.extend(config.unrecognized_socket_access_diagnostic());
                 LoadedConfig {
-                    config: Self::default(),
-                    diagnostics: vec![format!("config parse error: {err}; using defaults")],
+                    config,
+                    diagnostics,
                     invalid_sections: Vec::new(),
                 }
             }
         }
     }
+}
+
+/// Recovers `server.socket_access` from a file that fails to load as a whole,
+/// so an error in an unrelated section never opens the sockets wider than
+/// the person set them. When even that cannot be read but a line of the file
+/// assigns the setting, it is enforced as `client_only`; the commented line in
+/// the default template is not an assignment.
+fn socket_access_from_unparsed_config(content: &str) -> super::SocketAccess {
+    #[derive(Default, serde::Deserialize)]
+    #[serde(default)]
+    struct ServerSectionOnly {
+        server: SocketAccessOnly,
+    }
+    #[derive(Default, serde::Deserialize)]
+    #[serde(default)]
+    struct SocketAccessOnly {
+        socket_access: super::SocketAccess,
+    }
+
+    match toml::from_str::<ServerSectionOnly>(content) {
+        Ok(only) => only.server.socket_access,
+        Err(_) if assigns_socket_access(content) => super::SocketAccess::Unrecognized,
+        Err(_) => super::SocketAccess::All,
+    }
+}
+
+/// Whether the file names the key outside a comment. A file this broken cannot
+/// be read for its spelling (bare, quoted, dotted, inline table), so any
+/// mention fails closed; only text after `#` is ignored.
+fn assigns_socket_access(content: &str) -> bool {
+    content.lines().any(|line| {
+        line.split('#')
+            .next()
+            .is_some_and(|code| code.contains("socket_access"))
+    })
 }
 
 pub(super) fn resolve_config_relative_path(path: &Path) -> PathBuf {
@@ -750,6 +789,56 @@ fn upsert_section_raw(content: &str, section: &str, key: &str, value: &str) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn socket_access_survives_an_error_in_another_section() {
+        let content =
+            "[server]\nsocket_access = \"outside_panes\"\n[ui]\nsidebar_min_width = \"wide\"\n";
+        assert_eq!(
+            socket_access_from_unparsed_config(content),
+            crate::config::SocketAccess::OutsidePanes
+        );
+    }
+
+    #[test]
+    fn an_unreadable_file_naming_socket_access_enforces_client_only() {
+        let content = "[server\nsocket_access = \"all\"\n";
+        assert_eq!(
+            socket_access_from_unparsed_config(content),
+            crate::config::SocketAccess::Unrecognized
+        );
+        assert_eq!(
+            socket_access_from_unparsed_config("[ui\n"),
+            crate::config::SocketAccess::All
+        );
+    }
+
+    #[test]
+    fn every_spelling_of_the_key_is_a_setting_in_an_unreadable_file() {
+        for assignment in [
+            "socket_access = \"outside_panes\"",
+            "server.socket_access = \"outside_panes\"",
+            "\"socket_access\" = \"outside_panes\"",
+            "server . 'socket_access'=\"outside_panes\"",
+            "server = { socket_access = \"outside_panes\" }",
+        ] {
+            let content = format!("{assignment}\n[ui\n");
+            assert_eq!(
+                socket_access_from_unparsed_config(&content),
+                crate::config::SocketAccess::Unrecognized,
+                "{assignment}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_templates_commented_socket_access_line_is_not_a_setting() {
+        let content = "[server]\n# socket_access = \"all\"\n#socket_access=\"client_only\"\n[ui\n";
+        assert_eq!(
+            socket_access_from_unparsed_config(content),
+            crate::config::SocketAccess::All
+        );
+    }
 
     #[test]
     fn upsert_top_level_bool_replaces_existing_value() {

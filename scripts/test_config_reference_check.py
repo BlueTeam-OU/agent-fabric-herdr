@@ -63,6 +63,8 @@ pub enum HostCursorModeConfig {
     Auto,
     NativeCursor,
     Drawn,
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,7 +140,7 @@ class CollectKeysTests(unittest.TestCase):
         self.assertIn("extra.items", str(raised.exception))
         self.assertIn("SKIPPED_SUBTREES", str(raised.exception))
 
-    def test_enum_values_respect_rename_all_and_untagged_enums_have_none(self) -> None:
+    def test_enum_values_respect_rename_all_and_skip_catch_alls_and_untagged_enums(self) -> None:
         entries = {entry["key"]: entry for entry in collect_entries(sample_model())}
 
         self.assertEqual(

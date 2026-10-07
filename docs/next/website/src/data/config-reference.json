@@ -23,6 +23,17 @@
           "description": "Windows only: allow ordinary clients from the same account to control an elevated server and its administrator panes. Applies at server startup and requires a restart; config reload does not change access. The --allow-unelevated-clients startup flag enables sharing even when this setting is false."
         },
         {
+          "key": "server.socket_access",
+          "type": "enum",
+          "default": "\"all\"",
+          "description": "Which processes running as this account may use the API and client sockets. outside_panes refuses processes inside Herdr panes; client_only serves only an attached client and Herdr's own server management. Status checks are always answered. An unrecognized value is enforced as client_only. Linux only: elsewhere the restricted modes refuse every caller except status checks.",
+          "values": [
+            "all",
+            "outside_panes",
+            "client_only"
+          ]
+        },
+        {
           "key": "server.headless_cols",
           "type": "integer",
           "default": "120",

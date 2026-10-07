@@ -185,6 +185,9 @@ def parse_enum_body(
     variants: list[str] = []
     index = start
     depth = 0
+    # A `#[serde(other)]` variant catches values the model does not know; it is
+    # never a value a person writes, so it is not an allowed value.
+    catch_all = False
 
     while index < len(lines):
         stripped = lines[index].strip()
@@ -192,10 +195,16 @@ def parse_enum_body(
             index += 1
             break
 
-        if depth == 0 and not stripped.startswith(("#[", "///")):
+        if depth == 0 and re.fullmatch(r"#\[serde\(other\)\]", stripped):
+            catch_all = True
+        elif depth == 0 and not stripped.startswith(("#[", "///")):
             match = VARIANT_RE.match(stripped)
             if match:
-                variants.append(apply_rename_all(match.group(1), rename_all or "lowercase"))
+                if not catch_all:
+                    variants.append(
+                        apply_rename_all(match.group(1), rename_all or "lowercase")
+                    )
+                catch_all = False
         depth += stripped.count("{") - stripped.count("}")
         index += 1
 
