@@ -81,7 +81,7 @@ Both restricted modes still answer status checks, so a client can tell whether a
 
 This setting keeps processes in panes from using Herdr's sockets by the usual routes. It is not a security boundary between processes running as the same account. A process that leaves its pane's session and clears its environment, or anything started outside Herdr, is not refused. To isolate an agent, run it as another account.
 
-An unrecognized value is enforced as `"client_only"` and reported as a configuration error. If the configuration file cannot be parsed, Herdr still reads this setting from it. Reloading the configuration applies a change to new connections. Connections already open, such as an attached client or an event subscription, keep the access they were given until they reconnect. Under `"client_only"`, `herdr server reload-config` is refused, so reload from the client or restart the server.
+An unrecognized value is enforced as `"client_only"` and reported as a configuration error. If the configuration file cannot be parsed, Herdr still reads this setting from it. Reloading the configuration applies a change to the running server. Connections already open that the new setting refuses, such as a client attached from a pane or an event subscription, are closed. On Windows they stay open until they reconnect. Under `"client_only"`, `herdr server reload-config` is refused, so reload from the client or restart the server.
 
 ## Terminal defaults
 
