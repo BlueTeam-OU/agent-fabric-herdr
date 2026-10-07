@@ -2,6 +2,9 @@ use std::io;
 
 pub(crate) const HERDR_ENV_VAR: &str = "HERDR_ENV";
 pub(crate) const HERDR_ENV_VALUE: &str = "1";
+/// Set on popup commands, which run in a PTY like a pane but are the
+/// person's own configured commands: socket access places them outside panes.
+pub(crate) const HERDR_POPUP_ENV_VAR: &str = "HERDR_POPUP";
 const NESTED_HERDR_MESSAGES: [&str; 6] = [
     "inception detected. we need to go deeper... said no one ever.",
     "recursion is a pathway to many abilities some consider to be... unnatural.",

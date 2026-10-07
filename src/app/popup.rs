@@ -136,6 +136,11 @@ impl App {
         let cwd = cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
         let pane_id = PaneId::alloc();
         let terminal_id = TerminalId::alloc();
+        let mut extra_env = extra_env;
+        extra_env.push((
+            crate::HERDR_POPUP_ENV_VAR.to_owned(),
+            crate::HERDR_ENV_VALUE.to_owned(),
+        ));
         let launch_env = PaneLaunchEnv::from_extra(extra_env).without_pane_identity();
         let terminal_area = if self.state.view.terminal_area.width >= 4
             && self.state.view.terminal_area.height >= 4

@@ -736,9 +736,9 @@ impl super::peer_place::ProcessFacts for ProcFacts {
         u32::try_from(process_job_stat(pid)?.session).ok()
     }
 
-    fn started_in_herdr(&self, pid: u32) -> Option<bool> {
+    fn started_as_pane(&self, pid: u32) -> Option<bool> {
         let environ = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
-        Some(super::peer_place::environ_has_herdr_marker(&environ))
+        Some(super::peer_place::environ_marks_a_pane(&environ))
     }
 }
 
@@ -1304,7 +1304,19 @@ mod tests {
         .spawn()
         .unwrap();
 
+        // Shaped like a popup command: a PTY session leader that carries the
+        // popup marker beside HERDR_ENV.
+        let mut popup = detached(
+            std::process::Command::new("sleep")
+                .arg("30")
+                .env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE)
+                .env(crate::HERDR_POPUP_ENV_VAR, crate::HERDR_ENV_VALUE),
+        )
+        .spawn()
+        .unwrap();
+
         let leader_place = peer_process_place(leader.id());
+        let popup_place = peer_process_place(popup.id());
         let child_place = peer_process_place(cleared_child);
         let plain_place = peer_process_place(plain.id());
         let own_place = peer_process_place(std::process::id());
@@ -1316,10 +1328,13 @@ mod tests {
         let _ = leader.wait();
         let _ = plain.kill();
         let _ = plain.wait();
+        let _ = popup.kill();
+        let _ = popup.wait();
 
         assert_eq!(leader_place, crate::platform::PeerPlace::InsidePane);
         assert_eq!(child_place, crate::platform::PeerPlace::InsidePane);
         assert_eq!(plain_place, own_place);
+        assert_eq!(popup_place, own_place);
         assert_ne!(own_place, crate::platform::PeerPlace::Unidentified);
     }
     use std::sync::{Mutex, OnceLock};

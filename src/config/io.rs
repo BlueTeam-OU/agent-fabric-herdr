@@ -187,8 +187,9 @@ impl Config {
 
 /// Recovers `server.socket_access` from a file that fails to load as a whole,
 /// so an error in an unrelated section never opens the sockets wider than
-/// the person set them. When even that cannot be read but the file names the
-/// setting, it is enforced as `client_only`.
+/// the person set them. When even that cannot be read but a line of the file
+/// assigns the setting, it is enforced as `client_only`; the commented line in
+/// the default template is not an assignment.
 fn socket_access_from_unparsed_config(content: &str) -> super::SocketAccess {
     #[derive(Default, serde::Deserialize)]
     #[serde(default)]
@@ -203,9 +204,17 @@ fn socket_access_from_unparsed_config(content: &str) -> super::SocketAccess {
 
     match toml::from_str::<ServerSectionOnly>(content) {
         Ok(only) => only.server.socket_access,
-        Err(_) if content.contains("socket_access") => super::SocketAccess::Unrecognized,
+        Err(_) if assigns_socket_access(content) => super::SocketAccess::Unrecognized,
         Err(_) => super::SocketAccess::All,
     }
+}
+
+fn assigns_socket_access(content: &str) -> bool {
+    content.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix("socket_access")
+            .is_some_and(|rest| rest.trim_start().starts_with('='))
+    })
 }
 
 pub(super) fn resolve_config_relative_path(path: &Path) -> PathBuf {
@@ -797,6 +806,15 @@ mod tests {
         );
         assert_eq!(
             socket_access_from_unparsed_config("[ui\n"),
+            crate::config::SocketAccess::All
+        );
+    }
+
+    #[test]
+    fn the_templates_commented_socket_access_line_is_not_a_setting() {
+        let content = "[server]\n# socket_access = \"all\"\n#socket_access=\"client_only\"\n[ui\n";
+        assert_eq!(
+            socket_access_from_unparsed_config(content),
             crate::config::SocketAccess::All
         );
     }

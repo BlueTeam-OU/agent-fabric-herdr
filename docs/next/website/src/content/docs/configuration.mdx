@@ -74,14 +74,14 @@ socket_access = "outside_panes"
 ```
 
 - `"all"` (default): any process running as you.
-- `"outside_panes"`: refuses every process running inside a Herdr pane, including the `herdr` CLI and agent integration hooks run there. Plugin actions, custom commands, and commands you run in an ordinary terminal still work. Agent status in panes falls back to screen detection.
+- `"outside_panes"`: refuses every process running inside a Herdr pane, including the `herdr` CLI and agent integration hooks run there. Plugin actions, custom commands that run as a shell command or in a popup, plugin popups, and commands you run in an ordinary terminal still work. A custom command with `type = "pane"` opens a pane and is refused like one. Agent status in panes falls back to screen detection.
 - `"client_only"`: serves only an attached Herdr client and Herdr's own server management (`herdr status`, `herdr server stop`, `herdr update`). Every other CLI and API command is refused, from anywhere.
 
 Both restricted modes still answer status checks, so a client can tell whether a server is running. Herdr places a caller by its process tree and start-time environment, which it can read on Linux only. On other platforms the restricted modes refuse every caller except status checks.
 
 This setting keeps processes in panes from using Herdr's sockets by the usual routes. It is not a security boundary between processes running as the same account. A process that leaves its pane's session and clears its environment, or anything started outside Herdr, is not refused. To isolate an agent, run it as another account.
 
-An unrecognized value is enforced as `"client_only"` and reported as a configuration error. If the configuration file cannot be parsed, Herdr still reads this setting from it. Reloading the configuration applies a change to the running server. Under `"client_only"`, `herdr server reload-config` is refused, so reload from the client or restart the server.
+An unrecognized value is enforced as `"client_only"` and reported as a configuration error. If the configuration file cannot be parsed, Herdr still reads this setting from it. Reloading the configuration applies a change to new connections. Connections already open, such as an attached client or an event subscription, keep the access they were given until they reconnect. Under `"client_only"`, `herdr server reload-config` is refused, so reload from the client or restart the server.
 
 ## Terminal defaults
 

@@ -383,8 +383,15 @@ impl App {
         api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
         event_hub: crate::api::EventHub,
     ) -> Self {
-        Self::try_new(config, policy, config_diagnostic, api_rx, event_hub)
-            .expect("test app startup")
+        Self::try_new(
+            config,
+            policy,
+            config_diagnostic,
+            api_rx,
+            event_hub,
+            crate::socket_access::SocketAccessGate::new(config.server.socket_access),
+        )
+        .expect("test app startup")
     }
 
     pub fn try_new(
@@ -393,6 +400,8 @@ impl App {
         config_diagnostic: Option<String>,
         api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
         event_hub: crate::api::EventHub,
+        // The listeners' gate, not a new one: reloads must reach the sockets.
+        socket_access: crate::socket_access::SocketAccessGate,
     ) -> std::io::Result<Self> {
         let prefix_keys = config.prefix_keys();
         crate::kitty_graphics::set_enabled(config.kitty_graphics_enabled());
@@ -662,7 +671,7 @@ impl App {
             session_writer,
             pane_exit_checkpoint_pending: false,
             detached_process_children: Vec::new(),
-            socket_access: crate::socket_access::SocketAccessGate::new(config.server.socket_access),
+            socket_access,
             tab_bar_status_generation: 0,
             tab_bar_datetimes: Vec::new(),
             tab_bar_commands: Vec::new(),
@@ -707,6 +716,7 @@ impl App {
             config_diagnostic,
             api_rx,
             event_hub,
+            crate::socket_access::SocketAccessGate::new(config.server.socket_access),
         )?;
         if !crate::plugin_installations::retain_startup(
             &mut app.plugin_installation_leases,

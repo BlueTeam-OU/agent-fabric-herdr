@@ -36,7 +36,7 @@ pub fn run_server() -> io::Result<()> {
     let event_hub = api::EventHub::default();
     let server_stop = crate::server::shutdown::ServerStop::default();
     // The API socket opens before the App exists, so the gate is made here and
-    // handed to the App below rather than built twice from the config.
+    // handed to the App, which updates it on reload.
     let socket_access =
         crate::socket_access::SocketAccessGate::new(loaded_config.config.server.socket_access);
 
@@ -69,8 +69,8 @@ pub fn run_server() -> io::Result<()> {
             config::config_diagnostic_summary(&loaded_config.diagnostics),
             api_rx,
             event_hub,
+            socket_access,
         )?;
-        app.socket_access = socket_access;
         seed_startup_workspace_if_empty(&mut app);
 
         // Create the headless server.

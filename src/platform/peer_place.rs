@@ -3,10 +3,11 @@
 //! A pane's shell is a session leader (the PTY spawn calls `setsid`) started
 //! with `HERDR_ENV=1`, and a process's start-time environment cannot be
 //! rewritten by its descendants. So a peer is inside a pane when the peer,
-//! its session leader, or any ancestor is a session leader that started with
-//! that marker. Plugin and custom commands share the server's session or run
-//! without the marker, so they count as outside: they are the person's own
-//! configured automation, not something typed into a pane.
+//! its session leader, or any ancestor is a session leader that started as a
+//! pane: with that marker and without `HERDR_POPUP=1`. The person's own
+//! configured automation counts as outside: plugin actions and shell-type
+//! custom commands share the server's session or run without the marker,
+//! and popup commands (custom or plugin) carry the popup marker.
 //!
 //! Same-account processes are not a security boundary; this stops the routine
 //! route (the `herdr` CLI, an integration hook, a script run in a pane). A
@@ -30,8 +31,9 @@ pub(crate) enum PeerPlace {
 pub(crate) trait ProcessFacts {
     fn parent(&self, pid: u32) -> Option<u32>;
     fn session(&self, pid: u32) -> Option<u32>;
-    /// Whether the process's start-time environment carries `HERDR_ENV=1`.
-    fn started_in_herdr(&self, pid: u32) -> Option<bool>;
+    /// Whether the process's start-time environment marks a pane: `HERDR_ENV=1`
+    /// without `HERDR_POPUP=1`.
+    fn started_as_pane(&self, pid: u32) -> Option<bool>;
 }
 
 /// Ancestry is short in practice; the bound only guards against a cycle that
@@ -41,7 +43,7 @@ const MAX_ANCESTRY_DEPTH: usize = 128;
 pub(crate) fn classify_process(peer: u32, facts: &impl ProcessFacts) -> PeerPlace {
     // The peer's own environment must be readable: an unreadable peer is
     // another account (root) or already gone, and either way unidentified.
-    if facts.started_in_herdr(peer).is_none() {
+    if facts.started_as_pane(peer).is_none() {
         return PeerPlace::Unidentified;
     }
     if let Some(leader) = facts.session(peer) {
@@ -57,8 +59,8 @@ pub(crate) fn classify_process(peer: u32, facts: &impl ProcessFacts) -> PeerPlac
         }
         match facts.parent(pid) {
             Some(parent) if parent > 1 && parent != pid => pid = parent,
-            // An unreadable ancestor (a root-owned sudo, a vanished parent) ends
-            // the walk; what was readable below it already had its say.
+            // Only an ancestor whose stat cannot be read (gone, or hidden by
+            // hidepid) ends the walk; a root-owned one is still walked past.
             _ => return PeerPlace::OutsidePanes,
         }
     }
@@ -66,15 +68,19 @@ pub(crate) fn classify_process(peer: u32, facts: &impl ProcessFacts) -> PeerPlac
 }
 
 fn is_pane_leader(pid: u32, facts: &impl ProcessFacts) -> bool {
-    facts.session(pid) == Some(pid) && facts.started_in_herdr(pid) == Some(true)
+    facts.session(pid) == Some(pid) && facts.started_as_pane(pid) == Some(true)
 }
 
-/// Whether an environment block (NUL-separated `KEY=VALUE`) carries the marker.
-pub(crate) fn environ_has_herdr_marker(environ: &[u8]) -> bool {
-    let marker = format!("{}={}", crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
-    environ
-        .split(|byte| *byte == 0)
-        .any(|entry| entry == marker.as_bytes())
+/// Whether an environment block (NUL-separated `KEY=VALUE`) marks a pane.
+pub(crate) fn environ_marks_a_pane(environ: &[u8]) -> bool {
+    let herdr = format!("{}={}", crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
+    let popup = format!("{}={}", crate::HERDR_POPUP_ENV_VAR, crate::HERDR_ENV_VALUE);
+    let has = |marker: &str| {
+        environ
+            .split(|byte| *byte == 0)
+            .any(|entry| entry == marker.as_bytes())
+    };
+    has(&herdr) && !has(&popup)
 }
 
 #[cfg(test)]
@@ -86,7 +92,7 @@ mod tests {
     struct FakeProcess {
         parent: u32,
         session: u32,
-        started_in_herdr: Option<bool>,
+        started_as_pane: Option<bool>,
     }
 
     #[derive(Default)]
@@ -99,7 +105,7 @@ mod tests {
                 FakeProcess {
                     parent,
                     session,
-                    started_in_herdr: marker,
+                    started_as_pane: marker,
                 },
             );
             self
@@ -113,10 +119,8 @@ mod tests {
         fn session(&self, pid: u32) -> Option<u32> {
             self.0.get(&pid).map(|process| process.session)
         }
-        fn started_in_herdr(&self, pid: u32) -> Option<bool> {
-            self.0
-                .get(&pid)
-                .and_then(|process| process.started_in_herdr)
+        fn started_as_pane(&self, pid: u32) -> Option<bool> {
+            self.0.get(&pid).and_then(|process| process.started_as_pane)
         }
     }
 
@@ -204,10 +208,16 @@ mod tests {
 
     #[test]
     fn the_marker_must_be_a_whole_entry() {
-        assert!(environ_has_herdr_marker(b"PATH=/bin\0HERDR_ENV=1\0"));
-        assert!(environ_has_herdr_marker(b"HERDR_ENV=1"));
-        assert!(!environ_has_herdr_marker(b"HERDR_ENV=10\0"));
-        assert!(!environ_has_herdr_marker(b"XHERDR_ENV=1\0"));
-        assert!(!environ_has_herdr_marker(b"HERDR_ENV=0\0"));
+        assert!(environ_marks_a_pane(b"PATH=/bin\0HERDR_ENV=1\0"));
+        assert!(environ_marks_a_pane(b"HERDR_ENV=1"));
+        assert!(!environ_marks_a_pane(b"HERDR_ENV=10\0"));
+        assert!(!environ_marks_a_pane(b"XHERDR_ENV=1\0"));
+        assert!(!environ_marks_a_pane(b"HERDR_ENV=0\0"));
+    }
+
+    #[test]
+    fn a_popup_is_not_a_pane() {
+        assert!(!environ_marks_a_pane(b"HERDR_ENV=1\0HERDR_POPUP=1\0"));
+        assert!(environ_marks_a_pane(b"HERDR_ENV=1\0HERDR_POPUP=0\0"));
     }
 }

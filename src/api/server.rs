@@ -1536,6 +1536,32 @@ mod tests {
     }
 
     #[test]
+    fn request_kinds_open_only_status_and_lifecycle() {
+        let kind = |method: &str, params: &str| {
+            let request: Request = serde_json::from_str(&format!(
+                r#"{{"id":"k","method":"{method}","params":{params}}}"#
+            ))
+            .unwrap();
+            api_request_kind(&request.method)
+        };
+        assert_eq!(kind("ping", "{}"), ApiRequestKind::Status);
+        assert_eq!(kind("server.stop", "{}"), ApiRequestKind::Lifecycle);
+        assert_eq!(kind("server.live_handoff", "{}"), ApiRequestKind::Lifecycle);
+        assert_eq!(
+            kind("server.ssh_agent.register", r#"{"socket_path":"/tmp/a"}"#),
+            ApiRequestKind::Lifecycle
+        );
+        for control in ["workspace.list", "server.reload_config", "events.subscribe"] {
+            let params = if control == "events.subscribe" {
+                r#"{"subscriptions":[]}"#
+            } else {
+                "{}"
+            };
+            assert_eq!(kind(control, params), ApiRequestKind::Control, "{control}");
+        }
+    }
+
+    #[test]
     fn client_only_refuses_control_requests_before_they_reach_the_app() {
         // client_only refuses control from every place, so this holds wherever
         // the test process runs.
