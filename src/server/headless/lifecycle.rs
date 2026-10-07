@@ -248,6 +248,7 @@ impl HeadlessServer {
             api_tx,
             self.app.event_hub.clone(),
             self.server_stop.clone(),
+            self.app.socket_access.clone(),
         )?;
 
         let client_path = client_socket_path();

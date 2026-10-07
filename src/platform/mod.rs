@@ -92,6 +92,13 @@ pub(crate) fn local_stream_peer_description(_stream: &crate::ipc::LocalStream) -
     None
 }
 
+/// Windows named pipes have no peer placement here yet; guarded socket access
+/// refuses every caller it cannot place.
+#[cfg(not(unix))]
+pub(crate) fn local_stream_peer_place(_stream: &crate::ipc::LocalStream) -> PeerPlace {
+    PeerPlace::Unidentified
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {
     Hangup,
@@ -373,8 +380,12 @@ pub(crate) mod unix_image_files;
 #[cfg(unix)]
 pub(crate) use unix_common::{
     begin_cli_output, end_cli_output, forward_remote_bridge_stdio, ignore_server_hangup,
-    local_stream_peer_description, spawn_server_signal_monitor, RemoteBridgeWake,
+    local_stream_peer_description, local_stream_peer_place, spawn_server_signal_monitor,
+    RemoteBridgeWake,
 };
+
+mod peer_place;
+pub(crate) use peer_place::PeerPlace;
 
 mod client_state;
 pub(crate) use client_state::{create_private_state_file, replace_file, sync_parent_directory};

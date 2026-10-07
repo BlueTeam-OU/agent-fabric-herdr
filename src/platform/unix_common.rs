@@ -305,6 +305,17 @@ pub(crate) fn spawn_server_signal_monitor(
     }
 }
 
+/// Places the process on the other end of a local socket for socket access.
+pub(crate) fn local_stream_peer_place(stream: &crate::ipc::LocalStream) -> super::PeerPlace {
+    use std::os::fd::{AsFd as _, AsRawFd as _};
+
+    let crate::ipc::LocalStream::UdSocket(socket) = stream;
+    match super::socket_peer_pid(socket.as_fd().as_raw_fd()) {
+        Some(pid) => super::peer_process_place(pid),
+        None => super::PeerPlace::Unidentified,
+    }
+}
+
 /// Describes the process on the other end of a local socket, for logs.
 pub(crate) fn local_stream_peer_description(stream: &crate::ipc::LocalStream) -> Option<String> {
     use std::os::fd::{AsFd as _, AsRawFd as _};

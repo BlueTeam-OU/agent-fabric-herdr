@@ -1036,12 +1036,43 @@ impl ImeCursorShape {
     }
 }
 
+/// Who may talk to the server's local sockets, beyond the 0600 file mode
+/// that already limits them to this account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SocketAccess {
+    /// Any process running as this account (upstream behavior).
+    #[default]
+    All,
+    /// Refuses processes running inside a Herdr pane.
+    OutsidePanes,
+    /// Serves only the attached client and Herdr's own server lifecycle
+    /// (status, stop, live handoff), never from inside a pane.
+    ClientOnly,
+    /// A value this build does not know. Enforced as `ClientOnly`: a typo in
+    /// an access setting must not open the sockets wider than intended.
+    #[serde(other)]
+    Unrecognized,
+}
+
+impl SocketAccess {
+    /// The mode actually enforced.
+    pub fn effective(self) -> Self {
+        match self {
+            Self::Unrecognized => Self::ClientOnly,
+            mode => mode,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
     /// Windows: allow ordinary same-account clients to control an elevated server. Default: false.
     #[cfg(windows)]
     pub allow_unelevated_clients: bool,
+    /// Which local processes may use the API and client sockets. Default: all.
+    pub socket_access: SocketAccess,
     /// Virtual terminal width used when no client is attached. Default: 120.
     pub headless_cols: u16,
     /// Virtual terminal height used when no client is attached. Default: 40.
@@ -1316,6 +1347,7 @@ impl Default for ServerConfig {
         Self {
             #[cfg(windows)]
             allow_unelevated_clients: false,
+            socket_access: SocketAccess::default(),
             headless_cols: crate::config::DEFAULT_HEADLESS_COLS,
             headless_rows: crate::config::DEFAULT_HEADLESS_ROWS,
         }
@@ -1977,6 +2009,32 @@ delay_seconds = {}
     fn onboarding_false_skips_setup() {
         let config: Config = toml::from_str("onboarding = false").unwrap();
         assert!(!config.should_show_onboarding());
+    }
+
+    #[test]
+    fn server_socket_access_defaults_to_all_and_fails_closed_on_unknown_values() {
+        assert_eq!(Config::default().server.socket_access, SocketAccess::All);
+        for (value, expected) in [
+            ("all", SocketAccess::All),
+            ("outside_panes", SocketAccess::OutsidePanes),
+            ("client_only", SocketAccess::ClientOnly),
+        ] {
+            let config: Config =
+                toml::from_str(&format!("[server]\nsocket_access = \"{value}\"\n")).unwrap();
+            assert_eq!(config.server.socket_access, expected);
+            assert!(config.unrecognized_socket_access_diagnostic().is_none());
+        }
+
+        let typo: Config = toml::from_str("[server]\nsocket_access = \"outside-panes\"\n").unwrap();
+        assert_eq!(typo.server.socket_access, SocketAccess::Unrecognized);
+        assert_eq!(
+            typo.server.socket_access.effective(),
+            SocketAccess::ClientOnly
+        );
+        assert!(typo
+            .collect_diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.contains("server.socket_access")));
     }
 
     #[test]

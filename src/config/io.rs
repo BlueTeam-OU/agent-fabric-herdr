@@ -171,13 +171,40 @@ impl Config {
             }
             Err(err) => {
                 warn!(err = %err, "config parse error, using defaults");
+                let mut config = Self::default();
+                config.server.socket_access = socket_access_from_unparsed_config(&content);
+                let mut diagnostics = vec![format!("config parse error: {err}; using defaults")];
+                diagnostics.extend(config.unrecognized_socket_access_diagnostic());
                 LoadedConfig {
-                    config: Self::default(),
-                    diagnostics: vec![format!("config parse error: {err}; using defaults")],
+                    config,
+                    diagnostics,
                     invalid_sections: Vec::new(),
                 }
             }
         }
+    }
+}
+
+/// Recovers `server.socket_access` from a file that fails to load as a whole,
+/// so an error in an unrelated section never opens the sockets wider than
+/// the person set them. When even that cannot be read but the file names the
+/// setting, it is enforced as `client_only`.
+fn socket_access_from_unparsed_config(content: &str) -> super::SocketAccess {
+    #[derive(Default, serde::Deserialize)]
+    #[serde(default)]
+    struct ServerSectionOnly {
+        server: SocketAccessOnly,
+    }
+    #[derive(Default, serde::Deserialize)]
+    #[serde(default)]
+    struct SocketAccessOnly {
+        socket_access: super::SocketAccess,
+    }
+
+    match toml::from_str::<ServerSectionOnly>(content) {
+        Ok(only) => only.server.socket_access,
+        Err(_) if content.contains("socket_access") => super::SocketAccess::Unrecognized,
+        Err(_) => super::SocketAccess::All,
     }
 }
 
@@ -750,6 +777,29 @@ fn upsert_section_raw(content: &str, section: &str, key: &str, value: &str) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn socket_access_survives_an_error_in_another_section() {
+        let content =
+            "[server]\nsocket_access = \"outside_panes\"\n[ui]\nsidebar_min_width = \"wide\"\n";
+        assert_eq!(
+            socket_access_from_unparsed_config(content),
+            crate::config::SocketAccess::OutsidePanes
+        );
+    }
+
+    #[test]
+    fn an_unreadable_file_naming_socket_access_enforces_client_only() {
+        let content = "[server\nsocket_access = \"all\"\n";
+        assert_eq!(
+            socket_access_from_unparsed_config(content),
+            crate::config::SocketAccess::Unrecognized
+        );
+        assert_eq!(
+            socket_access_from_unparsed_config("[ui\n"),
+            crate::config::SocketAccess::All
+        );
+    }
 
     #[test]
     fn upsert_top_level_bool_replaces_existing_value() {

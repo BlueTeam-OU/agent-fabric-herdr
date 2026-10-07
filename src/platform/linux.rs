@@ -723,6 +723,29 @@ pub(super) fn socket_peer_pid(fd: RawFd) -> Option<u32> {
     (result == 0 && cred.pid > 0).then_some(cred.pid as u32)
 }
 
+/// `/proc` answers for [`super::peer_place::classify_process`]. `stat` is
+/// world-readable; `environ` only for this account's dumpable processes.
+struct ProcFacts;
+
+impl super::peer_place::ProcessFacts for ProcFacts {
+    fn parent(&self, pid: u32) -> Option<u32> {
+        process_name_and_parent(pid).map(|(_, parent)| parent)
+    }
+
+    fn session(&self, pid: u32) -> Option<u32> {
+        u32::try_from(process_job_stat(pid)?.session).ok()
+    }
+
+    fn started_in_herdr(&self, pid: u32) -> Option<bool> {
+        let environ = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+        Some(super::peer_place::environ_has_herdr_marker(&environ))
+    }
+}
+
+pub(super) fn peer_process_place(pid: u32) -> super::PeerPlace {
+    super::peer_place::classify_process(pid, &ProcFacts)
+}
+
 pub(super) fn process_name_and_parent(pid: u32) -> Option<(String, u32)> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let close = stat.rfind(')')?;
@@ -1237,6 +1260,68 @@ fn process_session_id(pid: u32) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn detached(command: &mut std::process::Command) -> &mut std::process::Command {
+        use std::os::unix::process::CommandExt as _;
+        // SAFETY: setsid is async-signal-safe and touches no parent state.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            })
+        }
+    }
+
+    #[test]
+    fn peer_process_place_reads_real_processes() {
+        use std::io::BufRead as _;
+
+        // Shaped like a pane: its own session, started with the marker. It
+        // starts a child with the marker cleared and prints that child's pid.
+        let mut leader = detached(
+            std::process::Command::new("sh")
+                .args(["-c", "env -u HERDR_ENV sleep 30 & echo $!; wait"])
+                .env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE)
+                .stdout(std::process::Stdio::piped()),
+        )
+        .spawn()
+        .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(leader.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let cleared_child: u32 = line.trim().parse().unwrap();
+
+        // Detached without the marker: placed like this test process itself,
+        // which may legitimately be running inside a pane.
+        let mut plain = detached(
+            std::process::Command::new("sleep")
+                .arg("30")
+                .env_remove(crate::HERDR_ENV_VAR),
+        )
+        .spawn()
+        .unwrap();
+
+        let leader_place = peer_process_place(leader.id());
+        let child_place = peer_process_place(cleared_child);
+        let plain_place = peer_process_place(plain.id());
+        let own_place = peer_process_place(std::process::id());
+
+        unsafe {
+            libc::kill(cleared_child as libc::pid_t, libc::SIGKILL);
+        }
+        let _ = leader.kill();
+        let _ = leader.wait();
+        let _ = plain.kill();
+        let _ = plain.wait();
+
+        assert_eq!(leader_place, crate::platform::PeerPlace::InsidePane);
+        assert_eq!(child_place, crate::platform::PeerPlace::InsidePane);
+        assert_eq!(plain_place, own_place);
+        assert_ne!(own_place, crate::platform::PeerPlace::Unidentified);
+    }
     use std::sync::{Mutex, OnceLock};
     use std::{cell::RefCell, collections::HashMap};
 

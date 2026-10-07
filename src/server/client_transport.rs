@@ -672,6 +672,7 @@ pub(crate) fn handle_client_handshake(
     client_id: u64,
     server_event_tx: &mpsc::Sender<ServerEvent>,
     should_quit: &Arc<AtomicBool>,
+    socket_access: &crate::socket_access::SocketAccessGate,
 ) -> io::Result<()> {
     if should_quit.load(Ordering::Acquire) {
         return Ok(());
@@ -704,6 +705,32 @@ pub(crate) fn handle_client_handshake(
             return Ok(());
         }
     };
+
+    // Placed after the hello, on this connection's thread, so the refusal can
+    // answer in the shape the client reads and `/proc` never blocks accept.
+    if let Some(refusal) = crate::socket_access::client_refusal(socket_access.mode(), || {
+        crate::platform::local_stream_peer_place(&stream)
+    }) {
+        warn!(
+            client_id,
+            caller = crate::platform::local_stream_peer_description(&stream).as_deref(),
+            "client connection refused by server.socket_access"
+        );
+        match hello {
+            ClientMessage::EndpointControl { ref kind, .. } if kind == ENDPOINT_HELLO_KIND => {
+                write_endpoint_rejection(&mut stream, crate::socket_access::REFUSED_CODE, refusal);
+            }
+            _ => {
+                let welcome = ServerMessage::Welcome {
+                    version: PROTOCOL_VERSION,
+                    encoding: RenderEncoding::TerminalAnsi,
+                    error: Some(refusal),
+                };
+                let _ = protocol::write_message(&mut stream, &welcome);
+            }
+        }
+        return Ok(());
+    }
 
     let (
         client_cols,
@@ -1898,7 +1925,13 @@ mod tests {
         let should_quit = Arc::new(AtomicBool::new(false));
         let handshake_quit = should_quit.clone();
         let handle = std::thread::spawn(move || {
-            handle_client_handshake(server_stream, 42, &server_event_tx, &handshake_quit)
+            handle_client_handshake(
+                server_stream,
+                42,
+                &server_event_tx,
+                &handshake_quit,
+                &Default::default(),
+            )
         });
 
         protocol::write_message(
@@ -1966,7 +1999,13 @@ mod tests {
         let should_quit = Arc::new(AtomicBool::new(false));
         let handshake_quit = should_quit.clone();
         let handle = std::thread::spawn(move || {
-            handle_client_handshake(server_stream, 43, &server_event_tx, &handshake_quit)
+            handle_client_handshake(
+                server_stream,
+                43,
+                &server_event_tx,
+                &handshake_quit,
+                &Default::default(),
+            )
         });
 
         protocol::write_message(&mut client_stream, &endpoint_hello(80, 29))
@@ -2029,7 +2068,13 @@ mod tests {
         let should_quit = Arc::new(AtomicBool::new(false));
         let handshake_quit = should_quit.clone();
         let handle = std::thread::spawn(move || {
-            handle_client_handshake(server_stream, 43, &server_event_tx, &handshake_quit)
+            handle_client_handshake(
+                server_stream,
+                43,
+                &server_event_tx,
+                &handshake_quit,
+                &Default::default(),
+            )
         });
 
         protocol::write_message(&mut client_stream, &endpoint_hello(0, 29))

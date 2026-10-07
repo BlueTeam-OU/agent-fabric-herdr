@@ -951,6 +951,12 @@ pub(super) fn socket_peer_pid(fd: RawFd) -> Option<u32> {
     (result == 0 && pid > 0).then_some(pid as u32)
 }
 
+/// macOS has the peer pid but no start-time environment reader here yet, so
+/// guarded socket access refuses every caller it cannot place.
+pub(super) fn peer_process_place(_pid: u32) -> super::PeerPlace {
+    super::PeerPlace::Unidentified
+}
+
 pub(super) fn process_name_and_parent(pid: u32) -> Option<(String, u32)> {
     let info = process_bsdinfo(pid)?;
     Some((comm_from_bsdinfo(&info)?, info.pbi_ppid))
