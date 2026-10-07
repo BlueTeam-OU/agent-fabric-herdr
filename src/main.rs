@@ -229,6 +229,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Windows only: allow ordinary same-account clients to control an elevated server.
 # Requires a server restart.
 # allow_unelevated_clients = false
+# Who may use the API and client sockets: "all", "outside_panes" (refuse
+# processes inside panes) or "client_only" (the attached client only).
+# socket_access = "all"
 # headless_cols = 120
 # headless_rows = 40
 

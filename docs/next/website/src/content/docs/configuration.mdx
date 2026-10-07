@@ -64,6 +64,25 @@ headless_rows = 50
 
 With one attached client, all tabs follow its size. With multiple clients, each viewed tab follows the client that most recently focused, selected, or interacted with it. When all but one client detach, all tabs immediately return to the remaining client's size. When no clients remain, existing pane PTYs retain their last size and new headless layout uses the configured fallback.
 
+### Socket access
+
+Herdr's API socket and client socket accept only your own account. Any process running as you can still use them, including one running inside a pane, which can then read and type into every other pane. `socket_access` narrows that:
+
+```toml
+[server]
+socket_access = "outside_panes"
+```
+
+- `"all"` (default): any process running as you.
+- `"outside_panes"`: refuses every process running inside a Herdr pane, including the `herdr` CLI and agent integration hooks run there. Plugin actions, custom commands, and commands you run in an ordinary terminal still work. Agent status in panes falls back to screen detection.
+- `"client_only"`: serves only an attached Herdr client and Herdr's own server management (`herdr status`, `herdr server stop`, `herdr update`). Every other CLI and API command is refused, from anywhere.
+
+Both restricted modes still answer status checks, so a client can tell whether a server is running. Herdr places a caller by its process tree and start-time environment, which it can read on Linux only. On other platforms the restricted modes refuse every caller except status checks.
+
+This setting keeps processes in panes from using Herdr's sockets by the usual routes. It is not a security boundary between processes running as the same account. A process that leaves its pane's session and clears its environment, or anything started outside Herdr, is not refused. To isolate an agent, run it as another account.
+
+An unrecognized value is enforced as `"client_only"` and reported as a configuration error. If the configuration file cannot be parsed, Herdr still reads this setting from it. Reloading the configuration applies a change to the running server. Under `"client_only"`, `herdr server reload-config` is refused, so reload from the client or restart the server.
+
 ## Terminal defaults
 
 Set the executable Herdr uses for newly created interactive panes:
