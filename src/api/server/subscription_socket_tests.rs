@@ -355,6 +355,8 @@ fn lagging_subscription_closes_without_interrupting_other_clients() {
     assert_eq!(response["result"]["type"], "workspace_list");
 }
 
+// Windows has no revoker yet; its connections stay open (documented).
+#[cfg(unix)]
 #[test]
 fn a_reload_that_stops_admitting_a_subscription_ends_it() {
     let mut test = SocketTest::new();

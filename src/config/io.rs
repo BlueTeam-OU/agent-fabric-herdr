@@ -209,20 +209,14 @@ fn socket_access_from_unparsed_config(content: &str) -> super::SocketAccess {
     }
 }
 
-/// Whether a line assigns the key in any TOML spelling: bare, quoted, or the
-/// last segment of a dotted key (`server.socket_access`). Comments do not.
+/// Whether the file names the key outside a comment. A file this broken cannot
+/// be read for its spelling (bare, quoted, dotted, inline table), so any
+/// mention fails closed; only text after `#` is ignored.
 fn assigns_socket_access(content: &str) -> bool {
     content.lines().any(|line| {
-        let line = line.trim_start();
-        if line.starts_with('#') {
-            return false;
-        }
-        let Some((key, _)) = line.split_once('=') else {
-            return false;
-        };
-        key.rsplit('.')
+        line.split('#')
             .next()
-            .is_some_and(|last| last.trim().trim_matches(['"', '\'']) == "socket_access")
+            .is_some_and(|code| code.contains("socket_access"))
     })
 }
 
@@ -826,6 +820,7 @@ mod tests {
             "server.socket_access = \"outside_panes\"",
             "\"socket_access\" = \"outside_panes\"",
             "server . 'socket_access'=\"outside_panes\"",
+            "server = { socket_access = \"outside_panes\" }",
         ] {
             let content = format!("{assignment}\n[ui\n");
             assert_eq!(

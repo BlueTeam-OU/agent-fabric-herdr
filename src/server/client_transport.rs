@@ -1926,6 +1926,8 @@ mod tests {
         ));
     }
 
+    // Windows has no revoker yet; its connections stay open (documented).
+    #[cfg(unix)]
     #[test]
     fn a_reload_that_stops_admitting_an_attached_client_disconnects_it() {
         let (mut client_stream, server_stream, _path) = local_stream_pair("client-revoked");
