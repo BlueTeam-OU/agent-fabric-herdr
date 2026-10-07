@@ -2147,20 +2147,40 @@ mod tests {
 
     #[test]
     fn one_deadline_covers_every_clipboard_command() {
-        let stalled = ClipboardCommand {
-            program: "sleep",
-            args: &["30"],
+        // Each command fails slowly without stalling: a budget per command would
+        // let all three run (about 1.5 s); one deadline stops after about 0.8 s.
+        let slow_failure = ClipboardCommand {
+            program: "sh",
+            args: &["-c", "sleep 0.5; exit 1"],
         };
         let started = std::time::Instant::now();
 
         assert_eq!(
             read_first_clipboard_text(
-                &[stalled.clone(), stalled.clone(), stalled],
-                std::time::Duration::from_millis(200)
+                &[slow_failure.clone(), slow_failure.clone(), slow_failure],
+                std::time::Duration::from_millis(800)
             ),
             None
         );
-        assert!(started.elapsed() < std::time::Duration::from_millis(1500));
+        assert!(started.elapsed() < std::time::Duration::from_millis(1250));
+    }
+
+    #[test]
+    fn a_command_that_closes_its_output_and_never_exits_is_not_waited_for() {
+        let command = ClipboardCommand {
+            program: "sh",
+            args: &["-c", "exec >&-; sleep 30"],
+        };
+        let started = std::time::Instant::now();
+
+        assert_eq!(
+            read_first_clipboard_text(
+                std::slice::from_ref(&command),
+                std::time::Duration::from_millis(300)
+            ),
+            None
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]

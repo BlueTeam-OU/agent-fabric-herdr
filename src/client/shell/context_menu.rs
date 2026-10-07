@@ -477,6 +477,7 @@ impl ClientShellState {
                 match (self.read_clipboard_text)().filter(|text| !text.is_empty()) {
                     Some(text) => {
                         // As a host paste does: the text may move what was selected.
+                        self.word_selection_gesture = None;
                         self.selection = None;
                         self.stop_selection_autoscroll();
                         self.selection_highlight_clear_deadline = None;

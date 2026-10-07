@@ -162,25 +162,34 @@ fn pane_menu_actions(state: &ClientShellState) -> Vec<ClientContextMenuAction> {
     }
 }
 
+/// The menu index of Paste, where this platform offers it.
+fn paste_item(state: &ClientShellState) -> Option<usize> {
+    pane_menu_actions(state)
+        .iter()
+        .position(|action| *action == ClientContextMenuAction::Paste)
+}
+
 #[test]
-fn the_pane_menu_offers_copy_only_over_a_selection_and_always_paste() {
+fn the_pane_menu_offers_copy_over_a_selection_and_paste_where_it_can_read() {
     let mut state = shortcuts_state(true);
     state.open_pane_context_menu("pane_1".to_owned(), 10, 5);
-    assert_eq!(
-        pane_menu_actions(&state).first(),
-        Some(&ClientContextMenuAction::Paste)
-    );
     assert!(!pane_menu_actions(&state).contains(&ClientContextMenuAction::Copy));
+    assert_eq!(
+        paste_item(&state),
+        crate::platform::CAN_READ_CLIPBOARD_TEXT.then_some(0),
+        "Paste leads the menu where clipboard text can be read, and is absent elsewhere"
+    );
 
     state.overlay = None;
     select_in_pane_1(&mut state);
     state.open_pane_context_menu("pane_1".to_owned(), 10, 5);
     assert_eq!(
-        pane_menu_actions(&state)[..2],
-        [
-            ClientContextMenuAction::Copy,
-            ClientContextMenuAction::Paste
-        ]
+        pane_menu_actions(&state).first(),
+        Some(&ClientContextMenuAction::Copy)
+    );
+    assert_eq!(
+        paste_item(&state),
+        crate::platform::CAN_READ_CLIPBOARD_TEXT.then_some(1)
     );
 }
 
@@ -202,9 +211,12 @@ fn the_menus_paste_goes_to_the_right_clicked_pane_and_focuses_it() {
     let mut state = shortcuts_state(true);
     state.read_clipboard_text = || Some("ls".to_owned());
     state.open_pane_context_menu("pane_1".to_owned(), 10, 5);
+    let Some(paste) = paste_item(&state) else {
+        return;
+    };
 
     let mut outcome = ClientShellInput::default();
-    state.activate_context_menu_item(0, &mut outcome);
+    state.activate_context_menu_item(paste, &mut outcome);
 
     assert_eq!(pasted(&outcome, "pane_1").as_deref(), Some("ls"));
     assert!(outcome.actions.iter().any(|action| matches!(
@@ -219,9 +231,12 @@ fn the_menus_paste_goes_to_the_right_clicked_pane_and_focuses_it() {
 fn the_menus_paste_says_so_when_there_is_nothing_to_paste() {
     let mut state = shortcuts_state(true);
     state.open_pane_context_menu("pane_1".to_owned(), 10, 5);
+    let Some(paste) = paste_item(&state) else {
+        return;
+    };
 
     let mut outcome = ClientShellInput::default();
-    state.activate_context_menu_item(0, &mut outcome);
+    state.activate_context_menu_item(paste, &mut outcome);
 
     assert!(outcome.requests.is_empty());
     assert_eq!(
@@ -269,10 +284,9 @@ fn the_menus_paste_clears_the_selection_as_a_host_paste_does() {
     state.read_clipboard_text = || Some("ls".to_owned());
     select_in_pane_1(&mut state);
     state.open_pane_context_menu("pane_1".to_owned(), 10, 5);
-    let paste = pane_menu_actions(&state)
-        .iter()
-        .position(|action| *action == ClientContextMenuAction::Paste)
-        .unwrap();
+    let Some(paste) = paste_item(&state) else {
+        return;
+    };
 
     let mut outcome = ClientShellInput::default();
     state.activate_context_menu_item(paste, &mut outcome);

@@ -255,11 +255,11 @@ pub fn write_clipboard(_bytes: &[u8]) -> bool {
     false
 }
 
-/// Unsupported platform stub.
 /// Whether `read_clipboard_text` can return text on this platform, so a
 /// client offers Paste only where it can work.
 pub const CAN_READ_CLIPBOARD_TEXT: bool = false;
 
+/// Unsupported platform stub.
 pub fn read_clipboard_text() -> Option<String> {
     None
 }

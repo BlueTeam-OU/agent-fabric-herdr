@@ -828,8 +828,8 @@ pub(super) fn read_clipboard_command_text(
         return Ok(None);
     }
     let read = match read_rx.recv_timeout(budget) {
-        Ok(Ok(read)) => read,
-        Ok(Err(_)) => {
+        Ok(Ok(read @ (super::LimitedRead::Complete(_) | super::LimitedRead::Empty))) => read,
+        Ok(Ok(super::LimitedRead::Oversized) | Err(_)) => {
             kill_group(&mut child);
             return Ok(None);
         }
@@ -838,7 +838,24 @@ pub(super) fn read_clipboard_command_text(
             return Err(ClipboardStalled);
         }
     };
-    let succeeded = child.wait().is_ok_and(|status| status.success());
+    // A command can close its output and still not exit; its exit is waited
+    // for under the same deadline.
+    let succeeded = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Ok(None) => {
+                kill_group(&mut child);
+                return Err(ClipboardStalled);
+            }
+            Err(_) => {
+                kill_group(&mut child);
+                return Ok(None);
+            }
+        }
+    };
     match read {
         super::LimitedRead::Complete(bytes) if succeeded => Ok(String::from_utf8(bytes).ok()),
         _ => Ok(None),
