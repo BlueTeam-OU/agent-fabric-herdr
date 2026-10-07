@@ -300,6 +300,24 @@ fn disabled_mouse_chrome_keeps_tab_wheel_but_removes_split_drag_hits() {
 }
 
 #[test]
+fn with_clipboard_shortcuts_a_copied_word_stays_selected_for_ctrl_c() {
+    let mut state = word_drag_state_with(true, true);
+    let initial = start_word_drag(&mut state);
+    let release = MouseEventKind::Up(MouseButton::Left);
+    let _ = word_row_reply(&mut state, &initial, "alpha bravo charlie");
+    let actions = word_drag_mouse(&mut state, release, 0, 8).actions;
+    let copied = word_row_reply(&mut state, &word_read_id(&actions), "bravo");
+    assert!(matches!(&copied[..], [ClientShellAction::ClipboardWrite(bytes)] if bytes == b"bravo"));
+
+    assert!(state.selection_highlight_clear_deadline.is_none());
+    state.tick_copy_feedback(std::time::Instant::now() + std::time::Duration::from_secs(5));
+    assert!(state
+        .selection
+        .as_ref()
+        .is_some_and(crate::selection::Selection::is_visible));
+}
+
+#[test]
 fn client_double_click_selects_word_and_copies_only_after_release() {
     for (copy_on_select, release_before_response) in [(false, true), (true, false)] {
         let mut state = word_drag_state(copy_on_select);
@@ -354,9 +372,13 @@ fn client_double_click_selects_word_and_copies_only_after_release() {
 }
 
 fn word_drag_state(copy_on_select: bool) -> ClientShellState {
+    word_drag_state_with(copy_on_select, false)
+}
+
+fn word_drag_state_with(copy_on_select: bool, clipboard_shortcuts: bool) -> ClientShellState {
     let mut config = Config::default();
     config.ui.copy_on_select = copy_on_select;
-    config.ui.clipboard_shortcuts = false;
+    config.ui.clipboard_shortcuts = clipboard_shortcuts;
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
     state.set_snapshot(Box::new(snapshot()));
     let mut pane_surface = surface();

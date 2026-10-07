@@ -55,14 +55,18 @@ impl ClientContextMenuOverlay {
                 has_manual_label,
                 right_click_passthrough,
                 has_selection,
+                clipboard_items,
                 ..
             } => {
                 // Clipboard first: the most frequent pane actions, nearest the pointer.
+                // With clipboard shortcuts off the menu is upstream's, item for item.
                 let mut items = Vec::new();
-                if *has_selection {
+                if *clipboard_items && *has_selection {
                     items.push(item("Copy", Action::Copy));
                 }
-                items.push(item("Paste", Action::Paste));
+                if *clipboard_items && crate::platform::CAN_READ_CLIPBOARD_TEXT {
+                    items.push(item("Paste", Action::Paste));
+                }
                 items.push(item("Rename pane", Action::RenamePane));
                 if *has_manual_label {
                     items.push(item("Clear pane name", Action::ClearPaneName));
@@ -172,6 +176,7 @@ impl ClientShellState {
                 has_manual_label: pane.label.is_some(),
                 right_click_passthrough: pane.right_click_passthrough,
                 has_selection,
+                clipboard_items: self.config.clipboard_shortcuts,
             },
             x,
             y,
@@ -471,6 +476,10 @@ impl ClientShellState {
             ClientContextMenuAction::Paste => {
                 match (self.read_clipboard_text)().filter(|text| !text.is_empty()) {
                     Some(text) => {
+                        // As a host paste does: the text may move what was selected.
+                        self.selection = None;
+                        self.stop_selection_autoscroll();
+                        self.selection_highlight_clear_deadline = None;
                         super::push_target_event(
                             ClientInputTarget::Pane(pane_id.clone()),
                             crate::protocol::ClientPaneInputEvent::Paste(text),
@@ -484,7 +493,7 @@ impl ClientShellState {
                     }
                     None => {
                         outcome.repaint |= self.show_clipboard_notice(
-                            "clipboard has no text to paste",
+                            "nothing to paste: no text on the clipboard, or it could not be read",
                             std::time::Instant::now(),
                         );
                     }

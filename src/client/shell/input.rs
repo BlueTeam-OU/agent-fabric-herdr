@@ -465,8 +465,9 @@ impl ClientShellState {
         if !self.config.clipboard_shortcuts || !is_modal_paste_shortcut(key) {
             return false;
         }
-        // A repeat reaches routing only after its press was consumed here:
-        // holding Ctrl+V pastes once.
+        // Hosts that report key events send a held Ctrl+V as one press and
+        // repeats: the repeats are swallowed, so it pastes once. A legacy host
+        // sends repeated presses, which paste again, as its own paste would.
         if key.kind == KeyEventKind::Repeat {
             return true;
         }
@@ -550,8 +551,8 @@ impl ClientShellState {
         key: &crate::input::TerminalKey,
         outcome: &mut ClientShellInput,
     ) -> Option<ClientInputTarget> {
-        if self.handle_modal_paste_shortcut_with(key, outcome, crate::platform::read_clipboard_text)
-        {
+        let read_clipboard_text = self.read_clipboard_text;
+        if self.handle_modal_paste_shortcut_with(key, outcome, read_clipboard_text) {
             return None;
         }
         if matches!(

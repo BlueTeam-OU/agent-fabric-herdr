@@ -552,6 +552,9 @@ pub(super) enum ClientContextMenuTarget {
         right_click_passthrough: bool,
         /// A selection in this pane was visible when the menu opened.
         has_selection: bool,
+        /// Copy and Paste are offered: clipboard shortcuts are on, and for
+        /// Paste the platform can read clipboard text.
+        clipboard_items: bool,
     },
 }
 

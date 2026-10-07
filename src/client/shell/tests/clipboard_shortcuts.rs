@@ -229,6 +229,54 @@ fn the_menus_paste_says_so_when_there_is_nothing_to_paste() {
             .copy_feedback
             .as_ref()
             .map(|feedback| feedback.message.as_str()),
-        Some("clipboard has no text to paste")
+        Some("nothing to paste: no text on the clipboard, or it could not be read")
     );
+}
+
+#[test]
+fn a_configured_ctrl_v_binding_wins_over_the_paste_shortcut() {
+    let mut config = Config::default();
+    config.keys.zoom = crate::config::BindingConfig::One("ctrl+v".to_owned());
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.read_clipboard_text = || Some("must not paste".to_owned());
+
+    let outcome = state.handle_raw_events(vec![RawInputEvent::Key(key('v'))]);
+
+    assert!(pasted(&outcome, "pane_1").is_none());
+    assert!(
+        !forwards_a_key(&outcome, "pane_1"),
+        "the binding consumed the key"
+    );
+}
+
+#[test]
+fn turning_clipboard_shortcuts_off_restores_upstreams_pane_menu() {
+    let mut state = shortcuts_state(false);
+    select_in_pane_1(&mut state);
+    state.open_pane_context_menu("pane_1".to_owned(), 10, 5);
+
+    let actions = pane_menu_actions(&state);
+    assert!(!actions.contains(&ClientContextMenuAction::Copy));
+    assert!(!actions.contains(&ClientContextMenuAction::Paste));
+    assert_eq!(actions.first(), Some(&ClientContextMenuAction::RenamePane));
+}
+
+#[test]
+fn the_menus_paste_clears_the_selection_as_a_host_paste_does() {
+    let mut state = shortcuts_state(true);
+    state.read_clipboard_text = || Some("ls".to_owned());
+    select_in_pane_1(&mut state);
+    state.open_pane_context_menu("pane_1".to_owned(), 10, 5);
+    let paste = pane_menu_actions(&state)
+        .iter()
+        .position(|action| *action == ClientContextMenuAction::Paste)
+        .unwrap();
+
+    let mut outcome = ClientShellInput::default();
+    state.activate_context_menu_item(paste, &mut outcome);
+
+    assert_eq!(pasted(&outcome, "pane_1").as_deref(), Some("ls"));
+    assert!(state.selection.is_none());
 }

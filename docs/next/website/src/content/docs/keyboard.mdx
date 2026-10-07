@@ -15,7 +15,7 @@ A terminal multiplexer sits between your terminal and the programs running insid
 
 The prefix solves this. Press the prefix key, default `ctrl+b`, and the next keypress goes to Herdr instead of your terminal. `prefix+c` means: press `ctrl+b`, release, then press `c`. Herdr reserves one key instead of dozens.
 
-Two direct keys act only when there is something to act on. `ctrl+c` copies highlighted text and otherwise reaches the program. `ctrl+v` pastes clipboard text and otherwise reaches the program, for example when the clipboard holds an image. Set `ui.clipboard_shortcuts = false` to send both to the program always.
+Two direct keys act only when there is something to act on. `ctrl+c` copies highlighted text and otherwise reaches the program. `ctrl+v` pastes clipboard text and otherwise reaches the program, for example when the clipboard holds an image. Holding `ctrl+v` pastes once in terminals that report key events, and repeats like any held key in others. On Windows `ctrl+v` always reaches the program for now. Set `ui.clipboard_shortcuts = false` to send both to the program always.
 
 Press `prefix+?` at any time to see every active binding. Press `/` in the keybind help to filter actions and shortcuts; use Backspace to edit the filter or `ctrl+u` to clear it.
 
