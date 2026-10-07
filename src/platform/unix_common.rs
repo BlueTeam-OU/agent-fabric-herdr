@@ -305,14 +305,40 @@ pub(crate) fn spawn_server_signal_monitor(
     }
 }
 
-/// Places the process on the other end of a local socket for socket access.
-pub(crate) fn local_stream_peer_place(stream: &crate::ipc::LocalStream) -> super::PeerPlace {
+/// The pid on the other end of a local socket, from the kernel's credentials.
+pub(crate) fn local_stream_peer_pid(stream: &crate::ipc::LocalStream) -> Option<u32> {
     use std::os::fd::{AsFd as _, AsRawFd as _};
 
     let crate::ipc::LocalStream::UdSocket(socket) = stream;
-    match super::socket_peer_pid(socket.as_fd().as_raw_fd()) {
-        Some(pid) => super::peer_process_place(pid),
-        None => super::PeerPlace::Unidentified,
+    super::socket_peer_pid(socket.as_fd().as_raw_fd())
+}
+
+/// Places a socket peer by pid for socket access.
+pub(crate) fn process_place(pid: Option<u32>) -> super::PeerPlace {
+    pid.map_or(super::PeerPlace::Unidentified, super::peer_process_place)
+}
+
+/// Ends a local-socket connection from outside the thread serving it: shutting
+/// the socket down makes that thread's next read see end of file and its next
+/// write fail, so it leaves through its ordinary disconnect path.
+pub(crate) fn local_stream_revoker(
+    stream: &crate::ipc::LocalStream,
+) -> Box<dyn Fn() + Send + Sync> {
+    use interprocess::TryClone as _;
+    use std::os::fd::{AsFd as _, AsRawFd as _};
+
+    match stream.try_clone() {
+        Ok(handle) => Box::new(move || {
+            let crate::ipc::LocalStream::UdSocket(socket) = &handle;
+            // SAFETY: the fd is owned by `handle`, which this closure keeps open.
+            unsafe {
+                libc::shutdown(socket.as_fd().as_raw_fd(), libc::SHUT_RDWR);
+            }
+        }),
+        Err(err) => {
+            tracing::warn!(%err, "cannot keep a handle to revoke this connection on reload");
+            Box::new(|| {})
+        }
     }
 }
 

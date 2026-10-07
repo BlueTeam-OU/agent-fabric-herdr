@@ -54,13 +54,13 @@ pub(crate) fn classify_process(peer: u32, facts: &impl ProcessFacts) -> PeerPlac
 
     let mut pid = peer;
     for _ in 0..MAX_ANCESTRY_DEPTH {
-        if is_pane_leader(pid, facts) {
+        if is_pane_leader(pid, facts) || outlived_its_pane(pid, facts) {
             return PeerPlace::InsidePane;
         }
         match facts.parent(pid) {
             Some(parent) if parent > 1 && parent != pid => pid = parent,
-            // Only an ancestor whose stat cannot be read (gone, or hidden by
-            // hidepid) ends the walk; a root-owned one is still walked past.
+            // The walk ends at init, or at an ancestor whose stat cannot be
+            // read (gone, or hidden by hidepid); a root-owned one is walked past.
             _ => return PeerPlace::OutsidePanes,
         }
     }
@@ -69,6 +69,16 @@ pub(crate) fn classify_process(peer: u32, facts: &impl ProcessFacts) -> PeerPlac
 
 fn is_pane_leader(pid: u32, facts: &impl ProcessFacts) -> bool {
     facts.session(pid) == Some(pid) && facts.started_as_pane(pid) == Some(true)
+}
+
+/// A process that started with a pane's marker in a session whose leader has
+/// exited: what a `nohup` job leaves behind when its pane closes. The server's
+/// own commands carry the marker only in the server's live session.
+fn outlived_its_pane(pid: u32, facts: &impl ProcessFacts) -> bool {
+    facts.started_as_pane(pid) == Some(true)
+        && facts
+            .session(pid)
+            .is_some_and(|leader| leader != pid && facts.session(leader).is_none())
 }
 
 /// Whether an environment block (NUL-separated `KEY=VALUE`) marks a pane.
@@ -173,6 +183,15 @@ mod tests {
             .with(30, 20, 20, None)
             .with(31, 30, 20, Some(true));
         assert_eq!(classify_process(31, &table), PeerPlace::InsidePane);
+    }
+
+    #[test]
+    fn a_job_that_outlived_its_pane_is_inside() {
+        // The pane shell (20) exited; its nohup child was reparented to init.
+        let table = FakeTable::default()
+            .with(1, 0, 1, Some(false))
+            .with(24, 1, 20, Some(true));
+        assert_eq!(classify_process(24, &table), PeerPlace::InsidePane);
     }
 
     #[test]

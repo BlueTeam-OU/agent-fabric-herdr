@@ -410,6 +410,13 @@ fn handle_connection_with_stop(
             &error_response_json(request_id, crate::socket_access::REFUSED_CODE, refusal),
         );
     }
+    // Streams and waits can outlive a reload that tightens access; the guard
+    // keeps this connection answerable to it until the request finishes.
+    let _admitted = socket_access.admit(
+        crate::platform::local_stream_peer_pid(&stream),
+        crate::socket_access::ConnectionKind::Api(api_request_kind(&request.method)),
+        crate::platform::local_stream_revoker(&stream),
+    );
 
     match request.method {
         #[cfg(unix)]
@@ -1533,6 +1540,33 @@ mod tests {
         .unwrap();
         let response = read_line(&mut client);
         (serde_json::from_str(&response).unwrap(), api_rx)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tightening_access_ends_an_admitted_connection_on_a_real_socket() {
+        use std::io::Read as _;
+
+        let (mut client, server, _path) = local_stream_pair("revoked-on-reload");
+        let gate = SocketAccessGate::new(crate::config::SocketAccess::All);
+        let _admitted = gate.admit(
+            crate::platform::local_stream_peer_pid(&server),
+            crate::socket_access::ConnectionKind::Api(ApiRequestKind::Control),
+            crate::platform::local_stream_revoker(&server),
+        );
+        client
+            .set_recv_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+
+        // client_only refuses control from every place, wherever the test runs.
+        gate.set(crate::config::SocketAccess::ClientOnly);
+
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            client.read(&mut byte).unwrap(),
+            0,
+            "the server side shut down"
+        );
     }
 
     #[test]

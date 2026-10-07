@@ -731,6 +731,13 @@ pub(crate) fn handle_client_handshake(
         }
         return Ok(());
     }
+    // The read loop below runs for the life of the connection; the guard keeps
+    // it answerable to a reload that tightens access until it ends.
+    let _admitted = socket_access.admit(
+        crate::platform::local_stream_peer_pid(&stream),
+        crate::socket_access::ConnectionKind::Client,
+        crate::platform::local_stream_revoker(&stream),
+    );
 
     let (
         client_cols,

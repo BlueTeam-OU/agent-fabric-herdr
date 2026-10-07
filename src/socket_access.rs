@@ -2,30 +2,145 @@
 //!
 //! Both sockets are 0600, so only this account reaches them; this narrows that
 //! further, so a process inside a pane cannot drive other panes. The verdict
-//! on a peer comes from [`crate::platform::local_stream_peer_place`]; this
-//! module only decides, so the rules stay testable without sockets.
+//! on a peer comes from [`crate::platform::process_place`]; this module only
+//! decides, so the rules stay testable without sockets.
 
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use crate::config::SocketAccess;
 use crate::platform::PeerPlace;
 
-/// The enforced mode, shared by both accept paths and updated on config reload.
-#[derive(Clone, Debug)]
-pub(crate) struct SocketAccessGate(Arc<AtomicU8>);
+/// The enforced mode, shared by both accept paths and updated on config reload,
+/// with the connections it admitted that are still open.
+#[derive(Clone)]
+pub(crate) struct SocketAccessGate {
+    mode: Arc<AtomicU8>,
+    live: Arc<LiveConnections>,
+}
+
+/// An open connection the gate admitted: who is on the other end, what it
+/// asked for, and how to end it if a reload stops admitting it.
+struct LiveConnection {
+    id: u64,
+    peer_pid: Option<u32>,
+    kind: ConnectionKind,
+    revoke: Box<dyn Fn() + Send + Sync>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConnectionKind {
+    Api(ApiRequestKind),
+    Client,
+}
+
+struct LiveConnections {
+    next_id: AtomicU64,
+    entries: Mutex<Vec<LiveConnection>>,
+    /// Placement of a peer by pid at revalidation; a field so tests can fake it.
+    place: fn(Option<u32>) -> PeerPlace,
+}
+
+/// Removes its connection from the gate when the connection ends.
+pub(crate) struct LiveConnectionGuard {
+    live: Weak<LiveConnections>,
+    id: u64,
+}
+
+impl Drop for LiveConnectionGuard {
+    fn drop(&mut self) {
+        if let Some(live) = self.live.upgrade() {
+            live.entries
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .retain(|entry| entry.id != self.id);
+        }
+    }
+}
 
 impl SocketAccessGate {
     pub(crate) fn new(mode: SocketAccess) -> Self {
-        Self(Arc::new(AtomicU8::new(encode(mode.effective()))))
+        Self::with_placement(mode, crate::platform::process_place)
     }
 
+    fn with_placement(mode: SocketAccess, place: fn(Option<u32>) -> PeerPlace) -> Self {
+        Self {
+            mode: Arc::new(AtomicU8::new(encode(mode.effective()))),
+            live: Arc::new(LiveConnections {
+                next_id: AtomicU64::new(0),
+                entries: Mutex::new(Vec::new()),
+                place,
+            }),
+        }
+    }
+
+    /// Applies a mode to new connections and to the open ones: an open
+    /// connection the mode no longer admits is ended, so tightening the
+    /// setting does not leave a pane's earlier connection in place.
     pub(crate) fn set(&self, mode: SocketAccess) {
-        self.0.store(encode(mode.effective()), Ordering::Relaxed);
+        let mode = mode.effective();
+        self.mode.store(encode(mode), Ordering::Relaxed);
+        if mode == SocketAccess::All {
+            return;
+        }
+        let entries = self
+            .live
+            .entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for entry in entries.iter() {
+            let place = || (self.live.place)(entry.peer_pid);
+            let refusal = match entry.kind {
+                ConnectionKind::Api(kind) => api_refusal(mode, kind, place),
+                ConnectionKind::Client => client_refusal(mode, place),
+            };
+            if let Some(refusal) = refusal {
+                tracing::warn!(
+                    peer_pid = entry.peer_pid,
+                    kind = ?entry.kind,
+                    %refusal,
+                    "closing a connection server.socket_access no longer admits"
+                );
+                (entry.revoke)();
+            }
+        }
     }
 
     pub(crate) fn mode(&self) -> SocketAccess {
-        decode(self.0.load(Ordering::Relaxed))
+        decode(self.mode.load(Ordering::Relaxed))
+    }
+
+    /// Keeps an admitted connection answerable to later reloads until the
+    /// returned guard is dropped. `revoke` must end the connection.
+    pub(crate) fn admit(
+        &self,
+        peer_pid: Option<u32>,
+        kind: ConnectionKind,
+        revoke: Box<dyn Fn() + Send + Sync>,
+    ) -> LiveConnectionGuard {
+        let id = self.live.next_id.fetch_add(1, Ordering::Relaxed);
+        self.live
+            .entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(LiveConnection {
+                id,
+                peer_pid,
+                kind,
+                revoke,
+            });
+        LiveConnectionGuard {
+            live: Arc::downgrade(&self.live),
+            id,
+        }
+    }
+}
+
+impl std::fmt::Debug for SocketAccessGate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SocketAccessGate")
+            .field("mode", &self.mode())
+            .finish_non_exhaustive()
     }
 }
 
@@ -228,6 +343,67 @@ mod tests {
         })
         .unwrap_or_default();
         assert!(refusal.contains("\"outside_panes\""), "{refusal}");
+    }
+
+    fn revoked_flag() -> (
+        Arc<std::sync::atomic::AtomicBool>,
+        Box<dyn Fn() + Send + Sync>,
+    ) {
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let set = Arc::clone(&flag);
+        (flag, Box::new(move || set.store(true, Ordering::Relaxed)))
+    }
+
+    /// pid 1 sits outside panes, pid 2 inside one, no pid is unidentified.
+    fn fake_place(pid: Option<u32>) -> PeerPlace {
+        match pid {
+            Some(1) => PeerPlace::OutsidePanes,
+            Some(2) => PeerPlace::InsidePane,
+            _ => PeerPlace::Unidentified,
+        }
+    }
+
+    #[test]
+    fn tightening_ends_open_connections_the_new_mode_refuses() {
+        let gate = SocketAccessGate::with_placement(SocketAccess::All, fake_place);
+        let (outside_client, revoke) = revoked_flag();
+        let _a = gate.admit(Some(1), ConnectionKind::Client, revoke);
+        let (pane_client, revoke) = revoked_flag();
+        let _b = gate.admit(Some(2), ConnectionKind::Client, revoke);
+        let (outside_stream, revoke) = revoked_flag();
+        let _c = gate.admit(
+            Some(1),
+            ConnectionKind::Api(ApiRequestKind::Control),
+            revoke,
+        );
+        let (unplaced_status, revoke) = revoked_flag();
+        let _d = gate.admit(None, ConnectionKind::Api(ApiRequestKind::Status), revoke);
+
+        gate.set(SocketAccess::OutsidePanes);
+        assert!(!outside_client.load(Ordering::Relaxed));
+        assert!(pane_client.load(Ordering::Relaxed));
+        assert!(!outside_stream.load(Ordering::Relaxed));
+        assert!(
+            !unplaced_status.load(Ordering::Relaxed),
+            "status is never refused"
+        );
+
+        gate.set(SocketAccess::ClientOnly);
+        assert!(!outside_client.load(Ordering::Relaxed));
+        assert!(
+            outside_stream.load(Ordering::Relaxed),
+            "client_only ends control streams"
+        );
+    }
+
+    #[test]
+    fn a_closed_connection_is_no_longer_revalidated() {
+        let gate = SocketAccessGate::with_placement(SocketAccess::All, fake_place);
+        let (pane_client, revoke) = revoked_flag();
+        drop(gate.admit(Some(2), ConnectionKind::Client, revoke));
+
+        gate.set(SocketAccess::OutsidePanes);
+        assert!(!pane_client.load(Ordering::Relaxed));
     }
 
     #[test]
