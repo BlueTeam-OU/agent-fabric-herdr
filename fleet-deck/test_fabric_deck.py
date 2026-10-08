@@ -5,7 +5,10 @@ from fabric_deck import (
     Report,
     agent_command,
     agent_report,
-    status_update,
+    Watcher,
+    next_backoff,
+    PANE_MAP_REFRESH_S,
+    RESEND_AFTER_S,
     ENTRY_GRACE_S,
     RESTORE_WAIT_S,
     DeckError,
@@ -308,15 +311,90 @@ class AgentPanel(unittest.TestCase):
         self.assertEqual(agent_report(state_row("none")), Release())
         self.assertEqual(agent_report(state_row("stopped-answering")), Report("unknown"))
 
-    def test_only_a_change_is_reported_and_only_into_a_mapped_tab(self):
-        shown = {}
-        panes = {"ui": "p1"}
-        first = status_update(state_row("working"), panes, shown)
-        self.assertEqual(first, ("p1", Report("working")))
-        shown["p1"] = Report("working")
-        self.assertIsNone(status_update(state_row("working"), panes, shown), "a heartbeat")
-        self.assertEqual(status_update(state_row("idle"), panes, shown), ("p1", Report("idle")))
-        self.assertIsNone(status_update(state_row("idle"), {}, shown), "no tab here")
+
+
+def row_line(login, state, host="host-a"):
+    return ('{"address":"%s/%s","ts":"2026-10-08T05:00:00Z","sessions":[],"state":"%s"}'
+            % (host, login, state))
+
+
+class FakeHerdr:
+    """account_tabs from a mutable table; every herdr call recorded, and a
+    set of panes whose calls fail as a closed tab's would."""
+
+    def __init__(self, tabs):
+        self.tabs, self.calls, self.dead = tabs, [], set()
+
+    def account_tabs(self, logins):
+        return [t for t in self.tabs if t.login in logins]
+
+    def call(self, *args):
+        self.calls.append(args)
+        if args[2] in self.dead:
+            raise DeckError(f"pane {args[2]} not found")
+        return {}
+
+
+def watcher(herdr, logins=("ui",)):
+    return Watcher(herdr=herdr, accounts=lambda: set(logins), host="host-a", log=lambda _: None)
+
+
+class WatchLoop(unittest.TestCase):
+    def test_only_a_change_is_sent_until_the_resend_interval(self):
+        herdr = FakeHerdr([AccountTab("ui", "t1", "w1", "p1")])
+        w = watcher(herdr)
+        w.on_line(row_line("ui", "working"), 0)
+        w.on_line(row_line("ui", "working"), 5)
+        self.assertEqual(len(herdr.calls), 1, "a heartbeat sends nothing")
+        w.on_line(row_line("ui", "working"), RESEND_AFTER_S + 1)
+        self.assertEqual(len(herdr.calls), 2, "sent again after the interval")
+        w.on_line(row_line("ui", "idle"), RESEND_AFTER_S + 2)
+        self.assertEqual(herdr.calls[-1][-1], "idle")
+
+    def test_another_hosts_record_is_ignored(self):
+        herdr = FakeHerdr([AccountTab("ui", "t1", "w1", "p1")])
+        watcher(herdr).on_line(row_line("ui", "working", host="host-b"), 0)
+        self.assertEqual(herdr.calls, [])
+
+    def test_a_tab_that_moved_is_found_again_after_a_failed_report(self):
+        herdr = FakeHerdr([AccountTab("ui", "t1", "w1", "p1")])
+        w = watcher(herdr)
+        w.on_line(row_line("ui", "working"), 0)
+        herdr.dead.add("p1")
+        herdr.tabs = [AccountTab("ui", "t2", "w2", "p9")]
+        w.on_line(row_line("ui", "idle"), 1)   # fails on p1, forces a re-map
+        w.on_line(row_line("ui", "idle"), 2)   # goes to the tab's new pane
+        self.assertEqual(herdr.calls[-1][2], "p9")
+
+    def test_a_tab_split_after_mapping_is_released_and_no_longer_reported(self):
+        herdr = FakeHerdr([AccountTab("ui", "t1", "w1", "p1")])
+        w = watcher(herdr)
+        w.on_line(row_line("ui", "working"), 0)
+        herdr.tabs = [AccountTab("ui", "t1", "w1", "p1", pane_count=2)]
+        w.on_line(row_line("ui", "idle"), PANE_MAP_REFRESH_S)
+        self.assertEqual(herdr.calls[-1][1], "release-agent")
+        self.assertEqual(len(herdr.calls), 2, "nothing reported into the split tab")
+
+    def test_a_herdr_timeout_does_not_stop_the_watcher(self):
+        herdr = FakeHerdr([AccountTab("ui", "t1", "w1", "p1")])
+
+        def hung(*args):
+            raise __import__("subprocess").TimeoutExpired(args, 30)
+
+        herdr.call = hung
+        w = watcher(herdr)
+        w.on_line(row_line("ui", "working"), 0)
+        self.assertEqual(w.shown, {})
+
+
+class Backoff(unittest.TestCase):
+    def test_waits_grow_and_reset_after_a_healthy_stream(self):
+        failures, waits = 0, []
+        for _ in range(8):
+            failures, wait = next_backoff(failures, 0.5)
+            waits.append(wait)
+        self.assertEqual(waits, [1, 2, 5, 10, 30, 60, 60, 60])
+        self.assertEqual(next_backoff(failures, 61), (1, 1))
 
 
 class AgentCommand(unittest.TestCase):

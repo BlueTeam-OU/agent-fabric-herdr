@@ -22,7 +22,7 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Callable, Iterable
 
 # The workspace an account goes to when the catalogue names no group for it,
 # or when its group's workspace no longer exists (the operator removed it).
@@ -440,8 +440,9 @@ def report_to_herdr(herdr: "Herdr", pane: str, outcome: Report | Release) -> Non
 
 
 def agent_command(pane: str, outcome: Report | Release) -> tuple[str, ...]:
-    """herdr's own parser takes the pane id first (`herdr pane report-agent
-    <pane_id> --source …`); an option before it reads as unknown."""
+    """`release-agent` takes its pane id as the first argument (an option
+    before it reads as unknown); `report-agent` takes it anywhere, and is
+    given the same order for one shape."""
     if isinstance(outcome, Release):
         return ("pane", "release-agent", pane, "--source", AGENT_SOURCE, "--agent", AGENT_LABEL)
     return (
@@ -634,28 +635,87 @@ def status_line(login: str, status: str, detail: str = "") -> str:
     return f"{login:<28} {status}{suffix}"
 
 
-def status_update(
-    record: StateRecord,
-    pane_for_login: dict[str, str],
-    shown: dict[str, Report | Release],
-) -> tuple[str, Report | Release] | None:
-    """The report to send for one stream record, or None when the account
-    has no tab here or its pane already shows this. The stream posts every
-    ten minutes as a heartbeat; an unchanged state is not sent again."""
-    pane = pane_for_login.get(record.login)
-    if pane is None:
-        return None
-    outcome = agent_report(record)
-    if shown.get(pane) == outcome:
-        return None
-    return pane, outcome
+# The pane map is rebuilt this often, so a tab closed, moved, split or
+# created since is followed without restarting the deck.
+PANE_MAP_REFRESH_S = 10
+# Every pane's report is sent again after this long even when nothing
+# changed, so a herdr server restarted with the same pane ids (which
+# forgets every report) is put right within one stream heartbeat.
+RESEND_AFTER_S = 600
+
+
+@dataclass
+class Watcher:
+    """Keeps herdr's agent panel in step with the state stream: one record
+    at a time, with the clock, herdr and the account list injected so the
+    loop's rules are tested without a server."""
+
+    herdr: "Herdr"
+    accounts: Callable[[], set[str]]
+    host: str | None
+    log: Callable[[str], None]
+    pane_for_login: dict[str, str] = field(default_factory=dict)
+    # pane -> (what it shows, when it was sent)
+    shown: dict[str, tuple[Report | Release, float]] = field(default_factory=dict)
+    mapped_at: float | None = None
+
+    def refresh_map(self, now: float) -> None:
+        self.mapped_at = now
+        try:
+            tabs = self.herdr.account_tabs(self.accounts())
+        except Exception as error:  # herdr or moveto failing must not stop the deck
+            self.log(f"cannot map account tabs: {printable(str(error))}")
+            return
+        # A split account tab is the operator's arrangement: not reported into.
+        mapped = {t.login: t.pane_id for t in tabs if t.pane_count == 1}
+        for pane in set(self.shown) - set(mapped.values()):
+            # A tab gone from the map (closed, split, relabelled) loses the
+            # agent row the deck gave it; a closed one has nothing to release.
+            outcome, _ = self.shown.pop(pane)
+            if isinstance(outcome, Report):
+                self._send(pane, Release(), now, quiet=True)
+                self.shown.pop(pane, None)
+        self.pane_for_login = mapped
+
+    def on_line(self, raw: str, now: float) -> None:
+        record = parse_state_line(raw)
+        if not for_this_host(record, self.host):
+            return
+        if self.mapped_at is None or now - self.mapped_at >= PANE_MAP_REFRESH_S:
+            self.refresh_map(now)
+        pane = self.pane_for_login.get(record.login)
+        if pane is None:
+            return
+        outcome = agent_report(record)
+        last = self.shown.get(pane)
+        if last is not None and last[0] == outcome and now - last[1] < RESEND_AFTER_S:
+            return
+        self._send(pane, outcome, now)
+
+    def _send(self, pane: str, outcome: Report | Release, now: float, quiet: bool = False) -> None:
+        try:
+            report_to_herdr(self.herdr, pane, outcome)
+        except Exception as error:  # one account's failure must not stop the others
+            if not quiet:
+                self.log(f"{pane}: {printable(str(error))}")
+            self.shown.pop(pane, None)
+            # Map again at the next record: the tab may be gone or moved.
+            self.mapped_at = None
+            return
+        self.shown[pane] = (outcome, now)
 
 
 # The stream child is restarted after it exits, waiting longer each time it
 # dies young, and from the start again once it has run a while.
 WATCH_BACKOFF_S = (1, 2, 5, 10, 30, 60)
 WATCH_HEALTHY_S = 60
-PANE_MAP_REFRESH_S = 10
+
+
+def next_backoff(failures: int, lived_s: float) -> tuple[int, int]:
+    """After a stream ended having run `lived_s`: the new count of quick
+    failures and the seconds to wait before starting it again."""
+    failures = 1 if lived_s >= WATCH_HEALTHY_S else failures + 1
+    return failures, WATCH_BACKOFF_S[min(failures - 1, len(WATCH_BACKOFF_S) - 1)]
 
 
 def watch(herdr: Herdr, exclude: set[str]) -> int:
@@ -668,66 +728,44 @@ def watch(herdr: Herdr, exclude: set[str]) -> int:
     def stop(_signum, _frame):
         raise KeyboardInterrupt
 
-    # Stopped by `kill` as by ctrl-c, so the stream child never outlives the
-    # deck (a backgrounded process ignores SIGINT).
+    # Stopped by `kill` as by ctrl-c (a backgrounded process ignores SIGINT).
     signal.signal(signal.SIGTERM, stop)
 
     host = local_host()
     if host is None:
         print("fabric-deck: cannot tell this host's fleet name (fabric-whoami); "
               "state records of the same login on other hosts may be mixed in", file=sys.stderr)
-    shown: dict[str, Report | Release] = {}
-    pane_for_login: dict[str, str] = {}
-    mapped_at = 0.0
+    watcher = Watcher(
+        herdr=herdr,
+        accounts=lambda: {a.login for a in parse_moveto_list(moveto_list(), exclude=exclude)},
+        host=host,
+        log=lambda line: print(f"fabric-deck: {line}", file=sys.stderr, flush=True),
+    )
     failures = 0
-
-    def refresh_map() -> None:
-        nonlocal pane_for_login, mapped_at
-        logins = {a.login for a in parse_moveto_list(moveto_list(), exclude=exclude)}
-        # A split account tab is the operator's arrangement: not reported into.
-        pane_for_login = {
-            t.login: t.pane_id for t in herdr.account_tabs(logins) if t.pane_count == 1
-        }
-        mapped_at = time.monotonic()
-
     while True:
         started = time.monotonic()
-        stream = subprocess.Popen(
-            ["fabric-ctl", "all", "states", "--follow", "--json"],
-            stdout=subprocess.PIPE, text=True,
-        )
         try:
-            for raw in stream.stdout or []:
-                record = parse_state_line(raw)
-                if not for_this_host(record, host):
-                    continue
-                if record.login not in pane_for_login and time.monotonic() - mapped_at > PANE_MAP_REFRESH_S:
-                    try:
-                        refresh_map()
-                    except (DeckError, subprocess.SubprocessError, OSError) as error:
-                        print(f"fabric-deck: cannot map account tabs: {printable(str(error))}", file=sys.stderr)
-                update = status_update(record, pane_for_login, shown)
-                if update is None:
-                    continue
-                pane, outcome = update
-                try:
-                    report_to_herdr(herdr, pane, outcome)
-                    shown[pane] = outcome
-                except DeckError as error:
-                    # The tab may have been closed or moved: map again next time.
-                    print(f"fabric-deck: {record.login}: {printable(str(error))}", file=sys.stderr)
-                    shown.pop(pane, None)
-                    mapped_at = 0.0
+            stream = subprocess.Popen(
+                ["fabric-ctl", "all", "states", "--follow", "--json"],
+                stdout=subprocess.PIPE, text=True,
+            )
+        except OSError as error:
+            watcher.log(f"cannot start the state stream: {error}")
+            stream = None
+        try:
+            for raw in (stream.stdout if stream and stream.stdout else []):
+                watcher.on_line(raw, time.monotonic())
         except KeyboardInterrupt:
-            stream.terminate()
-            stream.wait()
             return 0
-        stream.wait()
-        lived = time.monotonic() - started
-        failures = 1 if lived >= WATCH_HEALTHY_S else failures + 1
-        wait = WATCH_BACKOFF_S[min(failures - 1, len(WATCH_BACKOFF_S) - 1)]
-        print(f"fabric-deck: the state stream ended (exit {stream.returncode}); "
-              f"restarting in {wait}s", file=sys.stderr)
+        finally:
+            # On every way out of the loop, the stream child goes with it.
+            if stream is not None and stream.poll() is None:
+                stream.terminate()
+            if stream is not None:
+                stream.wait()
+        failures, wait = next_backoff(failures, time.monotonic() - started)
+        code = stream.returncode if stream is not None else "none"
+        watcher.log(f"the state stream ended (exit {code}); restarting in {wait}s")
         try:
             time.sleep(wait)
         except KeyboardInterrupt:
@@ -746,11 +784,13 @@ def main(argv: list[str] | None = None) -> int:
         prog="fabric-deck",
         description="Fleet Deck: bring every agent account's herdr tab back into its account.",
     )
-    parser.add_argument("--dry-run", action="store_true", help="print the plan, change nothing")
+    dry_run = ("--dry-run", "print the plan, change nothing")
     parser.add_argument("--catalog", help="the role catalogue (identities/roles/catalog.json)")
     parser.add_argument("--exclude", action="append", default=[], help="a login to leave out")
     parser.add_argument("--cwd", default=os.path.expanduser("~/projects"))
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(dry_run[0], action="store_true", help=dry_run[1])
+    mode.add_argument(
         "--watch", action="store_true",
         help="keep herdr's agent panel in step with the state stream, until interrupted",
     )

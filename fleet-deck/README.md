@@ -49,8 +49,12 @@ account's state into its tab's pane as the agent `claude` from the source
 - `none` (no session) releases the agent;
 - anything else, the stream's stale rows included, is reported `unknown`.
 
-It reports only on a change: the stream's ten-minute heartbeat sends
-nothing. A split account tab is not reported into. When the stream exits,
+It reports a change at once, and repeats a pane's report every ten
+minutes even when nothing changed, which puts a restarted herdr server
+right. The tab map is rebuilt every ten seconds: a closed, moved, split or
+new tab is followed, and a tab that leaves the map (closed or split) has its
+agent row released. A split account tab is not reported into. A herdr
+failure for one tab never stops the others. When the stream exits,
 the deck restarts it after 1, 2, 5, 10, 30, then 60 s, and from 1 s again
 once a stream has run a minute. `kill` and ctrl-c stop it cleanly, the
 stream child with it.
