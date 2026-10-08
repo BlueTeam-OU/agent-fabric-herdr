@@ -353,11 +353,14 @@ class Restore(unittest.TestCase):
             h.records["ui"] = record("ui")
             h.herdr.fail_once = {("process-info", failing)}
             h.deck.restore(0)
-            for at in (1, RESTORE_SETTLE_S, RESTORE_SETTLE_S + 2):
+            for at in range(1, PANE_MAP_REFRESH_S + RESTORE_SETTLE_S + 4, 2):
                 h.deck.follow(h.at(at))
             self.assertFalse(h.herdr.fail_once, f"{failing}'s look failed once")
-            self.assertEqual(sorted(h.herdr.runs()), ["moveto ui", "moveto ui --resume", "moveto ui --watch"],
-                             failing)
+            harness = harness_of(h)
+            self.assertEqual(h.herdr.runs(harness)[:1], ["moveto ui --resume"], f"{failing}: the decision")
+            others = sorted(r for c, r in ((c, c[3]) for c in h.herdr.calls if c[:2] == ("pane", "run"))
+                            if c[2] != harness)
+            self.assertEqual(others, ["moveto ui", "moveto ui --watch"], failing)
 
     def test_an_account_whose_restore_failed_part_way_is_restored_again(self):
         h = Harness(befores={"ui": Before(running=True)})
@@ -365,12 +368,24 @@ class Restore(unittest.TestCase):
         h.herdr.fail_once = {("split", "p1")}
         h.deck.restore(0)
         self.assertEqual(h.deck.retry, {"ui"})
+        self.assertEqual((h.deck.harness_pane, h.deck.pending, h.deck.waiting), ({}, {}, {}),
+                         "nothing of the half-done restore is followed")
+        h.deck.follow(h.at(RESTORE_SETTLE_S))
+        self.assertEqual(h.herdr.runs(), [], "no decision before the retry")
         h.deck.follow(h.at(PANE_MAP_REFRESH_S))
         h.deck.follow(h.at(PANE_MAP_REFRESH_S + RESTORE_SETTLE_S))
         h.deck.follow(h.at(PANE_MAP_REFRESH_S + RESTORE_SETTLE_S + 2))
         self.assertEqual(h.deck.retry, set())
         self.assertEqual(sorted(p["label"] for p in h.herdr.panes.values()), ["harness", "shell", "status"])
         self.assertIn("moveto ui --resume", h.herdr.runs(harness_of(h)))
+
+    def test_an_account_that_leaves_the_list_is_not_retried(self):
+        h = Harness()
+        h.herdr.fail_once = {("split", "p1")}
+        h.deck.restore(0)
+        h.logins = []
+        h.deck.follow(PANE_MAP_REFRESH_S)
+        self.assertEqual(h.deck.retry, set())
 
     def test_a_herdr_failure_while_restoring_leaves_the_deck_waiting_not_dead(self):
         h = Harness()

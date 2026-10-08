@@ -490,6 +490,9 @@ class Deck:
                     self.retry.discard(account.login)
                 except Exception as error:  # one account's failure must not stop the others
                     self.log(f"{account.login}: cannot restore its tab yet: {printable(str(error))}")
+                    # Nothing of a half-done restore is followed: the account
+                    # is restored whole at the retry, its decision taken then.
+                    self._forget(account.login)
                     self.retry.add(account.login)
         finally:
             for tab_id in spare:
@@ -664,19 +667,25 @@ class Deck:
             self.restore(now)
             return not self.lost
         self.placed = {a.login for a in accounts}
+        self.retry &= self.placed
         listed = {pane for tab in tabs.values() for pane in tab.panes.values()}
         for key in [k for k in self.waiting if k[1] not in listed]:
             del self.waiting[key]  # closed by a person: re-created only at a restore
         for login in list(self.harness_pane):
             tab = tabs.get(login)
             if tab is None or tab.panes.get(HARNESS) != self.harness_pane[login]:
-                del self.harness_pane[login]
-                self.pending.pop(login, None)
-                self.tracks.pop(login, None)
-                self.sent.pop(login, None)
-                for key in [k for k in self.waiting if k[0] == login]:
-                    del self.waiting[key]
+                self._forget(login)
         return True
+
+    def _forget(self, login: str) -> None:
+        """The account's panes are followed no more, until a restore. Whether
+        its session was running (`befores`, `unsettled`) is kept."""
+        self.harness_pane.pop(login, None)
+        self.pending.pop(login, None)
+        self.tracks.pop(login, None)
+        self.sent.pop(login, None)
+        for key in [k for k in self.waiting if k[0] == login]:
+            del self.waiting[key]
 
     # ---------------------------------------------------------- observing
 
@@ -761,7 +770,10 @@ class Deck:
             if live is not None:
                 if live.count >= 1:
                     self.unsettled.discard(login)
-                settling = login not in self.pending and login not in self.unsettled
+                # Undecided (pending, or awaiting a retry of its restore), or
+                # decided on a live = 0 from before: no fall is noted yet.
+                settling = (login not in self.pending and login not in self.retry
+                            and login not in self.unsettled)
                 current = note_live(current, live.count, at, server, settling)
             befores[login] = settle(current, server, at)
         # An account no longer placed is dropped from the record here.
