@@ -295,6 +295,52 @@ class Restore(unittest.TestCase):
         h.deck.follow(h.at(60))
         self.assertEqual(h.store, {"ui": Before(running=True)}, "the fall from before the decision is never noted")
 
+    def test_a_harness_busy_past_the_wait_still_gets_the_restore_decision(self):
+        h = Harness(befores={"ui": Before(running=True)})
+        h.herdr.new_pane = BUSY
+        h.records["ui"] = record("ui")
+        h.deck.restore(0)
+        for at in range(1, RESTORE_WAIT_S + 10, 2):
+            h.deck.follow(h.at(at))
+        self.assertEqual(h.herdr.runs(), [])
+        self.assertEqual(sum("still busy" in line for line in h.logs), 3, "said once per pane")
+        for pane in h.herdr.panes:
+            h.herdr.proc[pane] = BARE
+        h.deck.follow(h.at(RESTORE_WAIT_S + 12))
+        self.assertIn("moveto ui --resume", h.herdr.runs(harness_of(h)))
+
+    def test_shell_and_status_panes_already_running_moveto_are_not_waited_for(self):
+        herdr = FakeHerdr()
+        herdr.add_tab("ui", [("p0", "harness", in_moveto("ui", WAIT)), ("p1", "shell", in_moveto("ui")),
+                             ("p2", "status", in_moveto("ui", WATCH))])
+        h = Harness(herdr)
+        h.records["ui"] = record("ui")
+        h.deck.restore(0)
+        self.assertEqual(h.deck.waiting, {})
+        for at in range(1, RESTORE_WAIT_S + 10, 2):
+            h.deck.follow(at)
+        self.assertFalse(any("busy" in line for line in h.logs))
+
+    def test_a_restore_that_keeps_failing_is_said_once(self):
+        h = Harness()
+        h.deck.restore(0)
+        h.herdr.down = True
+        h.deck.follow(10)
+        h.herdr.down = False
+        # The map reads and the restore's own tab read pass; its listing fails.
+        h.herdr.workspace_lists_ok = 2
+        for at in range(20, 40, 2):
+            h.deck.follow(at)
+            h.herdr.workspace_lists_ok = 2
+        self.assertEqual(sum(line.startswith("cannot restore yet") for line in h.logs), 1)
+        self.assertEqual(h.logs.count("herdr's server answers: restoring"), 1)
+        h.herdr.workspace_lists_ok = None
+        h.deck.follow(50)
+        self.assertFalse(h.deck.lost)
+        h.instance = OTHER  # a later restart is said again
+        h.deck.follow(52)
+        self.assertEqual(h.logs.count("herdr's server answers: restoring"), 2)
+
     def test_a_herdr_failure_while_restoring_leaves_the_deck_waiting_not_dead(self):
         h = Harness()
         h.herdr.workspace_lists_ok = 1  # the tab map reads, the restore's own listing fails
@@ -438,6 +484,13 @@ class Follow(unittest.TestCase):
         self.assertEqual(h.herdr.runs(harness), ["moveto ui --wait"] * 2)
         self.assertEqual(h.herdr.reports(harness)[-1][-1], "blocked=failed")
         self.assertEqual(sum("ended at once twice" in line for line in h.logs), 1)
+        # A person starts it again, and it fails again: said again.
+        h.herdr.proc[harness] = in_moveto("ui", WAIT)
+        h.deck.follow(70)
+        h.herdr.proc[harness] = BARE
+        for at in range(72, 120, 2):
+            h.deck.follow(at)
+        self.assertEqual(sum("ended at once twice" in line for line in h.logs), 2)
 
     def test_a_moveto_list_failure_is_not_a_loss_of_herdr(self):
         h = Harness(befores={"ui": Before(running=True)})
@@ -596,8 +649,9 @@ class SocketPath(unittest.TestCase):
         listing = ('{"sessions": [{"name": "default", "default": true, "socket_path": "/d.sock"},'
                    ' {"name": "work", "default": false, "socket_path": "/w.sock"}]}')
         ran = mock.Mock(return_value=subprocess.CompletedProcess([], 0, stdout=listing))
-        cases = (({"HERDR_SESSION": "work", "HERDR_SOCKET_PATH": "/x.sock"}, "/w.sock"),
-                 ({"HERDR_SOCKET_PATH": "/x.sock"}, "/x.sock"), ({}, "/d.sock"))
+        cases = (({"HERDR_SESSION": "work", "HERDR_SOCKET_PATH": "/x.sock"}, "/x.sock"),
+                 ({"HERDR_SESSION": "work"}, "/w.sock"), ({"HERDR_SESSION": "default"}, "/d.sock"),
+                 ({}, "/d.sock"))
         for env, expected in cases:
             with mock.patch.dict(os.environ, env, clear=False), mock.patch("subprocess.run", ran):
                 for name in {"HERDR_SESSION", "HERDR_SOCKET_PATH"} - env.keys():

@@ -36,14 +36,16 @@ deck's own login) gets its tab:
 - **A tab split by hand** with no `harness` pane is left alone, and the
   deck says so once.
 - **The shell and status panes** are started once their shell is at its
-  prompt. A pane just created may still be running the operator's rc
-  file; one that never reaches its prompt within 120 s is left as it is,
-  said once.
+  prompt, since a pane just created may still be running the operator's
+  rc file. One still busy after 120 s is said once, and started whenever
+  it reaches its prompt. One already running this account's moveto is
+  left as it is.
 - **A harness pane running this account's moveto** is classified and
   never touched.
 - **Any other harness pane** waits until it is at the operator's prompt,
   and 5 s for the stream. That covers a bare pane, one just created, or
-  one still busy. Then:
+  one still busy (said once after 120 s; it never gets `--wait` in place
+  of the decision). Then:
   - if a session runs on the account now, it gets a plain `moveto`
     shell, so an Enter there cannot start a second session;
   - if the account's session was running before the restart and none
@@ -93,9 +95,10 @@ per change.
   5, 10, 30, then 60 s.
 - **herdr's server instance** is the pid at the socket's other end
   (`SO_PEERCRED`) plus that process's start ticks.
-  - The socket is the one the deck's herdr commands reach: the session
-    `HERDR_SESSION` names, else `HERDR_SOCKET_PATH`, else herdr's default
-    session, each as `herdr session list --json` reports it.
+  - The socket is the one the deck's herdr commands reach, in herdr's
+    own order: `HERDR_SOCKET_PATH`, else the session `HERDR_SESSION`
+    names, else the default session, each as `herdr session list --json`
+    reports it.
   - A different or unreadable instance is a loss of herdr, and its next
     answer is a restore.
   - A failing `moveto --list` is not a loss: the last tab map stays.
@@ -107,9 +110,9 @@ per change.
   Enter in the re-armed `--wait` pane does that.
 - **A moveto that keeps failing:** when a moveto the deck started ends
   within 15 s with no harness, twice in a row, the deck stops starting it.
-  The row reads `failed`, the deck says so once, and the pane's last lines
-  say why. A person who starts moveto in that pane is followed again, and
-  so is a restore.
+  The row reads `failed`, the deck says so, and the pane's last lines say
+  why. A person who starts moveto in that pane is followed again, and so
+  is a restore.
 
 Until agent-fabric's activation PR puts `--wait`, `--watch` and
 `fabric-resume`'s second-session refusal on main, `moveto --help` does not

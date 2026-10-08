@@ -337,12 +337,15 @@ def befores_path() -> str:
 
 def herdr_socket_path() -> str | None:
     """The socket the deck's herdr commands reach, as herdr itself resolves
-    it (src/session.rs active_api_socket_path): the session HERDR_SESSION
-    names, else HERDR_SOCKET_PATH, else the default session; each session's
-    socket as herdr lists it, never re-derived here."""
-    named = os.environ.get("HERDR_SESSION")
-    if not named and os.environ.get("HERDR_SOCKET_PATH"):
+    it when no --session is passed (src/session.rs configure_from_args and
+    active_api_socket_path): HERDR_SOCKET_PATH, else the session
+    HERDR_SESSION names, else the default session; each session's socket as
+    herdr lists it, never re-derived here."""
+    if os.environ.get("HERDR_SOCKET_PATH"):
         return os.environ["HERDR_SOCKET_PATH"]
+    named = os.environ.get("HERDR_SESSION")
+    if named == "default":
+        named = None
     try:
         result = subprocess.run(["herdr", "session", "list", "--json"],
                                 capture_output=True, text=True, timeout=30)
@@ -456,8 +459,12 @@ class Deck:
         try:
             self._restore(now)
         except Exception as error:  # herdr failing while it comes back must not end the deck
-            self.log(f"cannot restore yet: {printable(str(error))}")
+            self._say("restore-failed", f"cannot restore yet: {printable(str(error))}; trying again")
             self.lost = True
+            return
+        if not self.lost:
+            # Said once per loss: a later loss and restore are said again.
+            self.said -= {"restoring", "restore-failed"}
 
     def _restore(self, now: float) -> None:
         if not self.loaded:
@@ -514,8 +521,10 @@ class Deck:
         self.harness_pane[login] = harness
         for role, mode in ((SHELL, PLAIN), (STATUS, WATCH)):
             # Started once its shell is at the prompt: a pane just created may
-            # still be running the operator's rc file.
-            self.waiting[(login, panes[role], mode)] = now
+            # still be running the operator's rc file. One already running this
+            # account's moveto is left as it is.
+            if self.observe(login, panes[role]).moveto is not True:
+                self.waiting[(login, panes[role], mode)] = now
         seen = self.observe(login, harness)
         if seen.moveto is True:
             # The account's moveto holds the pane: classified, never re-armed.
@@ -538,12 +547,15 @@ class Deck:
         for key, since in list(self.waiting.items()):
             login, pane, mode = key
             try:
-                if self._bare(pane):
+                seen = self.observe(login, pane)
+                if seen.moveto is False:
                     del self.waiting[key]
                     self._arm(login, pane, mode)
+                elif seen.moveto is True:
+                    del self.waiting[key]  # a person started it meanwhile
                 elif now - since >= RESTORE_WAIT_S:
-                    del self.waiting[key]
-                    self._say(f"{pane}:busy", f"{login}: pane {pane} never reached its prompt; left as it is")
+                    self._say(f"{pane}:busy", f"{login}: pane {pane} is still busy; "
+                              "its moveto is started when it reaches its prompt")
             except Exception as error:  # kept waiting; the map is read again first
                 self.log(f"{login}: {printable(str(error))}")
                 self.mapped_at = None
@@ -564,9 +576,8 @@ class Deck:
                     continue
                 if seen.moveto is not False:
                     if waited >= RESTORE_WAIT_S:
-                        del self.pending[login]
-                        self._say(f"{pane}:busy", f"{login}: its harness pane never reached its prompt; "
-                                  "left as it is until the next restore")
+                        self._say(f"{pane}:busy", f"{login}: its harness pane is still busy; "
+                                  "the restore decision is taken when it reaches its prompt")
                     continue
                 track, arm = restore(before_live(self.befores.get(login), live), live, now)
                 self._arm(login, pane, arm.mode)
@@ -609,8 +620,12 @@ class Deck:
                 if arm is not None:
                     self._arm(login, pane, arm.mode)
                 elif track.halted:
-                    self._say(f"{login}:halted", f"{login}: moveto ended at once twice in a row; "
-                              f"not started again until a restore. The pane's last lines say why")
+                    self._say(f"{login}:halted", f"{login}: moveto ended at once twice in a row and is "
+                              "not started again; start it in the pane, or restart the deck, to try again. "
+                              "The pane's last lines say why")
+                else:
+                    # Lifted: a later halt is said again.
+                    self.said.discard(f"{login}:halted")
                 # An unarmed harness pane holds no agent: herdr's own word for that.
                 shown = Shown("unknown", "unknown") if login in self.unarmed else display(self.tracks[login], live)
                 self._show(login, pane, shown, now)
@@ -634,7 +649,7 @@ class Deck:
             return False
         if self.lost:
             self.lost = False
-            self.log("herdr's server answers: restoring")
+            self._say("restoring", "herdr's server answers: restoring")
             for kept in (self.tracks, self.harness_pane, self.pending, self.waiting, self.sent):
                 kept.clear()
             self.restore(now)
