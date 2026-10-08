@@ -2630,6 +2630,13 @@ pub fn write_clipboard(bytes: &[u8]) -> bool {
     }
 }
 
+/// Whether `read_clipboard_text` can return text on this platform, so a
+/// client offers Paste only where it can work.
+/// `read_clipboard_text` deliberately returns None here, keeping Windows field
+/// paste as it was; `read_clipboard_unicode_text` below could back it once
+/// that is decided.
+pub const CAN_READ_CLIPBOARD_TEXT: bool = false;
+
 pub fn read_clipboard_text() -> Option<String> {
     None
 }

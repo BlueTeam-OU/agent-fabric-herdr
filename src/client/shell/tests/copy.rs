@@ -133,7 +133,11 @@ fn client_selection_uses_host_background_and_repaints_when_it_changes() {
 
 #[test]
 fn client_mouse_selection_highlights_and_copies_through_endpoint_extraction() {
-    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    // Upstream's release-clears-the-selection behaviour; the fork's default
+    // keeps it for Ctrl+C (clipboard_shortcuts tests below).
+    let mut config = Config::default();
+    config.ui.clipboard_shortcuts = false;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
     state.set_snapshot(Box::new(snapshot()));
     state.set_pane_surface(surface());
     state.compose(106, 20).expect("composed frame");

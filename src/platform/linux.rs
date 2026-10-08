@@ -881,10 +881,33 @@ pub fn write_clipboard(bytes: &[u8]) -> bool {
     false
 }
 
+/// Whether `read_clipboard_text` can return text on this platform, so a
+/// client offers Paste only where it can work.
+pub const CAN_READ_CLIPBOARD_TEXT: bool = true;
+
 pub fn read_clipboard_text() -> Option<String> {
-    for command in read_clipboard_text_commands() {
-        if let Some(text) = read_clipboard_text_with_command(&command) {
-            return Some(text);
+    read_first_clipboard_text(
+        &read_clipboard_text_commands(),
+        super::unix_common::CLIPBOARD_TEXT_READ_BUDGET,
+    )
+}
+
+/// One deadline for every command: a stalled owner stops the whole read rather
+/// than costing a full timeout per command.
+fn read_first_clipboard_text(
+    commands: &[ClipboardCommand],
+    budget: std::time::Duration,
+) -> Option<String> {
+    let deadline = std::time::Instant::now() + budget;
+    for command in commands {
+        match super::unix_common::read_clipboard_command_text(
+            command.program,
+            command.args,
+            deadline,
+        ) {
+            Ok(Some(text)) => return Some(text),
+            Ok(None) => {}
+            Err(super::unix_common::ClipboardStalled) => return None,
         }
     }
     None
@@ -1129,42 +1152,12 @@ fn read_clipboard_text_commands() -> Vec<ClipboardCommand> {
     commands
 }
 
+#[cfg(test)]
 fn read_clipboard_text_with_command(command: &ClipboardCommand) -> Option<String> {
-    const MAX_CLIPBOARD_TEXT_BYTES: usize = 1024 * 1024;
-
-    let mut child = Command::new(command.program)
-        .args(command.args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-
-    let stdout = child.stdout.take()?;
-    let read = match read_limited_reader(stdout, MAX_CLIPBOARD_TEXT_BYTES) {
-        Ok(LimitedRead::Oversized) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-        Ok(read) => read,
-        Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-    };
-
-    let status = child.wait().ok()?;
-    if !status.success() {
-        return None;
-    }
-
-    match read {
-        LimitedRead::Complete(bytes) => String::from_utf8(bytes).ok(),
-        LimitedRead::Empty => None,
-        LimitedRead::Oversized => unreachable!("oversized clipboard text is handled before wait"),
-    }
+    read_first_clipboard_text(
+        std::slice::from_ref(command),
+        super::unix_common::CLIPBOARD_TEXT_READ_BUDGET,
+    )
 }
 
 fn run_clipboard_command(command: &ClipboardCommand, bytes: &[u8]) -> bool {
@@ -2101,6 +2094,25 @@ mod tests {
     }
 
     #[test]
+    fn without_a_display_session_there_is_no_clipboard_text_to_read() {
+        let _guard = env_lock().lock().unwrap();
+        let saved = ["WAYLAND_DISPLAY", "DISPLAY"].map(|key| (key, std::env::var_os(key)));
+        unsafe {
+            std::env::remove_var("WAYLAND_DISPLAY");
+            std::env::remove_var("DISPLAY");
+        }
+
+        assert_eq!(read_clipboard_text(), None);
+
+        for (key, value) in saved {
+            match value {
+                Some(value) => unsafe { std::env::set_var(key, value) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+    }
+
+    #[test]
     fn read_clipboard_text_commands_include_session_backends() {
         let _guard = env_lock().lock().unwrap();
         unsafe {
@@ -2113,6 +2125,101 @@ mod tests {
         assert_eq!(commands[1].program, "wl-paste");
         assert_eq!(commands[2].program, "xclip");
         assert_eq!(commands[3].program, "xsel");
+    }
+
+    #[test]
+    fn read_clipboard_text_with_command_gives_up_on_a_stalled_owner() {
+        let command = ClipboardCommand {
+            program: "sleep",
+            args: &["30"],
+        };
+        let started = std::time::Instant::now();
+
+        assert_eq!(
+            read_first_clipboard_text(
+                std::slice::from_ref(&command),
+                std::time::Duration::from_millis(100)
+            ),
+            None
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn one_deadline_covers_every_clipboard_command() {
+        // Each command fails slowly without stalling: a budget per command would
+        // let all three run (about 1.5 s); one deadline stops after about 0.8 s.
+        let slow_failure = ClipboardCommand {
+            program: "sh",
+            args: &["-c", "sleep 0.5; exit 1"],
+        };
+        let started = std::time::Instant::now();
+
+        assert_eq!(
+            read_first_clipboard_text(
+                &[slow_failure.clone(), slow_failure.clone(), slow_failure],
+                std::time::Duration::from_millis(800)
+            ),
+            None
+        );
+        assert!(started.elapsed() < std::time::Duration::from_millis(1250));
+    }
+
+    #[test]
+    fn a_command_that_closes_its_output_and_never_exits_is_not_waited_for() {
+        let command = ClipboardCommand {
+            program: "sh",
+            args: &["-c", "exec >&-; sleep 30"],
+        };
+        let started = std::time::Instant::now();
+
+        assert_eq!(
+            read_first_clipboard_text(
+                std::slice::from_ref(&command),
+                std::time::Duration::from_millis(300)
+            ),
+            None
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_stalled_read_kills_the_helper_holding_the_pipe() {
+        let pid_file = std::env::temp_dir().join(format!(
+            "herdr-clipboard-helper-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let script = format!("sleep 30 & echo $! > {}; wait", pid_file.display());
+        let script: &'static str = Box::leak(script.into_boxed_str());
+        let command = ClipboardCommand {
+            program: "sh",
+            args: Box::leak(vec!["-c", script].into_boxed_slice()),
+        };
+
+        assert_eq!(
+            read_first_clipboard_text(
+                std::slice::from_ref(&command),
+                std::time::Duration::from_millis(300)
+            ),
+            None
+        );
+        let helper: u32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let _ = std::fs::remove_file(&pid_file);
+        let gone = (0..50).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            !std::path::Path::new(&format!("/proc/{helper}")).exists()
+                || std::fs::read_to_string(format!("/proc/{helper}/stat"))
+                    .is_ok_and(|stat| stat.contains(") Z "))
+        });
+        assert!(gone, "the helper that inherited the pipe outlived the read");
     }
 
     #[test]

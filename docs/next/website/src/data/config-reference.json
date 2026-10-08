@@ -929,6 +929,12 @@
           "description": "Automatically copy text selected by mouse drag or double-click. When disabled, Ctrl+C or a host-forwarded Cmd+C copies and clears the retained selection."
         },
         {
+          "key": "ui.clipboard_shortcuts",
+          "type": "boolean",
+          "default": "true",
+          "description": "Ctrl+C copies highlighted text and Ctrl+V pastes clipboard text into the focused pane. With nothing highlighted or no text on the clipboard, the key reaches the pane. A copied selection stays highlighted until Ctrl+C, a click or another key. When disabled, both keys always reach the pane."
+        },
+        {
           "key": "ui.host_cursor",
           "type": "enum",
           "default": "auto",

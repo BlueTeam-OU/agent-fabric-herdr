@@ -148,11 +148,15 @@ impl ClientShellState {
             self.word_selection_gesture = None;
             if self.config.copy_on_select {
                 self.request_selection_copy(outcome, false);
-                if dragged {
-                    self.selection = None;
-                } else {
-                    self.selection_highlight_clear_deadline =
-                        Some(std::time::Instant::now() + std::time::Duration::from_millis(500));
+                // With clipboard shortcuts the word stays highlighted, as a
+                // mouse-release copy does, until Ctrl+C, a click or a key.
+                if !self.config.clipboard_shortcuts {
+                    if dragged {
+                        self.selection = None;
+                    } else {
+                        self.selection_highlight_clear_deadline =
+                            Some(std::time::Instant::now() + std::time::Duration::from_millis(500));
+                    }
                 }
             }
         }

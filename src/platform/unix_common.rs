@@ -767,3 +767,97 @@ mod shared_ssh_tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
+
+/// How long one clipboard text read may take, across every command it tries.
+/// The read runs on the client's input path (Ctrl+V, the pane menu's Paste,
+/// field paste), and a selection owner that stops answering would otherwise
+/// freeze the client until it recovered.
+pub(super) const CLIPBOARD_TEXT_READ_BUDGET: std::time::Duration =
+    std::time::Duration::from_secs(1);
+
+/// The clipboard stopped answering before the deadline: the caller tries no
+/// further command, because the next one would wait on the same owner.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct ClipboardStalled;
+
+/// Runs one clipboard read command until `deadline`. `Ok(None)` means it could
+/// not run or gave no text, so the caller may try another command.
+///
+/// The command runs in its own process group, killed whole on timeout: wl-paste
+/// hands the copy to a helper process that inherits the pipe, and killing only
+/// the command would leave that helper holding the reader open.
+pub(super) fn read_clipboard_command_text(
+    program: &str,
+    args: &[&str],
+    deadline: std::time::Instant,
+) -> Result<Option<String>, ClipboardStalled> {
+    use std::os::unix::process::CommandExt as _;
+
+    const MAX_CLIPBOARD_TEXT_BYTES: usize = 1024 * 1024;
+
+    let Some(budget) = deadline.checked_duration_since(std::time::Instant::now()) else {
+        return Err(ClipboardStalled);
+    };
+    let Ok(mut child) = std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()
+    else {
+        return Ok(None);
+    };
+    let kill_group = |child: &mut std::process::Child| {
+        // SAFETY: the group id is the child's own pid, set by process_group(0).
+        unsafe {
+            libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+        }
+        let _ = child.wait();
+    };
+    let Some(stdout) = child.stdout.take() else {
+        kill_group(&mut child);
+        return Ok(None);
+    };
+    let (read_tx, read_rx) = std::sync::mpsc::channel();
+    let reader = crate::thread_spawn::spawn_named("herdr-clipboard-read", move || {
+        let _ = read_tx.send(super::read_limited_reader(stdout, MAX_CLIPBOARD_TEXT_BYTES));
+    });
+    if reader.is_err() {
+        kill_group(&mut child);
+        return Ok(None);
+    }
+    let read = match read_rx.recv_timeout(budget) {
+        Ok(Ok(read @ (super::LimitedRead::Complete(_) | super::LimitedRead::Empty))) => read,
+        Ok(Ok(super::LimitedRead::Oversized) | Err(_)) => {
+            kill_group(&mut child);
+            return Ok(None);
+        }
+        Err(_) => {
+            kill_group(&mut child);
+            return Err(ClipboardStalled);
+        }
+    };
+    // A command can close its output and still not exit; its exit is waited
+    // for under the same deadline.
+    let succeeded = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Ok(None) => {
+                kill_group(&mut child);
+                return Err(ClipboardStalled);
+            }
+            Err(_) => {
+                kill_group(&mut child);
+                return Ok(None);
+            }
+        }
+    };
+    match read {
+        super::LimitedRead::Complete(bytes) if succeeded => Ok(String::from_utf8(bytes).ok()),
+        _ => Ok(None),
+    }
+}

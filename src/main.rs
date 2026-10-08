@@ -271,6 +271,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # or Cmd+C when the host forwards it, copies and clears it.
 # copy_on_select = true
 
+# Ctrl+C copies the selected text and Ctrl+V pastes clipboard text into the
+# focused pane. With nothing selected, Ctrl+C reaches the pane (interrupt);
+# with no text on the clipboard, Ctrl+V does. A selection stays highlighted
+# after it is copied until you click, type or press Ctrl+C.
+# clipboard_shortcuts = true
+
 # Host cursor policy: "auto", "native", or "drawn".
 # "auto" draws Herdr's own cursor on native Windows builds and WSL to avoid ConPTY cursor flicker, and uses the native terminal cursor elsewhere.
 # "native" always uses the outer terminal cursor. "drawn" always draws Herdr's cursor as terminal cell content.

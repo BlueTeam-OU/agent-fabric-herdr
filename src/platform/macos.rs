@@ -638,38 +638,15 @@ pub fn write_clipboard(bytes: &[u8]) -> bool {
     )
 }
 
-pub fn read_clipboard_text() -> Option<String> {
-    const MAX_CLIPBOARD_TEXT_BYTES: usize = 1024 * 1024;
+/// Whether `read_clipboard_text` can return text on this platform, so a
+/// client offers Paste only where it can work.
+pub const CAN_READ_CLIPBOARD_TEXT: bool = true;
 
-    let mut child = Command::new("pbpaste")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let stdout = child.stdout.take()?;
-    let read = match read_limited_reader(stdout, MAX_CLIPBOARD_TEXT_BYTES) {
-        Ok(LimitedRead::Oversized) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-        Ok(read) => read,
-        Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-    };
-    let status = child.wait().ok()?;
-    if !status.success() {
-        return None;
-    }
-    match read {
-        LimitedRead::Complete(bytes) => String::from_utf8(bytes).ok(),
-        LimitedRead::Empty => None,
-        LimitedRead::Oversized => unreachable!("oversized clipboard text is handled before wait"),
-    }
+pub fn read_clipboard_text() -> Option<String> {
+    let deadline = std::time::Instant::now() + super::unix_common::CLIPBOARD_TEXT_READ_BUDGET;
+    super::unix_common::read_clipboard_command_text("pbpaste", &[], deadline)
+        .ok()
+        .flatten()
 }
 
 pub fn clipboard_text_matches(_bytes: &[u8]) -> Option<bool> {
