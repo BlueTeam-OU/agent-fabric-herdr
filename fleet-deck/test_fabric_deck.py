@@ -5,6 +5,7 @@ from fabric_deck import (
     RESTORE_WAIT_S,
     DeckError,
     Session,
+    live_before,
     StateRecord,
     poll,
     printable,
@@ -155,6 +156,9 @@ class Statuses(unittest.TestCase):
         self.assertIsNone(parse_state_line(row))
         self.assertIsNone(parse_state_line('{"address":"develop-qzapp/ui","ts":"yesterday"}'))
         self.assertIsNone(parse_state_line('{"address":"develop-qzapp/ui","ts":"2026-10-08T05:00:00"}'))
+        with_null_since = ('{"address":"develop-qzapp/ui","ts":"2026-10-08T05:00:00Z","state":"idle",'
+                           '"sessions":[{"session":"s1","state":"idle","since":null}]}')
+        self.assertEqual(recovery_status(ACTED, NOW, 5, parse_state_line(with_null_since), False), "restoring")
 
     def test_a_missing_record_is_stale_not_failed(self):
         self.assertEqual(recovery_status(ACTED, NOW, 500, None, True), "stale")
@@ -211,18 +215,33 @@ class StubHerdr:
 
 class Poll(unittest.TestCase):
     def test_reads_fresh_from_the_pane_while_the_new_session_runs(self):
-        herdr = StubHerdr(
-            {"p1": IN_MOVETO},
-            {"p1": "fabric-resume: no transcript; starting fresh in /home/ui/projects\n> \n"},
-        )
+        # The agent's screen fills the bottom of the pane; fabric-resume's line
+        # is above it.
+        screen = "\n".join(["fabric-resume: no transcript; starting fresh in /home/ui/projects"]
+                           + [f"agent screen row {i}" for i in range(30)])
+        herdr = StubHerdr({"p1": IN_MOVETO}, {"p1": screen})
         result = poll(herdr, {"ui": "p1"}, {"ui": record()}, ACTED, NOW, 10)
         self.assertEqual(result["ui"][0], "fresh")
         self.assertIn("starting fresh", result["ui"][1])
 
-    def test_a_tab_closed_under_the_deck_is_failed_not_a_crash(self):
+    def test_a_herdr_error_is_retried_then_failed_not_a_crash(self):
         herdr = StubHerdr({}, {}, gone={"p1"})
-        result = poll(herdr, {"ui": "p1"}, {"ui": record()}, ACTED, NOW, 10)
-        self.assertEqual(result["ui"][0], "failed")
+        self.assertEqual(poll(herdr, {"ui": "p1"}, {"ui": record()}, ACTED, NOW, 10)["ui"][0], "restoring")
+        self.assertEqual(
+            poll(herdr, {"ui": "p1"}, {"ui": record()}, ACTED, NOW, RESTORE_WAIT_S)["ui"][0], "failed"
+        )
+
+    def test_another_session_turning_working_is_not_the_decks(self):
+        # s-other was idle before the action and turned working after it; the
+        # deck's own re-entry has produced nothing yet.
+        before = StateRecord("ui", "idle", (Session("s-other", "idle", "2026-10-08T04:00:00Z"),),
+                             "2026-10-08T04:59:00Z", last_session="s-last")
+        after = StateRecord("ui", "working", (Session("s-other", "working", "2026-10-08T05:00:20Z"),),
+                            "2026-10-08T05:00:20Z", last_session="s-last")
+        baselines = {"ui": live_before(before, ACTED)}
+        herdr = StubHerdr({"p1": IN_MOVETO}, {"p1": ""})
+        result = poll(herdr, {"ui": "p1"}, {"ui": after}, ACTED, NOW, 10, baselines)
+        self.assertEqual(result["ui"][0], "restoring")
 
     def test_pane_text_is_printed_without_control_characters(self):
         self.assertEqual(printable("ok\x1b]0;title\x07\x9bdone\tend"), "ok]0;titledone\tend")

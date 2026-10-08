@@ -245,9 +245,11 @@ def parse_state_line(line: str) -> StateRecord | None:
     )
 
 
-def parse_utc(stamp: str):
+def parse_utc(stamp):
     import datetime
 
+    if not isinstance(stamp, str):
+        return None
     try:
         parsed = datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
     except ValueError:
@@ -255,15 +257,33 @@ def parse_utc(stamp: str):
     return parsed if parsed.tzinfo is not None else None
 
 
-def newer_live_sessions(record: StateRecord | None, acted_at: str) -> list[Session]:
-    """Sessions live after the deck's action. A session's `since` is when it
-    entered its state, so a resumed session enters it after the action."""
+def live_before(record: StateRecord | None, acted_at: str) -> set[str]:
+    """Session ids already live at or before the deck's action: the account's
+    sessions elsewhere, which the deck's re-entry did not start."""
+    acted = parse_utc(acted_at)
+    if record is None or acted is None:
+        return set()
+    return {
+        s.session for s in record.sessions
+        if s.state in LIVE_STATES and (parse_utc(s.since) or acted) <= acted
+    }
+
+
+def newer_live_sessions(
+    record: StateRecord | None, acted_at: str, baseline: frozenset[str] = frozenset()
+) -> list[Session]:
+    """Sessions the deck's re-entry may have started: live, in their state
+    since after the action, and not already live before it (`baseline`). A
+    session's `since` is a state change, not a start, so an older session
+    turning working after the action is excluded by the baseline, not by time."""
     acted = parse_utc(acted_at)
     if record is None or acted is None:
         return []
     return [
         s for s in record.sessions
-        if s.state in LIVE_STATES and (parse_utc(s.since) or acted) > acted
+        if s.state in LIVE_STATES
+        and s.session not in baseline
+        and (parse_utc(s.since) or acted) > acted
     ]
 
 
@@ -274,8 +294,10 @@ def recovery_status(
     record: StateRecord | None,
     pane_bare: bool | None,
     pane_last_line: str = "",
+    baseline: frozenset[str] = frozenset(),
 ) -> str:
-    """The status of an account tab the deck re-entered (decision 5)."""
+    """The status of an account tab the deck re-entered (decision 5).
+    `baseline` holds the account's sessions live before the action."""
     posted, current = (parse_utc(record.ts) if record else None), parse_utc(now)
     if posted is None or current is None or (current - posted).total_seconds() > STALE_AFTER_S:
         return "stale"
@@ -283,7 +305,7 @@ def recovery_status(
     # it has ended, whatever other sessions of the account do elsewhere.
     if pane_bare and elapsed_s >= ENTRY_GRACE_S:
         return "failed"
-    newer = newer_live_sessions(record, acted_at)
+    newer = newer_live_sessions(record, acted_at, baseline)
     if newer and not pane_bare:
         if record.last_session is not None:
             return "resumed" if any(s.session == record.last_session for s in newer) else "fresh"
@@ -410,7 +432,11 @@ def execute(herdr: Herdr, actions: list[Action], cwd: str, resume_flag: bool) ->
         _execute(herdr, actions, cwd, resume_flag, entered, spare_tabs)
     finally:
         for tab_id in spare_tabs:
-            herdr.call("tab", "close", tab_id)
+            try:
+                herdr.call("tab", "close", tab_id)
+            except DeckError as error:
+                # Never let a failed cleanup hide why execute stopped.
+                print(f"fabric-deck: could not close spare tab {tab_id}: {error}")
     return entered
 
 
@@ -442,6 +468,15 @@ def last_line(herdr: Herdr, pane: str) -> str:
     return printable(" | ".join(lines[-2:]))
 
 
+def fabric_resume_line(herdr: Herdr, pane: str) -> str:
+    """fabric-resume's own line in the pane's recent output. Once the agent's
+    screen is up, the pane's last lines are the agent's, so the line is
+    searched for rather than taken from the bottom."""
+    read = herdr.text("pane", "read", pane, "--source", "recent", "--lines", "200", "--format", "text")
+    said = [line.strip() for line in read.splitlines() if line.strip().startswith("fabric-resume")]
+    return printable(said[-1]) if said else ""
+
+
 def poll(
     herdr: Herdr,
     entered: dict[str, str],
@@ -449,26 +484,33 @@ def poll(
     acted_at: str,
     now: str,
     elapsed_s: float,
+    baselines: dict[str, set[str]] | None = None,
 ) -> dict[str, tuple[str, str]]:
     """One pass over the re-entered accounts: login -> (status, detail).
 
-    The pane's tail is read whenever it can decide or explain the status: a
-    bare pane (why it failed) and a new session with no last_session to judge
-    it by (fabric-resume printed whether it resumed or started fresh)."""
+    The pane is read when it can decide or explain the status: a bare pane
+    (its last lines say why it failed), and a new session with no last_session
+    to judge it by (fabric-resume's line says whether it resumed or started
+    fresh). A herdr error is retried on the next pass until the wait ends."""
     result: dict[str, tuple[str, str]] = {}
     for login, pane in entered.items():
         record = records.get(login)
+        baseline = frozenset((baselines or {}).get(login, ()))
         try:
             bare = is_bare_shell(herdr.process(pane))
-            wants_tail = bare or (
-                record is not None and record.last_session is None
-                and bool(newer_live_sessions(record, acted_at))
-            )
-            tail = last_line(herdr, pane) if wants_tail else ""
+            if bare:
+                tail = last_line(herdr, pane)
+            elif record is not None and record.last_session is None and newer_live_sessions(
+                record, acted_at, baseline
+            ):
+                tail = fabric_resume_line(herdr, pane)
+            else:
+                tail = ""
         except DeckError as error:
-            result[login] = ("failed", printable(str(error)))
+            waited = elapsed_s >= RESTORE_WAIT_S
+            result[login] = ("failed" if waited else "restoring", printable(str(error)))
             continue
-        status = recovery_status(acted_at, now, elapsed_s, record, bare, tail)
+        status = recovery_status(acted_at, now, elapsed_s, record, bare, tail, baseline)
         result[login] = (status, tail if status in {"failed", "fresh"} else "")
     return result
 
@@ -536,6 +578,7 @@ def main(argv: list[str] | None = None) -> int:
 
     threading.Thread(target=pump, name="fabric-deck-states", daemon=True).start()
     records: dict[str, StateRecord] = {}
+    baselines: dict[str, set[str]] = {}
     shown: dict[str, str] = {}
     stream_ended = False
     try:
@@ -549,12 +592,15 @@ def main(argv: list[str] | None = None) -> int:
                         parsed = parse_state_line(raw)
                         if parsed is not None:
                             records[parsed.login] = parsed
+                            baselines.setdefault(parsed.login, set()).update(
+                                live_before(parsed, acted_at)
+                            )
                     raw = lines.get_nowait()
             except queue.Empty:
                 pass
             elapsed = time.monotonic() - started
             for login, (status, detail) in poll(
-                herdr, entered, records, acted_at, utc_now(), elapsed
+                herdr, entered, records, acted_at, utc_now(), elapsed, baselines
             ).items():
                 if shown.get(login) != status:
                     shown[login] = status
