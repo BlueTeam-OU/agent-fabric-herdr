@@ -243,7 +243,7 @@ impl RawInputByteFramer {
         )
     }
 
-    fn with_host_input_policy(preserve_legacy_doubled_escape_input: bool) -> Self {
+    pub(crate) fn with_host_input_policy(preserve_legacy_doubled_escape_input: bool) -> Self {
         Self {
             split_coalesced_escape: !preserve_legacy_doubled_escape_input,
             ..Self::default()
@@ -782,7 +782,13 @@ impl RawInputByteFramer {
                 continue;
             }
 
-            if self.split_coalesced_escape && self.buffer.starts_with(b"\x1b\x1b") {
+            // Kitty key reports carry Alt in their modifiers and are never
+            // Alt-prefixed, so ESC before a complete report is its own key. WezTerm
+            // sends an Escape press as bare ESC and the release as a report,
+            // and a quick tap delivers both together (#1266).
+            if self.buffer.starts_with(b"\x1b\x1b")
+                && (self.split_coalesced_escape || starts_with_kitty_key_report(&self.buffer[1..]))
+            {
                 chunks.push(vec![ESC]);
                 self.buffer.drain(..1);
                 continue;
@@ -831,6 +837,22 @@ impl RawInputByteFramer {
 }
 
 const MAX_DISCARDED_CONTROL_TAIL_BYTES: usize = 128;
+
+/// Whether `bytes` starts with a complete sequence shaped like a kitty key
+/// report, `CSI <code>[:alternates][;mods[:event][;text]] u`. Only the shape is
+/// checked: digit-led parameters made of digits, `;` and `:`, ending in `u`.
+/// That excludes `CSI u` (cursor restore) and private replies like `CSI ? 7 u`.
+fn starts_with_kitty_key_report(bytes: &[u8]) -> bool {
+    let Some(rest) = bytes.strip_prefix(b"\x1b[") else {
+        return false;
+    };
+    let params = rest
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit() || matches!(byte, b';' | b':'))
+        .count();
+    rest.first().is_some_and(u8::is_ascii_digit) && rest.get(params) == Some(&b'u')
+}
+
 #[cfg(windows)]
 const HOST_COLOR_TAIL_RECOVERY_GRACE: Duration = Duration::from_millis(100);
 
@@ -2325,6 +2347,138 @@ mod tests {
     fn macos_host_input_policy_preserves_legacy_doubled_escape_alt_arrow() {
         let mut framer = RawInputByteFramer::with_host_input_policy(true);
 
+        assert_eq!(framer.push(b"\x1b\x1b[D"), vec![b"\x1b\x1b[D".to_vec()]);
+    }
+
+    /// WezTerm with `enable_kitty_keyboard` sends an Escape press as a bare
+    /// ESC and its release as a kitty report (#1266). A quick tap lands both in
+    /// one read, or in two reads before the idle flush.
+    const WEZTERM_ESCAPE_TAP: (&[u8], &[u8]) = (b"\x1b", b"\x1b[27;1:3u");
+
+    fn assert_escape_press_then_release(chunks: Vec<Vec<u8>>, taps: usize) {
+        let events = events_from_framed_chunks(chunks);
+        assert_eq!(events.len(), taps * 2, "{events:?}");
+        for pair in events.chunks(2) {
+            assert!(
+                matches!(&pair[0], RawInputEvent::Key(key)
+                    if key.code == KeyCode::Esc
+                        && key.modifiers.is_empty()
+                        && key.kind == KeyEventKind::Press),
+                "{events:?}"
+            );
+            assert!(
+                matches!(&pair[1], RawInputEvent::Key(key)
+                    if key.code == KeyCode::Esc
+                        && key.modifiers.is_empty()
+                        && key.kind == KeyEventKind::Release),
+                "{events:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn preserved_doubled_escape_policy_splits_escape_press_from_kitty_release() {
+        let (press, release) = WEZTERM_ESCAPE_TAP;
+        let tap = [press, release].concat();
+
+        // One read.
+        let mut framer = RawInputByteFramer::with_host_input_policy(true);
+        let mut chunks = framer.push(&tap);
+        chunks.extend(framer.flush_timeout());
+        assert_eq!(chunks, vec![press.to_vec(), release.to_vec()]);
+        assert_escape_press_then_release(chunks, 1);
+
+        // Two reads before the idle flush.
+        let mut framer = RawInputByteFramer::with_host_input_policy(true);
+        let mut chunks = framer.push(press);
+        chunks.extend(framer.push(release));
+        chunks.extend(framer.flush_timeout());
+        assert_escape_press_then_release(chunks, 1);
+
+        // Two quick taps (double Esc) in one read.
+        let mut framer = RawInputByteFramer::with_host_input_policy(true);
+        let mut chunks = framer.push(&[tap.clone(), tap].concat());
+        chunks.extend(framer.flush_timeout());
+        assert_escape_press_then_release(chunks, 2);
+
+        // The release split across reads still separates once it completes.
+        let mut framer = RawInputByteFramer::with_host_input_policy(true);
+        let mut chunks = framer.push(b"\x1b\x1b[27;");
+        chunks.extend(framer.push(b"1:3u"));
+        chunks.extend(framer.flush_timeout());
+        assert_escape_press_then_release(chunks, 1);
+    }
+
+    #[test]
+    fn preserved_doubled_escape_policy_splits_the_tap_at_every_read_boundary() {
+        let (press, release) = WEZTERM_ESCAPE_TAP;
+        let tap = [press, release].concat();
+        for taps in [tap.clone(), [tap.clone(), tap.clone()].concat()] {
+            let count = taps.len() / tap.len();
+            for split in 1..taps.len() {
+                let mut framer = RawInputByteFramer::with_host_input_policy(true);
+                let mut chunks = framer.push(&taps[..split]);
+                chunks.extend(framer.push(&taps[split..]));
+                chunks.extend(framer.flush_timeout());
+                assert_escape_press_then_release(chunks, count);
+            }
+        }
+    }
+
+    #[test]
+    fn preserved_doubled_escape_policy_splits_escape_before_alt_kitty_report() {
+        // Escape, then Alt+a reported by a kitty host: two keys, not Alt+Alt+a.
+        let mut framer = RawInputByteFramer::with_host_input_policy(true);
+        let mut chunks = framer.push(b"\x1b\x1b[97;3u");
+        chunks.extend(framer.flush_timeout());
+        assert_eq!(chunks, vec![b"\x1b".to_vec(), b"\x1b[97;3u".to_vec()]);
+        let events = events_from_framed_chunks(chunks);
+        assert!(
+            matches!(&events[..], [RawInputEvent::Key(esc), RawInputEvent::Key(alt_a)]
+                if esc.code == KeyCode::Esc && esc.modifiers.is_empty()
+                    && alt_a.code == KeyCode::Char('a') && alt_a.modifiers == KeyModifiers::ALT),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn preserved_doubled_escape_policy_keeps_legacy_alt_sequences_whole() {
+        for bytes in [
+            &b"\x1b\x1b[D"[..],
+            b"\x1b\x1b[1;3D",
+            b"\x1b\x1b[3~",
+            b"\x1b\x1bOA",
+        ] {
+            let mut framer = RawInputByteFramer::with_host_input_policy(true);
+            let mut chunks = framer.push(bytes);
+            chunks.extend(framer.flush_timeout());
+            assert_eq!(chunks, vec![bytes.to_vec()], "{bytes:?}");
+        }
+        for bytes in [
+            &b"\x1b[u"[..],
+            b"\x1b[?7u",
+            b"\x1b[;3u",
+            b"\x1b[27;1:3",
+            b"\x1b[27;1:3~",
+            b"\x1b[D",
+            b"\x1bOA",
+        ] {
+            assert!(!starts_with_kitty_key_report(bytes), "{bytes:?}");
+        }
+        for bytes in [&b"\x1b[27u"[..], b"\x1b[27;1:3u", b"\x1b[55:47;2;47u"] {
+            assert!(starts_with_kitty_key_report(bytes), "{bytes:?}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_host_input_delivers_quick_wezterm_escape_taps() {
+        let (press, release) = WEZTERM_ESCAPE_TAP;
+        let mut framer = RawInputByteFramer::for_host_input();
+        let mut chunks = framer.push(&[press, release].concat());
+        chunks.extend(framer.flush_timeout());
+        assert_escape_press_then_release(chunks, 1);
+        // Legacy Alt+arrow keeps its doubled escape on macOS.
         assert_eq!(framer.push(b"\x1b\x1b[D"), vec![b"\x1b\x1b[D".to_vec()]);
     }
 
