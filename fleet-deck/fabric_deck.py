@@ -227,30 +227,39 @@ class StateRecord:
 
 def parse_state_line(line: str) -> StateRecord | None:
     """A record, or None when the line is not one. The stream's row for an
-    account with no state on the channel has no `ts`: that is no record."""
+    account with no state on the channel has no `ts`: that is no record.
+    Rows come from other accounts: a field of the wrong type is read as
+    absent, never trusted to have the shape the deck expects."""
     try:
         row = json.loads(line)
-        address = row["address"]
-        ts = row["ts"]
-    except (ValueError, KeyError, TypeError):
+    except ValueError:
         return None
-    if not isinstance(ts, str) or parse_utc(ts) is None:
+    if not isinstance(row, dict):
         return None
+    address, ts = row.get("address"), row.get("ts")
+    if not isinstance(address, str) or not isinstance(ts, str) or parse_utc(ts) is None:
+        return None
+    rows = row.get("sessions")
     sessions = tuple(
-        Session(s["session"], s.get("state", "unknown"), s.get("since", ""))
-        for s in row.get("sessions") or []
-        if isinstance(s, dict) and s.get("session")
+        Session(s["session"], text_or(s.get("state"), "unknown"), text_or(s.get("since"), ""))
+        for s in (rows if isinstance(rows, list) else [])
+        if isinstance(s, dict) and isinstance(s.get("session"), str) and s["session"]
     )
     host, _, login = address.rpartition("/")
+    resumable = row.get("resumable")
     return StateRecord(
         login=login,
         host=host,
-        state=row.get("state", "unknown"),
+        state=text_or(row.get("state"), "unknown"),
         sessions=sessions,
         ts=ts,
-        last_session=row.get("last_session"),
-        resumable=row.get("resumable"),
+        last_session=text_or(row.get("last_session"), None),
+        resumable=resumable if isinstance(resumable, bool) else None,
     )
+
+
+def text_or(value, default):
+    return value if isinstance(value, str) else default
 
 
 def parse_utc(stamp):
@@ -718,6 +727,29 @@ def next_backoff(failures: int, lived_s: float) -> tuple[int, int]:
     return failures, WATCH_BACKOFF_S[min(failures - 1, len(WATCH_BACKOFF_S) - 1)]
 
 
+STOP_CHILD_GRACE_S = 5
+
+
+def stop_child(child: subprocess.Popen) -> None:
+    """Terminate the child and reap it, killing it if it outlives the grace.
+    A second ctrl-c or kill while this runs is ignored: the deck is already
+    on its way out, and an interrupt here would leave the child unreaped."""
+    import signal
+
+    held = {sig: signal.signal(sig, signal.SIG_IGN) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        if child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=STOP_CHILD_GRACE_S)
+            except subprocess.TimeoutExpired:
+                child.kill()
+        child.wait()
+    finally:
+        for sig, handler in held.items():
+            signal.signal(sig, handler)
+
+
 def watch(herdr: Herdr, exclude: set[str]) -> int:
     """Follow the state stream and keep herdr's agent panel in step with it,
     one account tab at a time, until interrupted."""
@@ -759,10 +791,8 @@ def watch(herdr: Herdr, exclude: set[str]) -> int:
             return 0
         finally:
             # On every way out of the loop, the stream child goes with it.
-            if stream is not None and stream.poll() is None:
-                stream.terminate()
             if stream is not None:
-                stream.wait()
+                stop_child(stream)
         failures, wait = next_backoff(failures, time.monotonic() - started)
         code = stream.returncode if stream is not None else "none"
         watcher.log(f"the state stream ended (exit {code}); restarting in {wait}s")

@@ -20,6 +20,7 @@ from fabric_deck import (
     poll,
     printable,
     parse_state_line,
+    stop_child,
     recovery_status,
     NEW_WORKSPACE,
     Account,
@@ -158,6 +159,18 @@ class Statuses(unittest.TestCase):
         self.assertIsNone(parsed.resumable)
         self.assertIsNone(parsed.last_session)
         self.assertIsNone(parse_state_line("not json"))
+
+    def test_a_field_of_the_wrong_type_is_read_as_absent(self):
+        ts = '"ts":"2026-10-08T05:00:00Z"'
+        for line in ('[1]', '"x"', '{"address":5,%s}' % ts, '{"address":"h/ui","ts":5}'):
+            self.assertIsNone(parse_state_line(line), line)
+        odd = parse_state_line(
+            '{"address":"h/ui",%s,"state":["working"],"last_session":7,"resumable":"yes",'
+            '"sessions":[{"session":3},{"session":"s1","state":{},"since":9},"s2"]}' % ts
+        )
+        self.assertEqual((odd.state, odd.last_session, odd.resumable), ("unknown", None, None))
+        self.assertEqual(odd.sessions, (Session("s1", "unknown", ""),))
+        self.assertEqual(parse_state_line('{"address":"h/ui",%s,"sessions":{}}' % ts).sessions, ())
 
     def test_the_streams_no_record_row_is_no_record(self):
         # ctl.mjs stateRow for an account with nothing on the channel: no ts.
@@ -375,6 +388,13 @@ class WatchLoop(unittest.TestCase):
         self.assertEqual(herdr.calls[-1][1], "release-agent")
         self.assertEqual(len(herdr.calls), 2, "nothing reported into the split tab")
 
+    def test_a_malformed_record_does_not_stop_the_watcher(self):
+        herdr = FakeHerdr([AccountTab("ui", "t1", "w1", "p1")])
+        w = watcher(herdr)
+        w.on_line('{"address":5,"ts":"2026-10-08T05:00:00Z"}', 0)
+        w.on_line(row_line("ui", "working").replace('"working"', '["working"]', 1), 1)
+        self.assertEqual(herdr.calls[-1][-1], "unknown")
+
     def test_a_herdr_timeout_does_not_stop_the_watcher(self):
         herdr = FakeHerdr([AccountTab("ui", "t1", "w1", "p1")])
 
@@ -423,6 +443,31 @@ class SplitTab(unittest.TestCase):
         actions = plan([Account("coord", "fabric-coordinator")], tabs, {"p1": BARE}, set(), CATALOG)
         self.assertEqual(actions, [Undetermined("coord", "p1")])
 
+
+
+class StopChild(unittest.TestCase):
+    def test_a_child_that_ignores_terminate_is_killed_and_reaped(self):
+        import signal
+        import subprocess
+        import sys
+        import fabric_deck
+
+        child = subprocess.Popen(
+            [sys.executable, "-c",
+             "import signal,sys,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+             "print(flush=True); time.sleep(60)"],
+            stdout=subprocess.PIPE, text=True,
+        )
+        child.stdout.readline()  # its SIGTERM handler is in place
+        before = signal.getsignal(signal.SIGINT)
+        grace, fabric_deck.STOP_CHILD_GRACE_S = fabric_deck.STOP_CHILD_GRACE_S, 0.2
+        try:
+            stop_child(child)
+        finally:
+            fabric_deck.STOP_CHILD_GRACE_S = grace
+            child.stdout.close()
+        self.assertEqual(child.returncode, -signal.SIGKILL)
+        self.assertIs(signal.getsignal(signal.SIGINT), before, "the handlers are given back")
 
 if __name__ == "__main__":
     unittest.main()
