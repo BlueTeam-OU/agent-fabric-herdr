@@ -638,8 +638,12 @@ class Deck:
                 else:
                     # Lifted: a later halt is said again.
                     self.said.discard(f"{login}:halted")
-                # An unarmed harness pane holds no agent: herdr's own word for that.
-                shown = Shown("unknown", "unknown") if login in self.unarmed else display(self.tracks[login], live)
+                # An unarmed harness pane holds no agent, and one whose foreground
+                # is something other than this account's moveto (an editor, a
+                # command the operator ran) is not the deck's to name: herdr's
+                # own word for both, never "dormant" with Enter going elsewhere.
+                unknown = login in self.unarmed or (seen.present and seen.moveto is None)
+                shown = Shown("unknown", "unknown") if unknown else display(self.tracks[login], live)
                 self._show(login, pane, shown, now)
             except Exception as error:  # one account's failure must not stop the others
                 self.log(f"{login}: {printable(str(error))}")
@@ -666,8 +670,12 @@ class Deck:
                 kept.clear()
             self.restore(now)
             return not self.lost
+        newly = {a.login for a in accounts} - self.placed
         self.placed = {a.login for a in accounts}
         self.retry &= self.placed
+        # An account placed while the deck runs gets its tab now; one whose
+        # harness a person closed stays closed until the next restore.
+        self.retry |= newly
         listed = {pane for tab in tabs.values() for pane in tab.panes.values()}
         for key in [k for k in self.waiting if k[1] not in listed]:
             del self.waiting[key]  # closed by a person: re-created only at a restore
@@ -678,8 +686,18 @@ class Deck:
         return True
 
     def _forget(self, login: str) -> None:
-        """The account's panes are followed no more, until a restore. Whether
-        its session was running (`befores`, `unsettled`) is kept."""
+        """The account's panes are followed no more, until a restore. A pane
+        the deck reported into gives back the agent row, name and labels the
+        deck set, so a pane that is still there (relabelled, or its account
+        gone from moveto --list) does not keep them. Whether its session was
+        running (`befores`, `unsettled`) is kept."""
+        pane = self.harness_pane.get(login)
+        if pane is not None and login in self.sent:
+            for command in release_commands(pane):
+                try:
+                    self.herdr.call(*command)
+                except Exception:  # a pane that is gone has nothing to give back
+                    break
         self.harness_pane.pop(login, None)
         self.pending.pop(login, None)
         self.tracks.pop(login, None)
@@ -830,6 +848,16 @@ def report_command(pane: str, shown: Shown) -> tuple[str, ...]:
     command the deck sends has the one shape."""
     return ("pane", "report-agent", pane, "--source", AGENT_SOURCE, "--agent", AGENT_LABEL,
             "--state", shown.status)
+
+
+def release_commands(pane: str) -> list[tuple[str, ...]]:
+    """What the deck gives back of a pane it stops following."""
+    base = ("pane", "report-metadata", pane, "--source", AGENT_SOURCE, "--agent", AGENT_LABEL)
+    return [
+        ("pane", "release-agent", pane, "--source", AGENT_SOURCE, "--agent", AGENT_LABEL),
+        base + ("--clear-state-labels",),
+        base + ("--clear-display-agent",),
+    ]
 
 
 def label_commands(pane: str, shown: Shown) -> list[tuple[str, ...]]:

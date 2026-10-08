@@ -27,7 +27,9 @@ stays running until ctrl-c or `kill`, and the stream child goes with it.
 
 When the deck starts, and whenever herdr's server comes back after being
 lost or replaced, every placed account (`moveto --list`, without the
-deck's own login) gets its tab:
+deck's own login) gets its tab. An account placed while the deck runs
+gets its tab within 10 s. One whose restore failed part-way is restored
+again whole within 10 s, and is followed in nothing until then.
 - **The tab.** A missing tab is created. On a host's first setup the role
   catalogue's group seeds the workspace; afterwards a new account goes to
   its group's workspace if one still exists, else to `New`.
@@ -67,6 +69,7 @@ agent's name, so the deck's word goes in its place, and herdr's own
 | a `--resume` the deck started, no harness yet | `working` | `restoring` |
 | a `--resume` that produced no harness, or a moveto that ended at once twice | `blocked` | `failed` |
 | moveto has no `--wait` yet, so the harness pane is left at the operator's shell | `unknown` | `unknown` |
+| something other than this account's moveto holds the harness pane | `unknown` | `unknown` |
 | a session runs on the account, not in this pane | `unknown` | `running elsewhere` |
 | the account's record is older than two heartbeats | `unknown` | `stale` |
 
@@ -106,6 +109,9 @@ per change.
   [--wait|--resume|--watch]` only in the operator's own bare shell. While
   moveto runs, it never types into a pane, sends a key or closes one. A
   pane a person closes stays closed until the next restore.
+- **A pane the deck stops following** gives back what the deck set: the
+  agent row, the displayed name and the state labels. That covers a pane
+  whose account left `moveto --list`, and one whose tab or label changed.
 - **What the deck never does:** it never retries a failed `--resume`. One
   Enter in the re-armed `--wait` pane does that.
 - **A moveto that keeps failing:** when a moveto the deck started ends

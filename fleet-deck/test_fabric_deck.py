@@ -214,7 +214,7 @@ class FakeHerdr(Herdr):
             return {}
         if head == ("pane", "process-info"):
             return {"process_info": self.proc[args[3]]}
-        if head[0] == "pane" and head[1] in ("run", "report-agent", "report-metadata"):
+        if head[0] == "pane" and head[1] in ("run", "report-agent", "report-metadata", "release-agent"):
             return {}
         raise AssertionError(f"unexpected herdr call {args}")
 
@@ -387,6 +387,26 @@ class Restore(unittest.TestCase):
         h.deck.follow(PANE_MAP_REFRESH_S)
         self.assertEqual(h.deck.retry, set())
 
+    def test_an_account_placed_while_the_deck_runs_gets_its_tab(self):
+        h = Harness(logins=("ui",))
+        h.records.update(ui=record("ui"), vo=record("vo"))
+        h.deck.restore(0)
+        h.logins.append("vo")
+        h.deck.follow(h.at(PANE_MAP_REFRESH_S))
+        h.deck.follow(h.at(PANE_MAP_REFRESH_S + RESTORE_SETTLE_S))
+        self.assertIn("vo", h.deck.harness_pane)
+        self.assertIn("moveto vo --wait", h.herdr.runs(harness_of(h, "vo")))
+
+    def test_a_harness_closed_by_hand_is_not_recreated_before_a_restore(self):
+        h = Harness()
+        h.records["ui"] = record("ui")
+        h.deck.restore(0)
+        del h.herdr.panes[harness_of(h)]
+        for at in range(PANE_MAP_REFRESH_S, 4 * PANE_MAP_REFRESH_S, 2):
+            h.deck.follow(at)
+        self.assertEqual(sum(c[:2] == ("pane", "split") for c in h.herdr.calls), 2, "only the first restore's")
+        self.assertNotIn("ui", h.deck.harness_pane)
+
     def test_a_herdr_failure_while_restoring_leaves_the_deck_waiting_not_dead(self):
         h = Harness()
         h.herdr.workspace_lists_ok = 1  # the tab map reads, the restore's own listing fails
@@ -558,6 +578,20 @@ class Follow(unittest.TestCase):
         self.assertEqual(len(h.herdr.reports(harness)), sent)
         h.deck.follow(RESTORE_SETTLE_S + 1 + RESEND_AFTER_S)
         self.assertEqual(len(h.herdr.reports(harness)), sent + 3, "the state, the clear and the label")
+
+    def test_a_pane_left_by_its_account_gives_back_what_the_deck_set(self):
+        h, harness = self.ready()
+        h.logins = []
+        h.deck.follow(RESTORE_SETTLE_S + 1 + PANE_MAP_REFRESH_S)
+        given = [c for c in h.herdr.calls if harness in c][-3:]
+        self.assertEqual([c[1] for c in given], ["release-agent", "report-metadata", "report-metadata"])
+        self.assertEqual((given[1][-1], given[2][-1]), ("--clear-state-labels", "--clear-display-agent"))
+
+    def test_a_harness_held_by_another_command_reads_unknown_not_dormant(self):
+        h, harness = self.ready()
+        h.herdr.proc[harness] = BUSY
+        h.deck.follow(20)
+        self.assertEqual(h.herdr.reports(harness)[-1][-2:], ("--display-agent", "unknown"))
 
     def test_a_harness_pane_closed_by_hand_is_followed_no_more(self):
         h, harness = self.ready()
