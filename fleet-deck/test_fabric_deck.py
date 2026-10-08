@@ -446,11 +446,9 @@ class SplitTab(unittest.TestCase):
 
 
 class StopChild(unittest.TestCase):
-    def test_a_child_that_ignores_terminate_is_killed_and_reaped(self):
-        import signal
+    def stubborn_child(self):
         import subprocess
         import sys
-        import fabric_deck
 
         child = subprocess.Popen(
             [sys.executable, "-c",
@@ -459,15 +457,46 @@ class StopChild(unittest.TestCase):
             stdout=subprocess.PIPE, text=True,
         )
         child.stdout.readline()  # its SIGTERM handler is in place
-        before = signal.getsignal(signal.SIGINT)
-        grace, fabric_deck.STOP_CHILD_GRACE_S = fabric_deck.STOP_CHILD_GRACE_S, 0.2
+        self.addCleanup(child.stdout.close)
+        self.addCleanup(lambda: child.poll() is None and child.kill())
+        return child
+
+    def stop(self, child, grace=0.5, signal_after=None):
+        import os
+        import signal
+        import threading
+        import fabric_deck
+
+        saved = fabric_deck.STOP_CHILD_GRACE_S
+        fabric_deck.STOP_CHILD_GRACE_S = grace
+        timer = None
+        if signal_after is not None:
+            timer = threading.Timer(signal_after, os.kill, (os.getpid(), signal.SIGINT))
+            timer.start()
         try:
             stop_child(child)
         finally:
-            fabric_deck.STOP_CHILD_GRACE_S = grace
-            child.stdout.close()
+            fabric_deck.STOP_CHILD_GRACE_S = saved
+            if timer is not None:
+                timer.join()
+
+    def test_a_child_that_ignores_terminate_is_killed_and_reaped(self):
+        import signal
+
+        child = self.stubborn_child()
+        before = signal.getsignal(signal.SIGINT)
+        self.stop(child, grace=0.2)
         self.assertEqual(child.returncode, -signal.SIGKILL)
         self.assertIs(signal.getsignal(signal.SIGINT), before, "the handlers are given back")
+
+    def test_a_stop_during_the_grace_is_held_until_the_child_is_reaped(self):
+        import signal
+
+        child = self.stubborn_child()
+        with self.assertRaises(KeyboardInterrupt):
+            self.stop(child, grace=0.5, signal_after=0.1)
+        self.assertEqual(child.returncode, -signal.SIGKILL, "reaped before the stop is acted on")
+
 
 if __name__ == "__main__":
     unittest.main()

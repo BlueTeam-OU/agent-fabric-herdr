@@ -732,11 +732,17 @@ STOP_CHILD_GRACE_S = 5
 
 def stop_child(child: subprocess.Popen) -> None:
     """Terminate the child and reap it, killing it if it outlives the grace.
-    A second ctrl-c or kill while this runs is ignored: the deck is already
-    on its way out, and an interrupt here would leave the child unreaped."""
+    A ctrl-c or kill while this runs is held, not acted on, so the child is
+    reaped first; then it raises KeyboardInterrupt. Ignoring it instead would
+    drop a stop that arrives after the stream ended by itself, and the deck
+    would restart the stream rather than exit."""
     import signal
 
-    held = {sig: signal.signal(sig, signal.SIG_IGN) for sig in (signal.SIGINT, signal.SIGTERM)}
+    caught: list[int] = []
+    held = {
+        sig: signal.signal(sig, lambda signum, _frame: caught.append(signum))
+        for sig in (signal.SIGINT, signal.SIGTERM)
+    }
     try:
         if child.poll() is None:
             child.terminate()
@@ -748,6 +754,8 @@ def stop_child(child: subprocess.Popen) -> None:
     finally:
         for sig, handler in held.items():
             signal.signal(sig, handler)
+    if caught:
+        raise KeyboardInterrupt
 
 
 def watch(herdr: Herdr, exclude: set[str]) -> int:
@@ -785,14 +793,15 @@ def watch(herdr: Herdr, exclude: set[str]) -> int:
             watcher.log(f"cannot start the state stream: {error}")
             stream = None
         try:
-            for raw in (stream.stdout if stream and stream.stdout else []):
-                watcher.on_line(raw, time.monotonic())
-        except KeyboardInterrupt:
+            try:
+                for raw in (stream.stdout if stream and stream.stdout else []):
+                    watcher.on_line(raw, time.monotonic())
+            finally:
+                # On every way out of the loop, the stream child goes with it.
+                if stream is not None:
+                    stop_child(stream)
+        except KeyboardInterrupt:  # also a stop held while the child was reaped
             return 0
-        finally:
-            # On every way out of the loop, the stream child goes with it.
-            if stream is not None:
-                stop_child(stream)
         failures, wait = next_backoff(failures, time.monotonic() - started)
         code = stream.returncode if stream is not None else "none"
         watcher.log(f"the state stream ended (exit {code}); restarting in {wait}s")
