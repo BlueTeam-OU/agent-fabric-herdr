@@ -50,6 +50,11 @@ ci-tests filter='all()':
     just maintenance-test
     just ui-hot-path-architecture-test
     just integration-assets-test
+    just fleet-deck-test
+
+# Fleet Deck (gzapi-org's fork only): the deck's planning core and statuses
+fleet-deck-test:
+    cd fleet-deck && {{python}} -m unittest test_fabric_deck
 
 # Download the Windows SDK once (requires xwin; prompts for Microsoft's SDK license)
 [unix]

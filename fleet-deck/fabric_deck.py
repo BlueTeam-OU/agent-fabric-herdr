@@ -1,0 +1,488 @@
+"""Fleet Deck: the operator's console over the fleet, on herdr.
+
+One herdr tab per agent account, each entered with `moveto <account>`. The
+deck's first duty is recovery: after a herdr server restart every account tab
+comes back as a bare operator shell (the agent and its moveto session died
+with the server), and the deck re-enters each one.
+
+The deck owns no session ids. The control plane owns which session belongs to
+which account; herdr keeps only the layout; the deck compares the two and acts
+on the tabs (agent-fabric plan, decisions 1 to 5, 2026-10-07).
+
+The planning core is pure: it takes what herdr, moveto and the control plane
+report and returns actions, so it is tested without a server. The adapters at
+the bottom run the real commands.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+from dataclasses import dataclass, field
+from typing import Iterable
+
+# The workspace an account goes to when the catalogue names no group for it,
+# or when its group's workspace no longer exists (the operator removed it).
+NEW_WORKSPACE = "New"
+
+
+@dataclass(frozen=True)
+class Account:
+    login: str
+    role: str
+
+
+@dataclass(frozen=True)
+class AccountTab:
+    """A herdr tab whose label is an account login, with its root pane."""
+
+    login: str
+    tab_id: str
+    workspace_id: str
+    pane_id: str
+
+
+@dataclass(frozen=True)
+class PaneProcess:
+    """herdr's `pane.process_info` for one pane."""
+
+    shell_pid: int | None
+    foreground_process_group_id: int | None
+    foreground_names: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CreateTab:
+    login: str
+    workspace_label: str
+
+
+@dataclass(frozen=True)
+class Reenter:
+    login: str
+    pane_id: str
+
+
+@dataclass(frozen=True)
+class Leave:
+    """The tab is occupied (its moveto session runs): nothing to do."""
+
+    login: str
+    pane_id: str
+
+
+@dataclass(frozen=True)
+class Undetermined:
+    """herdr could not say what runs in the pane; the deck does not guess."""
+
+    login: str
+    pane_id: str
+
+
+Action = CreateTab | Reenter | Leave | Undetermined
+
+
+def parse_moveto_list(text: str, exclude: Iterable[str]) -> list[Account]:
+    """Accounts from `moveto --list` ("account role clones..." per line)."""
+    excluded = set(exclude)
+    accounts = []
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[0] not in excluded:
+            accounts.append(Account(login=fields[0], role=fields[1]))
+    return accounts
+
+
+def is_bare_shell(process: PaneProcess) -> bool | None:
+    """Whether the pane is only its shell, waiting at a prompt.
+
+    A bare shell is its own foreground process group; a moveto session puts
+    sudo, and then the account's shell, in the foreground instead. Measured
+    on herdr 0.9.3 (fork 99d4887a). None when herdr could not tell.
+    """
+    if process.shell_pid is None or process.foreground_process_group_id is None:
+        return None
+    return process.foreground_process_group_id == process.shell_pid
+
+
+def seed_workspace(role: str, catalog: dict | None) -> str:
+    """The workspace the role catalogue seeds for a role, or NEW_WORKSPACE."""
+    if not catalog:
+        return NEW_WORKSPACE
+    groups = set(catalog.get("groups") or [])
+    for entry in catalog.get("roles") or []:
+        if entry.get("id") == role and entry.get("group") in groups:
+            return entry["group"]
+    return NEW_WORKSPACE
+
+
+def plan(
+    accounts: list[Account],
+    tabs: list[AccountTab],
+    processes: dict[str, PaneProcess],
+    workspace_labels: set[str],
+    catalog: dict | None,
+) -> list[Action]:
+    """What the deck does for each account, in `accounts` order.
+
+    - No tab for the account: create one. The catalogue's group is used only
+      when the deck sets up a host for the first time (no account has a tab
+      yet). After that, a new account goes to its group's workspace if the
+      operator kept one, else to NEW_WORKSPACE: the operator's layout is the
+      truth and is never re-seeded.
+    - A tab that is a bare shell: re-enter it with moveto.
+    - A tab whose foreground is something else: leave it.
+    The first tab carrying a login wins; a duplicate is the operator's to sort
+    out, not the deck's to close.
+    """
+    by_login: dict[str, AccountTab] = {}
+    for tab in tabs:
+        by_login.setdefault(tab.login, tab)
+    first_setup = not any(account.login in by_login for account in accounts)
+
+    actions: list[Action] = []
+    for account in accounts:
+        tab = by_login.get(account.login)
+        if tab is None:
+            seeded = seed_workspace(account.role, catalog)
+            workspace = (
+                seeded if first_setup or seeded in workspace_labels else NEW_WORKSPACE
+            )
+            actions.append(CreateTab(account.login, workspace))
+            continue
+        bare = is_bare_shell(processes.get(tab.pane_id, PaneProcess(None, None)))
+        if bare is None:
+            actions.append(Undetermined(account.login, tab.pane_id))
+        elif bare:
+            actions.append(Reenter(account.login, tab.pane_id))
+        else:
+            actions.append(Leave(account.login, tab.pane_id))
+    return actions
+
+
+def reenter_command(login: str, moveto_has_resume: bool) -> str:
+    """The command typed into a bare account tab.
+
+    `moveto <account> --resume` lets the account's own launcher resume its
+    last session; until moveto has that flag, plain `moveto <account>` brings
+    the tab back into its account, and the session is resumed by hand.
+    """
+    return f"moveto {login} --resume" if moveto_has_resume else f"moveto {login}"
+
+
+# ----------------------------------------------------------------- statuses
+
+# How long an account may stay restoring before the deck calls it failed: the
+# daemon upgrade's stop budget (90 s) plus a launcher's start (architect-cto,
+# 2026-10-08). The owner may change it; the deck prints it beside the status.
+RESTORE_WAIT_S = 120
+
+LIVE_STATES = frozenset({"working", "idle"})
+
+# The stream posts on every change and every ten minutes; a record older than
+# two heartbeats means the account's agent stopped answering (agent-fabric
+# docs/fleet-deck/session-recovery.md, decision 5).
+STALE_AFTER_S = 2 * 600
+
+
+@dataclass(frozen=True)
+class StateRecord:
+    """One account's row of `fabric-ctl all states --json`."""
+
+    login: str
+    state: str
+    session_ids: tuple[str, ...]
+    session_since: str | None
+    ts: str
+    # agent-fabric ADR-029 rule 16, amended 2026-10-08; absent from an older
+    # agentd's record, in which case the deck re-enters regardless.
+    last_session: str | None = None
+    resumable: bool | None = None
+
+
+def parse_state_line(line: str) -> StateRecord | None:
+    try:
+        row = json.loads(line)
+        address = row["address"]
+    except (ValueError, KeyError, TypeError):
+        return None
+    sessions = row.get("sessions") or []
+    return StateRecord(
+        login=address.rsplit("/", 1)[-1],
+        state=row.get("state", "unknown"),
+        session_ids=tuple(s.get("session", "") for s in sessions if s.get("session")),
+        session_since=max((s.get("since") or "" for s in sessions), default=None) or None,
+        ts=row.get("ts", ""),
+        last_session=row.get("last_session"),
+        resumable=row.get("resumable"),
+    )
+
+
+def seconds_between(earlier: str, later: str) -> float:
+    import datetime
+
+    def parse(stamp: str) -> datetime.datetime:
+        return datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+
+    return (parse(later) - parse(earlier)).total_seconds()
+
+
+def recovery_status(
+    acted_at: str,
+    now: str,
+    elapsed_s: float,
+    record: StateRecord | None,
+    pane_bare: bool | None,
+    pane_last_line: str = "",
+) -> str:
+    """The status of an account tab the deck re-entered (decision 5).
+
+    `acted_at` and `now` are ISO-8601 UTC timestamps, like the stream's
+    `since` and `ts`, so text order is time order.
+    """
+    if record is None or seconds_between(record.ts, now) > STALE_AFTER_S:
+        return "stale"
+    newer = record.session_since is not None and record.session_since > acted_at
+    if newer and record.state in LIVE_STATES:
+        if record.last_session is not None:
+            return "resumed" if record.last_session in record.session_ids else "fresh"
+        # An older agentd names no last_session: fabric-resume says which it did.
+        return "fresh" if "fresh" in pane_last_line.lower() else "resumed"
+    if pane_bare:
+        return "failed"
+    if elapsed_s >= RESTORE_WAIT_S:
+        return "failed"
+    return "restoring"
+
+
+# ---------------------------------------------------------------- adapters
+
+
+@dataclass
+class Herdr:
+    """herdr's CLI, as the deck's login sees it."""
+
+    binary: str = field(default_factory=lambda: shutil.which("herdr") or "herdr")
+
+    def text(self, *args: str) -> str:
+        result = subprocess.run(
+            [self.binary, *args], capture_output=True, text=True, timeout=30
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()[:300]
+            raise DeckError(f"herdr {' '.join(args)}: exit {result.returncode}: {detail}")
+        return result.stdout
+
+    def call(self, *args: str) -> dict:
+        out = self.text(*args)
+        return json.loads(out).get("result", {}) if out.strip() else {}
+
+    def workspaces(self) -> list[dict]:
+        return self.call("workspace", "list").get("workspaces", [])
+
+    def account_tabs(self, logins: set[str]) -> list[AccountTab]:
+        panes = self.call("pane", "list").get("panes", [])
+        root_pane: dict[str, str] = {}
+        for pane in panes:
+            root_pane.setdefault(pane["tab_id"], pane["pane_id"])
+        tabs = []
+        for workspace in self.workspaces():
+            listing = self.call("tab", "list", "--workspace", workspace["workspace_id"])
+            for tab in listing.get("tabs", []):
+                label = tab.get("label")
+                if label in logins and tab["tab_id"] in root_pane:
+                    tabs.append(
+                        AccountTab(label, tab["tab_id"], workspace["workspace_id"], root_pane[tab["tab_id"]])
+                    )
+        return tabs
+
+    def process(self, pane_id: str) -> PaneProcess:
+        info = self.call("pane", "process-info", "--pane", pane_id).get("process_info", {})
+        return PaneProcess(
+            shell_pid=info.get("shell_pid"),
+            foreground_process_group_id=info.get("foreground_process_group_id"),
+            foreground_names=tuple(p.get("name", "") for p in info.get("foreground_processes", [])),
+        )
+
+
+class DeckError(RuntimeError):
+    pass
+
+
+def moveto_list() -> str:
+    return subprocess.run(
+        ["moveto", "--list"], capture_output=True, text=True, timeout=60, check=True
+    ).stdout
+
+
+def moveto_has_resume() -> bool:
+    result = subprocess.run(["moveto", "--help"], capture_output=True, text=True, timeout=30)
+    return "--resume" in (result.stdout + result.stderr)
+
+
+def load_catalog(path: str | None) -> dict | None:
+    if not path or not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+# --------------------------------------------------------------------- run
+
+SETTLED = frozenset({"resumed", "fresh", "failed"})
+
+
+def utc_now() -> str:
+    import datetime
+
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def ensure_workspace(
+    herdr: Herdr, label: str, cwd: str, spare_tabs: list[str]
+) -> str:
+    """The workspace with this label, created if missing. A new workspace
+    starts with one numbered tab; it is noted in `spare_tabs` to be closed
+    once the account tabs exist, never one the operator had."""
+    for workspace in herdr.workspaces():
+        if workspace.get("label") == label:
+            return workspace["workspace_id"]
+    made = herdr.call("workspace", "create", "--label", label, "--cwd", cwd, "--no-focus")
+    if made.get("tab", {}).get("tab_id"):
+        spare_tabs.append(made["tab"]["tab_id"])
+    return made["workspace"]["workspace_id"]
+
+
+def execute(herdr: Herdr, actions: list[Action], cwd: str, resume_flag: bool) -> dict[str, str]:
+    """Carry out the plan; returns the pane each re-entered account went to."""
+    entered: dict[str, str] = {}
+    spare_tabs: list[str] = []
+    for action in actions:
+        if isinstance(action, CreateTab):
+            workspace = ensure_workspace(herdr, action.workspace_label, cwd, spare_tabs)
+            made = herdr.call(
+                "tab", "create", "--workspace", workspace, "--cwd", cwd,
+                "--label", action.login, "--no-focus",
+            )
+            pane = made["root_pane"]["pane_id"]
+        elif isinstance(action, Reenter):
+            pane = action.pane_id
+        else:
+            continue
+        herdr.call("pane", "run", pane, reenter_command(action.login, resume_flag))
+        entered[action.login] = pane
+    for tab_id in spare_tabs:
+        herdr.call("tab", "close", tab_id)
+    return entered
+
+
+def last_line(herdr: Herdr, pane: str) -> str:
+    read = herdr.text("pane", "read", pane, "--source", "recent", "--lines", "5", "--format", "text")
+    lines = [line.strip() for line in read.splitlines() if line.strip()]
+    # The shell's prompt follows whatever moveto or fabric-resume printed last,
+    # so the reason is the line before it.
+    return " | ".join(lines[-2:])
+
+
+def status_line(login: str, status: str, detail: str = "") -> str:
+    suffix = f"  {detail}" if detail else ""
+    return f"{login:<28} {status}{suffix}"
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+    import getpass
+    import queue
+    import threading
+    import sys
+    import time
+
+    parser = argparse.ArgumentParser(
+        prog="fabric-deck",
+        description="Fleet Deck: bring every agent account's herdr tab back into its account.",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="print the plan, change nothing")
+    parser.add_argument("--catalog", help="the role catalogue (identities/roles/catalog.json)")
+    parser.add_argument("--exclude", action="append", default=[], help="a login to leave out")
+    parser.add_argument("--cwd", default=os.path.expanduser("~/projects"))
+    args = parser.parse_args(argv)
+
+    herdr = Herdr()
+    accounts = parse_moveto_list(moveto_list(), exclude={getpass.getuser(), *args.exclude})
+    logins = {account.login for account in accounts}
+    tabs = herdr.account_tabs(logins)
+    processes = {tab.pane_id: herdr.process(tab.pane_id) for tab in tabs}
+    workspace_labels = {w.get("label") for w in herdr.workspaces()}
+    actions = plan(accounts, tabs, processes, workspace_labels, load_catalog(args.catalog))
+
+    for action in actions:
+        kind = type(action).__name__
+        where = getattr(action, "workspace_label", None) or getattr(action, "pane_id", "")
+        print(status_line(action.login, kind.lower(), where))
+    if args.dry_run:
+        return 0
+
+    resume_flag = moveto_has_resume()
+    acted_at = utc_now()
+    started = time.monotonic()
+    entered = execute(herdr, actions, args.cwd, resume_flag)
+    if not entered:
+        return 0
+    print(f"re-entered {len(entered)} account(s) at {acted_at}; "
+          f"waiting up to {RESTORE_WAIT_S}s (RESTORE_WAIT_S)"
+          + ("" if resume_flag else "; moveto has no --resume yet: sessions are not resumed"))
+
+    stream = subprocess.Popen(
+        ["fabric-ctl", "all", "states", "--follow", "--json"],
+        stdout=subprocess.PIPE, text=True,
+    )
+    # A reader thread, so a quiet stream never stalls the restoring wait and a
+    # burst of lines is never left unread in a buffer select cannot see.
+    lines: "queue.Queue[str | None]" = queue.Queue()
+
+    def pump() -> None:
+        for raw in stream.stdout or []:
+            lines.put(raw)
+        lines.put(None)
+
+    threading.Thread(target=pump, name="fabric-deck-states", daemon=True).start()
+    records: dict[str, StateRecord] = {}
+    shown: dict[str, str] = {}
+    stream_ended = False
+    try:
+        while True:
+            try:
+                raw = lines.get(timeout=1.0)
+                while True:
+                    if raw is None:
+                        stream_ended = True
+                    else:
+                        parsed = parse_state_line(raw)
+                        if parsed is not None:
+                            records[parsed.login] = parsed
+                    raw = lines.get_nowait()
+            except queue.Empty:
+                pass
+            elapsed = time.monotonic() - started
+            now = utc_now()
+            for login, pane in entered.items():
+                bare = is_bare_shell(herdr.process(pane))
+                tail = last_line(herdr, pane) if bare else ""
+                status = recovery_status(acted_at, now, elapsed, records.get(login), bare, tail)
+                if shown.get(login) != status:
+                    shown[login] = status
+                    detail = tail if status in {"failed", "fresh"} else ""
+                    print(status_line(login, status, detail), flush=True)
+            if all(shown.get(login) in SETTLED for login in entered) or elapsed > RESTORE_WAIT_S + 5:
+                return 0 if all(shown.get(login) != "failed" for login in entered) else 1
+            if stream_ended:
+                print("fabric-deck: the state stream ended", file=sys.stderr)
+                return 2
+    finally:
+        stream.terminate()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
