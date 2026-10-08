@@ -38,6 +38,31 @@ fabric-deck --dry-run                       # the plan, changing nothing
 fabric-deck --catalog ~/projects/agent-fabric/identities/roles/catalog.json
 ```
 
+## Agent status in herdr
+
+`fabric-deck --watch` keeps herdr's agent panel in step with the fleet, so
+an account tab no longer reads "agent status unknown". It follows
+`fabric-ctl all states --follow --json` for this host and reports each
+account's state into its tab's pane as the agent `claude` from the source
+`fabric`:
+- `working`, `idle` and `blocked` are reported as they are;
+- `none` (no session) releases the agent;
+- anything else, the stream's stale rows included, is reported `unknown`.
+
+It reports a change at once, and repeats a pane's report every ten
+minutes even when nothing changed, which puts a restarted herdr server
+right. The tab map is rebuilt every ten seconds: a closed, moved, split or
+new tab is followed, and a tab that leaves the map (closed or split) has its
+agent row released. A split account tab is not reported into. A herdr
+failure for one tab never stops the others. When the stream exits,
+the deck restarts it after 1, 2, 5, 10, 30, then 60 s, and from 1 s again
+once a stream has run a minute. `kill` and ctrl-c stop it cleanly, the
+stream child with it.
+
+Reports carry no `--seq`. herdr refuses a sequence number that is not
+above the last one from the same source, and a restarted deck would start
+again from zero; with none ever sent, every report from `fabric` applies.
+
 ## How a bare tab is recognised
 
 herdr's `pane process-info` reports a pane's `shell_pid` and its

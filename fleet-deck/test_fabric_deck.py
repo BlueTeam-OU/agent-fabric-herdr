@@ -1,6 +1,14 @@
 import unittest
 
 from fabric_deck import (
+    Release,
+    Report,
+    agent_command,
+    agent_report,
+    Watcher,
+    next_backoff,
+    PANE_MAP_REFRESH_S,
+    RESEND_AFTER_S,
     ENTRY_GRACE_S,
     RESTORE_WAIT_S,
     DeckError,
@@ -12,6 +20,7 @@ from fabric_deck import (
     poll,
     printable,
     parse_state_line,
+    stop_child,
     recovery_status,
     NEW_WORKSPACE,
     Account,
@@ -150,6 +159,18 @@ class Statuses(unittest.TestCase):
         self.assertIsNone(parsed.resumable)
         self.assertIsNone(parsed.last_session)
         self.assertIsNone(parse_state_line("not json"))
+
+    def test_a_field_of_the_wrong_type_is_read_as_absent(self):
+        ts = '"ts":"2026-10-08T05:00:00Z"'
+        for line in ('[1]', '"x"', '{"address":5,%s}' % ts, '{"address":"h/ui","ts":5}'):
+            self.assertIsNone(parse_state_line(line), line)
+        odd = parse_state_line(
+            '{"address":"h/ui",%s,"state":["working"],"last_session":7,"resumable":"yes",'
+            '"sessions":[{"session":3},{"session":"s1","state":{},"since":9},"s2"]}' % ts
+        )
+        self.assertEqual((odd.state, odd.last_session, odd.resumable), ("unknown", None, None))
+        self.assertEqual(odd.sessions, (Session("s1", "unknown", ""),))
+        self.assertEqual(parse_state_line('{"address":"h/ui",%s,"sessions":{}}' % ts).sessions, ())
 
     def test_the_streams_no_record_row_is_no_record(self):
         # ctl.mjs stateRow for an account with nothing on the channel: no ts.
@@ -292,6 +313,123 @@ class SameSecond(unittest.TestCase):
         self.assertEqual(recovery_status(ACTED, NOW, 10, same, False), "resumed")
 
 
+def state_row(state):
+    return StateRecord("ui", state, (), "2026-10-08T05:00:00Z", host="host-a")
+
+
+class AgentPanel(unittest.TestCase):
+    def test_states_map_one_to_one_and_none_releases(self):
+        for state in ("working", "idle", "blocked", "unknown"):
+            self.assertEqual(agent_report(state_row(state)), Report(state))
+        self.assertEqual(agent_report(state_row("none")), Release())
+        self.assertEqual(agent_report(state_row("stopped-answering")), Report("unknown"))
+
+
+
+def row_line(login, state, host="host-a"):
+    return ('{"address":"%s/%s","ts":"2026-10-08T05:00:00Z","sessions":[],"state":"%s"}'
+            % (host, login, state))
+
+
+class FakeHerdr:
+    """account_tabs from a mutable table; every herdr call recorded, and a
+    set of panes whose calls fail as a closed tab's would."""
+
+    def __init__(self, tabs):
+        self.tabs, self.calls, self.dead = tabs, [], set()
+
+    def account_tabs(self, logins):
+        return [t for t in self.tabs if t.login in logins]
+
+    def call(self, *args):
+        self.calls.append(args)
+        if args[2] in self.dead:
+            raise DeckError(f"pane {args[2]} not found")
+        return {}
+
+
+def watcher(herdr, logins=("ui",)):
+    return Watcher(herdr=herdr, accounts=lambda: set(logins), host="host-a", log=lambda _: None)
+
+
+class WatchLoop(unittest.TestCase):
+    def test_only_a_change_is_sent_until_the_resend_interval(self):
+        herdr = FakeHerdr([AccountTab("ui", "t1", "w1", "p1")])
+        w = watcher(herdr)
+        w.on_line(row_line("ui", "working"), 0)
+        w.on_line(row_line("ui", "working"), 5)
+        self.assertEqual(len(herdr.calls), 1, "a heartbeat sends nothing")
+        w.on_line(row_line("ui", "working"), RESEND_AFTER_S + 1)
+        self.assertEqual(len(herdr.calls), 2, "sent again after the interval")
+        w.on_line(row_line("ui", "idle"), RESEND_AFTER_S + 2)
+        self.assertEqual(herdr.calls[-1][-1], "idle")
+
+    def test_another_hosts_record_is_ignored(self):
+        herdr = FakeHerdr([AccountTab("ui", "t1", "w1", "p1")])
+        watcher(herdr).on_line(row_line("ui", "working", host="host-b"), 0)
+        self.assertEqual(herdr.calls, [])
+
+    def test_a_tab_that_moved_is_found_again_after_a_failed_report(self):
+        herdr = FakeHerdr([AccountTab("ui", "t1", "w1", "p1")])
+        w = watcher(herdr)
+        w.on_line(row_line("ui", "working"), 0)
+        herdr.dead.add("p1")
+        herdr.tabs = [AccountTab("ui", "t2", "w2", "p9")]
+        w.on_line(row_line("ui", "idle"), 1)   # fails on p1, forces a re-map
+        w.on_line(row_line("ui", "idle"), 2)   # goes to the tab's new pane
+        self.assertEqual(herdr.calls[-1][2], "p9")
+
+    def test_a_tab_split_after_mapping_is_released_and_no_longer_reported(self):
+        herdr = FakeHerdr([AccountTab("ui", "t1", "w1", "p1")])
+        w = watcher(herdr)
+        w.on_line(row_line("ui", "working"), 0)
+        herdr.tabs = [AccountTab("ui", "t1", "w1", "p1", pane_count=2)]
+        w.on_line(row_line("ui", "idle"), PANE_MAP_REFRESH_S)
+        self.assertEqual(herdr.calls[-1][1], "release-agent")
+        self.assertEqual(len(herdr.calls), 2, "nothing reported into the split tab")
+
+    def test_a_malformed_record_does_not_stop_the_watcher(self):
+        herdr = FakeHerdr([AccountTab("ui", "t1", "w1", "p1")])
+        w = watcher(herdr)
+        w.on_line('{"address":5,"ts":"2026-10-08T05:00:00Z"}', 0)
+        w.on_line(row_line("ui", "working").replace('"working"', '["working"]', 1), 1)
+        self.assertEqual(herdr.calls[-1][-1], "unknown")
+
+    def test_a_herdr_timeout_does_not_stop_the_watcher(self):
+        herdr = FakeHerdr([AccountTab("ui", "t1", "w1", "p1")])
+
+        def hung(*args):
+            raise __import__("subprocess").TimeoutExpired(args, 30)
+
+        herdr.call = hung
+        w = watcher(herdr)
+        w.on_line(row_line("ui", "working"), 0)
+        self.assertEqual(w.shown, {})
+
+
+class Backoff(unittest.TestCase):
+    def test_waits_grow_and_reset_after_a_healthy_stream(self):
+        failures, waits = 0, []
+        for _ in range(8):
+            failures, wait = next_backoff(failures, 0.5)
+            waits.append(wait)
+        self.assertEqual(waits, [1, 2, 5, 10, 30, 60, 60, 60])
+        self.assertEqual(next_backoff(failures, 61), (1, 1))
+
+
+class AgentCommand(unittest.TestCase):
+    def test_the_pane_id_comes_first_as_herdrs_parser_wants(self):
+        self.assertEqual(
+            agent_command("w1:p2", Report("working")),
+            ("pane", "report-agent", "w1:p2", "--source", "fabric", "--agent", "claude",
+             "--state", "working"),
+        )
+        self.assertEqual(
+            agent_command("w1:p3", Release()),
+            ("pane", "release-agent", "w1:p3", "--source", "fabric", "--agent", "claude"),
+        )
+
+
 class Order(unittest.TestCase):
     def test_the_snapshot_is_read_before_any_pane_is_touched(self):
         calls = []
@@ -304,6 +442,60 @@ class SplitTab(unittest.TestCase):
         tabs = [AccountTab("coord", "t1", "w1", "p1", pane_count=2)]
         actions = plan([Account("coord", "fabric-coordinator")], tabs, {"p1": BARE}, set(), CATALOG)
         self.assertEqual(actions, [Undetermined("coord", "p1")])
+
+
+
+class StopChild(unittest.TestCase):
+    def stubborn_child(self):
+        import subprocess
+        import sys
+
+        child = subprocess.Popen(
+            [sys.executable, "-c",
+             "import signal,sys,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+             "print(flush=True); time.sleep(60)"],
+            stdout=subprocess.PIPE, text=True,
+        )
+        child.stdout.readline()  # its SIGTERM handler is in place
+        self.addCleanup(child.stdout.close)
+        self.addCleanup(lambda: child.poll() is None and child.kill())
+        return child
+
+    def stop(self, child, grace=0.5, signal_after=None):
+        import os
+        import signal
+        import threading
+        import fabric_deck
+
+        saved = fabric_deck.STOP_CHILD_GRACE_S
+        fabric_deck.STOP_CHILD_GRACE_S = grace
+        timer = None
+        if signal_after is not None:
+            timer = threading.Timer(signal_after, os.kill, (os.getpid(), signal.SIGINT))
+            timer.start()
+        try:
+            stop_child(child)
+        finally:
+            fabric_deck.STOP_CHILD_GRACE_S = saved
+            if timer is not None:
+                timer.join()
+
+    def test_a_child_that_ignores_terminate_is_killed_and_reaped(self):
+        import signal
+
+        child = self.stubborn_child()
+        before = signal.getsignal(signal.SIGINT)
+        self.stop(child, grace=0.2)
+        self.assertEqual(child.returncode, -signal.SIGKILL)
+        self.assertIs(signal.getsignal(signal.SIGINT), before, "the handlers are given back")
+
+    def test_a_stop_during_the_grace_is_held_until_the_child_is_reaped(self):
+        import signal
+
+        child = self.stubborn_child()
+        with self.assertRaises(KeyboardInterrupt):
+            self.stop(child, grace=0.5, signal_after=0.1)
+        self.assertEqual(child.returncode, -signal.SIGKILL, "reaped before the stop is acted on")
 
 
 if __name__ == "__main__":
