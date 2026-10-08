@@ -257,16 +257,21 @@ def parse_utc(stamp):
     return parsed if parsed.tzinfo is not None else None
 
 
-def live_before(record: StateRecord | None, acted_at: str) -> set[str]:
-    """Session ids already live at or before the deck's action: the account's
-    sessions elsewhere, which the deck's re-entry did not start."""
-    acted = parse_utc(acted_at)
-    if record is None or acted is None:
-        return set()
-    return {
-        s.session for s in record.sessions
-        if s.state in LIVE_STATES and (parse_utc(s.since) or acted) <= acted
-    }
+def baselines_from_snapshot(lines: Iterable[str]) -> dict[str, frozenset[str]]:
+    """Per account, the sessions live in a snapshot taken before the deck acts:
+    sessions elsewhere, which its re-entry cannot have started. The account's
+    last_session is never part of it: bringing that session back is what the
+    deck waits for, and a record from before the restart may still list it."""
+    baselines: dict[str, frozenset[str]] = {}
+    for line in lines:
+        record = parse_state_line(line)
+        if record is None:
+            continue
+        baselines[record.login] = frozenset(
+            s.session for s in record.sessions
+            if s.state in LIVE_STATES and s.session != record.last_session
+        )
+    return baselines
 
 
 def newer_live_sessions(
@@ -386,6 +391,21 @@ def moveto_list() -> str:
     ).stdout
 
 
+def states_snapshot() -> list[str]:
+    """One read of the state stream: a line per placed account."""
+    import sys
+
+    try:
+        result = subprocess.run(
+            ["fabric-ctl", "all", "states", "--json"], capture_output=True, text=True, timeout=60
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"fabric-deck: no state snapshot before acting ({error}); "
+              "sessions already running elsewhere may be mistaken for resumed ones", file=sys.stderr)
+        return []
+    return result.stdout.splitlines()
+
+
 def moveto_has_resume() -> bool:
     result = subprocess.run(["moveto", "--help"], capture_output=True, text=True, timeout=30)
     return "--resume" in (result.stdout + result.stderr)
@@ -484,7 +504,7 @@ def poll(
     acted_at: str,
     now: str,
     elapsed_s: float,
-    baselines: dict[str, set[str]] | None = None,
+    baselines: dict[str, frozenset[str]] | None = None,
 ) -> dict[str, tuple[str, str]]:
     """One pass over the re-entered accounts: login -> (status, detail).
 
@@ -554,6 +574,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     resume_flag = moveto_has_resume()
+    # Taken before any pane is touched, so a session of an account that runs
+    # elsewhere is known as not the deck's however soon it changes state.
+    baselines = baselines_from_snapshot(states_snapshot())
     acted_at = utc_now()
     started = time.monotonic()
     entered = execute(herdr, actions, args.cwd, resume_flag)
@@ -578,7 +601,6 @@ def main(argv: list[str] | None = None) -> int:
 
     threading.Thread(target=pump, name="fabric-deck-states", daemon=True).start()
     records: dict[str, StateRecord] = {}
-    baselines: dict[str, set[str]] = {}
     shown: dict[str, str] = {}
     stream_ended = False
     try:
@@ -592,9 +614,6 @@ def main(argv: list[str] | None = None) -> int:
                         parsed = parse_state_line(raw)
                         if parsed is not None:
                             records[parsed.login] = parsed
-                            baselines.setdefault(parsed.login, set()).update(
-                                live_before(parsed, acted_at)
-                            )
                     raw = lines.get_nowait()
             except queue.Empty:
                 pass

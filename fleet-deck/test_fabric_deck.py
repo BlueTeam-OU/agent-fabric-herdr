@@ -5,7 +5,7 @@ from fabric_deck import (
     RESTORE_WAIT_S,
     DeckError,
     Session,
-    live_before,
+    baselines_from_snapshot,
     StateRecord,
     poll,
     printable,
@@ -232,16 +232,33 @@ class Poll(unittest.TestCase):
         )
 
     def test_another_session_turning_working_is_not_the_decks(self):
-        # s-other was idle before the action and turned working after it; the
-        # deck's own re-entry has produced nothing yet.
-        before = StateRecord("ui", "idle", (Session("s-other", "idle", "2026-10-08T04:00:00Z"),),
-                             "2026-10-08T04:59:00Z", last_session="s-last")
+        # The snapshot before the action lists s-other live; it turns working
+        # just after the action, before the stream's first row is read.
+        snapshot = [
+            '{"address":"develop-qzapp/ui","ts":"2026-10-08T04:59:00Z","state":"idle",'
+            '"sessions":[{"session":"s-other","state":"idle","since":"2026-10-08T04:00:00Z"}],'
+            '"last_session":"s-last"}'
+        ]
         after = StateRecord("ui", "working", (Session("s-other", "working", "2026-10-08T05:00:20Z"),),
                             "2026-10-08T05:00:20Z", last_session="s-last")
-        baselines = {"ui": live_before(before, ACTED)}
         herdr = StubHerdr({"p1": IN_MOVETO}, {"p1": ""})
-        result = poll(herdr, {"ui": "p1"}, {"ui": after}, ACTED, NOW, 10, baselines)
+        result = poll(herdr, {"ui": "p1"}, {"ui": after}, ACTED, NOW, 10,
+                      baselines_from_snapshot(snapshot))
         self.assertEqual(result["ui"][0], "restoring")
+
+    def test_last_session_listed_live_before_the_restart_can_still_resume(self):
+        # A record from before the restart still lists last_session live.
+        snapshot = [
+            '{"address":"develop-qzapp/ui","ts":"2026-10-08T04:59:00Z","state":"idle",'
+            '"sessions":[{"session":"s-last","state":"idle","since":"2026-10-08T04:00:00Z"}],'
+            '"last_session":"s-last"}'
+        ]
+        resumed = StateRecord("ui", "idle", (Session("s-last", "idle", "2026-10-08T05:00:30Z"),),
+                              "2026-10-08T05:00:30Z", last_session="s-last")
+        herdr = StubHerdr({"p1": IN_MOVETO}, {"p1": ""})
+        result = poll(herdr, {"ui": "p1"}, {"ui": resumed}, ACTED, NOW, 10,
+                      baselines_from_snapshot(snapshot))
+        self.assertEqual(result["ui"][0], "resumed")
 
     def test_pane_text_is_printed_without_control_characters(self):
         self.assertEqual(printable("ok\x1b]0;title\x07\x9bdone\tend"), "ok]0;titledone\tend")
