@@ -626,8 +626,18 @@ def main(argv: list[str] | None = None) -> int:
     if host is None:
         print("fabric-deck: cannot tell this host's fleet name (fabric-whoami); "
               "state records of the same login on other hosts may be mixed in", file=sys.stderr)
+    def snapshot_baselines() -> dict[str, frozenset[str]]:
+        lines = states_snapshot()
+        hosts = {r.host for r in map(parse_state_line, lines) if r is not None}
+        if host is not None and hosts and host not in hosts:
+            # fabric-whoami's short hostname and the stream's placement name
+            # disagree: every account would read stale without saying why.
+            print(f"fabric-deck: no state record is for this host ({host}); the stream "
+                  f"names {', '.join(sorted(hosts))}", file=sys.stderr)
+        return baselines_from_snapshot(lines, host)
+
     baselines, acted_at, entered = snapshot_then_act(
-        lambda: baselines_from_snapshot(states_snapshot(), host),
+        snapshot_baselines,
         lambda: execute(herdr, actions, args.cwd, resume_flag),
     )
     started = time.monotonic()

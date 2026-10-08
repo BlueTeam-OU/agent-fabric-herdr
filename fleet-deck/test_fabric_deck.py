@@ -6,6 +6,7 @@ from fabric_deck import (
     DeckError,
     Session,
     baselines_from_snapshot,
+    for_this_host,
     snapshot_then_act,
     StateRecord,
     poll,
@@ -275,6 +276,14 @@ class Hosts(unittest.TestCase):
         ]
         self.assertEqual(baselines_from_snapshot(lines, "host-a"), {"ui": frozenset({"s-a"})})
         self.assertEqual(parse_state_line(lines[1]).host, "host-b")
+
+    def test_the_stream_filter_keeps_only_this_hosts_records(self):
+        here = StateRecord("ui", "idle", (), "2026-10-08T05:00:00Z", host="host-a")
+        there = StateRecord("ui", "idle", (), "2026-10-08T05:00:00Z", host="host-b")
+        self.assertTrue(for_this_host(here, "host-a"))
+        self.assertFalse(for_this_host(there, "host-a"))
+        self.assertTrue(for_this_host(there, None), "an unknown host takes every record")
+        self.assertFalse(for_this_host(None, "host-a"))
 
 
 class SameSecond(unittest.TestCase):
