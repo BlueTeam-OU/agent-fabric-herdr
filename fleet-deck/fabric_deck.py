@@ -163,7 +163,7 @@ def parse_state_line(line: str) -> StateRecord | None:
     absent, never trusted to have the shape the deck expects."""
     try:
         row = json.loads(line)
-    except ValueError:
+    except (ValueError, RecursionError):  # deeply nested input is not a record
         return None
     if not isinstance(row, dict):
         return None
@@ -336,9 +336,12 @@ def befores_path() -> str:
 
 
 def herdr_socket_path() -> str | None:
-    """The socket the deck's herdr commands reach: HERDR_SOCKET_PATH, or the
-    default session's, as herdr itself lists it (never re-derived here)."""
-    if os.environ.get("HERDR_SOCKET_PATH"):
+    """The socket the deck's herdr commands reach, as herdr itself resolves
+    it (src/session.rs active_api_socket_path): the session HERDR_SESSION
+    names, else HERDR_SOCKET_PATH, else the default session; each session's
+    socket as herdr lists it, never re-derived here."""
+    named = os.environ.get("HERDR_SESSION")
+    if not named and os.environ.get("HERDR_SOCKET_PATH"):
         return os.environ["HERDR_SOCKET_PATH"]
     try:
         result = subprocess.run(["herdr", "session", "list", "--json"],
@@ -346,7 +349,8 @@ def herdr_socket_path() -> str | None:
         sessions = json.loads(result.stdout).get("result", json.loads(result.stdout)).get("sessions", [])
     except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
         return None
-    return next((s.get("socket_path") for s in sessions if isinstance(s, dict) and s.get("default")), None)
+    wanted = (lambda s: s.get("name") == named) if named else (lambda s: s.get("default"))
+    return next((s.get("socket_path") for s in sessions if isinstance(s, dict) and wanted(s)), None)
 
 
 def server_instance(path: str | None, proc_root: str = "/proc") -> tuple[int, int] | None:
@@ -426,6 +430,11 @@ class Deck:
     harness_pane: dict[str, str] = field(default_factory=dict)
     # login -> when its harness pane began waiting for the restore decision
     pending: dict[str, float] = field(default_factory=dict)
+    # Accounts whose live = 0 dates from before their restore decision: no fall
+    # is noted for them until a session has been seen up again.
+    unsettled: set[str] = field(default_factory=set)
+    # (login, pane, mode) -> since when a shell or status pane waits to be bare
+    waiting: dict[tuple[str, str, str], float] = field(default_factory=dict)
     # login -> (what the panel shows, when it was sent)
     sent: dict[str, tuple[Shown, float]] = field(default_factory=dict)
     befores: dict[str, Before] = field(default_factory=dict)
@@ -444,6 +453,13 @@ class Deck:
         moveto running is classified and never re-armed; one at the
         operator's bare shell, or just created, waits for the restore
         decision."""
+        try:
+            self._restore(now)
+        except Exception as error:  # herdr failing while it comes back must not end the deck
+            self.log(f"cannot restore yet: {printable(str(error))}")
+            self.lost = True
+
+    def _restore(self, now: float) -> None:
         if not self.loaded:
             self._load()
         accounts = self._accounts()
@@ -497,16 +513,19 @@ class Deck:
             panes[STATUS] = self._split(panes[SHELL], "down", 0.5, STATUS)
         self.harness_pane[login] = harness
         for role, mode in ((SHELL, PLAIN), (STATUS, WATCH)):
-            if self._bare(panes[role]):
-                self._arm(login, panes[role], mode)
+            # Started once its shell is at the prompt: a pane just created may
+            # still be running the operator's rc file.
+            self.waiting[(login, panes[role], mode)] = now
         seen = self.observe(login, harness)
-        if seen.moveto is False:
-            self.pending[login] = now
-            self.tracks[login] = Track(State.IDLE)
+        if seen.moveto is True:
+            # The account's moveto holds the pane: classified, never re-armed.
+            self.tracks[login] = classify(seen, self.live(login)) or Track(State.IDLE)
             return
-        # moveto (or something else) holds the pane: classified when it can
-        # be, and never re-armed by a restore.
-        self.tracks[login] = classify(seen, self.live(login)) or Track(State.IDLE)
+        # Bare, just created, or still busy: the restore decision is taken
+        # once it is at the operator's prompt and the stream has settled.
+        self.pending[login] = now
+        self.unsettled.add(login)
+        self.tracks[login] = Track(State.IDLE)
 
     def _split(self, pane: str, direction: str, ratio: float, label: str) -> str:
         made = self.herdr.call("pane", "split", pane, "--direction", direction,
@@ -516,6 +535,19 @@ class Deck:
         return new
 
     def decide_pending(self, now: float) -> None:
+        for key, since in list(self.waiting.items()):
+            login, pane, mode = key
+            try:
+                if self._bare(pane):
+                    del self.waiting[key]
+                    self._arm(login, pane, mode)
+                elif now - since >= RESTORE_WAIT_S:
+                    del self.waiting[key]
+                    self._say(f"{pane}:busy", f"{login}: pane {pane} never reached its prompt; left as it is")
+            except Exception as error:  # kept waiting; the map is read again first
+                self.log(f"{login}: {printable(str(error))}")
+                self.mapped_at = None
+                return
         for login, since in list(self.pending.items()):
             waited = now - since
             live = self.live(login)
@@ -524,9 +556,17 @@ class Deck:
                 continue
             pane = self.harness_pane.get(login)
             try:
-                if pane is None or not self._bare(pane):
-                    # A person started something in it meanwhile: followed, not armed.
+                seen = self.observe(login, pane) if pane is not None else Seen(present=False)
+                if seen.moveto is True:
+                    # A person started this account's moveto meanwhile: followed, not armed.
                     del self.pending[login]
+                    self.tracks[login] = classify(seen, live) or Track(State.IDLE)
+                    continue
+                if seen.moveto is not False:
+                    if waited >= RESTORE_WAIT_S:
+                        del self.pending[login]
+                        self._say(f"{pane}:busy", f"{login}: its harness pane never reached its prompt; "
+                                  "left as it is until the next restore")
                     continue
                 track, arm = restore(before_live(self.befores.get(login), live), live, now)
                 self._arm(login, pane, arm.mode)
@@ -568,7 +608,11 @@ class Deck:
                 self.tracks[login] = track
                 if arm is not None:
                     self._arm(login, pane, arm.mode)
-                shown = Shown("unknown", "") if login in self.unarmed else display(self.tracks[login], live)
+                elif track.halted:
+                    self._say(f"{login}:halted", f"{login}: moveto ended at once twice in a row; "
+                              f"not started again until a restore. The pane's last lines say why")
+                # An unarmed harness pane holds no agent: herdr's own word for that.
+                shown = Shown("unknown", "unknown") if login in self.unarmed else display(self.tracks[login], live)
                 self._show(login, pane, shown, now)
             except Exception as error:  # one account's failure must not stop the others
                 self.log(f"{login}: {printable(str(error))}")
@@ -581,14 +625,17 @@ class Deck:
         restarted: that is a restore."""
         self.mapped_at = now
         accounts = self._accounts()
-        tabs = self._tabs({a.login for a in accounts}, quiet=self.lost) if accounts is not None else None
+        if accounts is None:
+            # moveto --list failed, not herdr: the map read last stays.
+            return not self.lost
+        tabs = self._tabs({a.login for a in accounts}, quiet=self.lost)
         if tabs is None:
             self._lose("herdr's server does not answer; waiting for it")
             return False
         if self.lost:
             self.lost = False
             self.log("herdr's server answers: restoring")
-            for kept in (self.tracks, self.harness_pane, self.pending, self.sent):
+            for kept in (self.tracks, self.harness_pane, self.pending, self.waiting, self.sent):
                 kept.clear()
             self.restore(now)
             return not self.lost
@@ -600,6 +647,8 @@ class Deck:
                 self.pending.pop(login, None)
                 self.tracks.pop(login, None)
                 self.sent.pop(login, None)
+                for key in [k for k in self.waiting if k[0] == login]:
+                    del self.waiting[key]
         return True
 
     # ---------------------------------------------------------- observing
@@ -621,7 +670,8 @@ class Deck:
             # account's moveto, and not the deck's to judge.
             return Seen(present=True)
         tree = parents if parents is not None else self.parents()
-        return Seen(present=True, moveto=True, harness=harness_under(found.pid, tree, self.argv))
+        return Seen(present=True, moveto=True, harness=harness_under(found.pid, tree, self.argv),
+                    mode=found.mode)
 
     def live(self, login: str) -> Live | None:
         return live_of(self.records.get(login), self.utc())
@@ -641,7 +691,9 @@ class Deck:
             return
         if pane == self.harness_pane.get(login):
             self.unarmed.discard(login)
-        self.herdr.call("pane", "run", pane, " ".join(filter(None, ("moveto", login, mode))))
+        command = " ".join(filter(None, ("moveto", login, mode)))
+        self.herdr.call("pane", "run", pane, command)
+        self.log(f"{login}: started `{command}` in {pane}")
 
     def _bare(self, pane: str) -> bool:
         info = self.herdr.process_info(pane)
@@ -668,7 +720,7 @@ class Deck:
         self.befores = {login: at_start(b, server) for login, b in (stored or {}).items()}
         self.loaded = True
         if stored is not None and stored != self.befores:
-            self.save(self.befores)
+            self._save(self.befores)
 
     def _note_befores(self, server: tuple[int, int]) -> None:
         """Each account's live count goes into its record, and a pending fall
@@ -680,13 +732,22 @@ class Deck:
             live = self.live(login)
             current = befores.get(login, Before())
             if live is not None:
-                current = note_live(current, live.count, at, server, login not in self.pending)
+                if live.count >= 1:
+                    self.unsettled.discard(login)
+                settling = login not in self.pending and login not in self.unsettled
+                current = note_live(current, live.count, at, server, settling)
             befores[login] = settle(current, server, at)
         # An account no longer placed is dropped from the record here.
         befores = {k: v for k, v in befores.items() if k in self.placed}
         if befores != self.befores:
             self.befores = befores
+            self._save(befores)
+
+    def _save(self, befores: dict[str, Before]) -> None:
+        try:
             self.save(befores)
+        except OSError as error:  # kept in memory; written again at the next change
+            self.log(f"cannot write the record of running sessions: {printable(str(error))}")
 
     def _lose(self, line: str) -> None:
         """herdr-lost: pending falls are discarded, so a session that died with
@@ -698,7 +759,7 @@ class Deck:
         befores = {login: lost(b) for login, b in self.befores.items()}
         if befores != self.befores:
             self.befores = befores
-            self.save(befores)
+            self._save(befores)
 
     # ------------------------------------------------------------- reading
 
@@ -733,7 +794,7 @@ def report_command(pane: str, shown: Shown) -> tuple[str, ...]:
 
 
 def label_commands(pane: str, shown: Shown) -> list[tuple[str, ...]]:
-    """The word a person reads for the state.
+    """The word a person reads in the agent row.
 
     herdr's default agent row shows the agent's name, not its state text,
     so the deck's word goes into the displayed name ("dormant" instead of
@@ -743,16 +804,17 @@ def label_commands(pane: str, shown: Shown) -> list[tuple[str, ...]]:
     back later (blocked, once shown as failed) reads as herdr's word again.
     herdr refuses a clear and a set in one call, so they are two."""
     base = ("pane", "report-metadata", pane, "--source", AGENT_SOURCE, "--agent", AGENT_LABEL)
-    word = shown.label if shown.label and shown.label != shown.status else ""
+    clear = base + ("--clear-state-labels",)
+    word = shown.label
     if not word:
-        return [base + ("--clear-state-labels",), base + ("--clear-display-agent",)]
-    # herdr shows an idle the person has not looked at yet as done: the
-    # deck's word holds for both (measured live on the fork).
-    statuses = (shown.status, "done") if shown.status == "idle" else (shown.status,)
+        return [clear, base + ("--clear-display-agent",)]
     command = base + ("--display-agent", word)
-    for status in statuses:
-        command += ("--state-label", f"{status}={word}")
-    return [base + ("--clear-state-labels",), command]
+    if word != shown.status:
+        # herdr shows an idle the person has not looked at yet as done: the
+        # deck's word holds for both (measured live on the fork).
+        for status in (shown.status, "done") if shown.status == "idle" else (shown.status,):
+            command += ("--state-label", f"{status}={word}")
+    return [clear, command]
 
 
 def status_line(login: str, status: str, detail: str = "") -> str:
@@ -839,8 +901,15 @@ def moveto_modes() -> frozenset[str]:
         result = subprocess.run(["moveto", "--help"], capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         return frozenset()
-    said = result.stdout + result.stderr
-    modes = {mode for mode in (WAIT, WATCH, RESUME) if mode in said}
+    return modes_in(result.stdout + result.stderr)
+
+
+def modes_in(help_text: str) -> frozenset[str]:
+    """The modes a `moveto --help` lists, each as a whole option token, so
+    neither "--waitfor" nor "--wait-x" reads as --wait; --resume only with
+    --wait."""
+    modes = {mode for mode in (WAIT, WATCH, RESUME)
+             if re.search(rf"(?<![\w-]){re.escape(mode)}(?![\w-])", help_text)}
     if WAIT not in modes:
         modes.discard(RESUME)
     return frozenset(modes)
@@ -954,6 +1023,11 @@ class Stream:
             except OSError as error:
                 self.log(f"cannot start the state stream: {error}")
                 self.child = None
+            if self.closing and self.child is not None:
+                # close() ran while this child was starting and could not see it.
+                self.child.terminate()
+                self.child.wait()
+                return
             if self.child is not None and self.child.stdout is not None:
                 for raw in self.child.stdout:
                     try:

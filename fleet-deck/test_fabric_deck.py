@@ -18,8 +18,10 @@ from fabric_deck import (
     Stream,
     for_this_host,
     harness_under,
+    herdr_socket_path,
     label_commands,
     load_befores,
+    modes_in,
     next_backoff,
     parse_moveto_list,
     parse_state_line,
@@ -123,6 +125,9 @@ def record(login, *states, age_s=10):
 
 BARE = {"shell_pid": 10, "foreground_process_group_id": 10,
         "foreground_processes": [{"pid": 10, "argv": ["bash"]}]}
+# A shell still running the operator's rc file: neither bare nor moveto.
+BUSY = {"shell_pid": 10, "foreground_process_group_id": 11,
+        "foreground_processes": [{"pid": 11, "argv": ["direnv", "hook"]}]}
 
 
 def in_moveto(login, mode="", pid=20):
@@ -145,6 +150,8 @@ class FakeHerdr(Herdr):
         self.calls = []
         self.down = False
         self.n = 0
+        self.new_pane = BARE
+        self.workspace_lists_ok = None  # after this many, `workspace list` fails
 
     def _id(self, kind):
         self.n += 1
@@ -170,6 +177,10 @@ class FakeHerdr(Herdr):
         self.calls.append(args)
         head = args[:2]
         if head == ("workspace", "list"):
+            if self.workspace_lists_ok is not None:
+                if self.workspace_lists_ok == 0:
+                    raise RuntimeError("herdr workspace list: exit 1: not ready")
+                self.workspace_lists_ok -= 1
             return {"workspaces": list(self.workspace_list)}
         if head == ("workspace", "create"):
             w = self._id("w")
@@ -180,7 +191,7 @@ class FakeHerdr(Herdr):
             return {"tabs": list(self.tabs[args[3]])}
         if head == ("tab", "create"):
             pane = self._id("p")
-            tab = self.add_tab(args[args.index("--label") + 1], [(pane, None, BARE)], args[3])
+            tab = self.add_tab(args[args.index("--label") + 1], [(pane, None, self.new_pane)], args[3])
             return {"tab": {"tab_id": tab}, "root_pane": {"pane_id": pane}}
         if head == ("tab", "close"):
             for tabs in self.tabs.values():
@@ -191,7 +202,7 @@ class FakeHerdr(Herdr):
         if head == ("pane", "split"):
             pane = self._id("p")
             self.panes[pane] = {"pane_id": pane, "tab_id": self.panes[args[2]]["tab_id"], "label": None}
-            self.proc[pane] = BARE
+            self.proc[pane] = self.new_pane
             return {"pane": {"pane_id": pane}}
         if head == ("pane", "rename"):
             self.panes[args[2]]["label"] = args[3]
@@ -265,8 +276,34 @@ class Restore(unittest.TestCase):
         self.assertEqual(h.herdr.panes[harness]["label"], "harness")
         split = next(c for c in h.herdr.calls if c[:2] == ("pane", "split"))
         self.assertEqual((split[2], split[4], split[6]), (harness, "right", "0.65"))
+        h.deck.follow(1)
         self.assertEqual(sorted(h.herdr.runs()), ["moveto ui", "moveto ui --watch"])
         self.assertEqual(h.herdr.runs(harness), [], "the harness waits for the stream")
+
+    def test_panes_still_busy_when_created_wait_for_their_prompt_and_the_decision(self):
+        h = Harness(befores={"ui": Before(running=True)})
+        h.herdr.new_pane = BUSY
+        h.records["ui"] = record("ui")
+        h.deck.restore(0)
+        h.deck.follow(h.at(RESTORE_SETTLE_S))
+        self.assertEqual(h.herdr.runs(), [], "nothing is typed into a busy pane")
+        self.assertEqual(h.deck.pending.keys(), {"ui"})
+        for pane in h.herdr.panes:
+            h.herdr.proc[pane] = BARE
+        h.deck.follow(h.at(RESTORE_SETTLE_S + 2))
+        self.assertEqual(sorted(h.herdr.runs()), ["moveto ui", "moveto ui --resume", "moveto ui --watch"])
+        h.deck.follow(h.at(60))
+        self.assertEqual(h.store, {"ui": Before(running=True)}, "the fall from before the decision is never noted")
+
+    def test_a_herdr_failure_while_restoring_leaves_the_deck_waiting_not_dead(self):
+        h = Harness()
+        h.herdr.workspace_lists_ok = 1  # the tab map reads, the restore's own listing fails
+        h.deck.restore(0)
+        self.assertTrue(h.deck.lost)
+        self.assertTrue(any(line.startswith("cannot restore yet") for line in h.logs))
+        h.herdr.workspace_lists_ok = None
+        h.deck.follow(1)
+        self.assertEqual(h.deck.harness_pane.keys(), {"ui"})
 
     def test_nothing_running_before_or_now_arms_wait_after_the_settle(self):
         h = Harness()
@@ -389,9 +426,31 @@ class Follow(unittest.TestCase):
         h.deck.follow(RESTORE_SETTLE_S)
         harness = harness_of(h)
         self.assertEqual(h.herdr.runs(harness), ["moveto ui --resume"])
-        h.deck.follow(RESTORE_SETTLE_S * 3)
+        h.deck.follow(RESTORE_SETTLE_S * 3 + 20)
         self.assertEqual(h.herdr.reports(harness)[-1][-1], "blocked=failed")
         self.assertEqual(h.herdr.runs(harness), ["moveto ui --resume", "moveto ui --wait"])
+
+    def test_a_moveto_that_keeps_ending_at_once_is_not_typed_again_and_reads_failed(self):
+        h, harness = self.ready()
+        h.herdr.proc[harness] = BARE
+        for at in range(10, 60, 2):
+            h.deck.follow(at)
+        self.assertEqual(h.herdr.runs(harness), ["moveto ui --wait"] * 2)
+        self.assertEqual(h.herdr.reports(harness)[-1][-1], "blocked=failed")
+        self.assertEqual(sum("ended at once twice" in line for line in h.logs), 1)
+
+    def test_a_moveto_list_failure_is_not_a_loss_of_herdr(self):
+        h = Harness(befores={"ui": Before(running=True)})
+        h.records["ui"] = record("ui")
+        h.deck.restore(0)
+        h.deck.follow(RESTORE_SETTLE_S)
+        h.herdr.proc[harness_of(h)] = in_moveto("ui", RESUME)  # the --resume is starting
+        h.logins = None  # moveto --list fails from here on
+        h.deck.accounts = lambda: (_ for _ in ()).throw(OSError("moveto --list: timed out"))
+        h.deck.follow(RESTORE_SETTLE_S + PANE_MAP_REFRESH_S)
+        self.assertFalse(h.deck.lost)
+        self.assertNotIn("herdr's server answers: restoring", h.logs)
+        self.assertEqual(h.herdr.reports(harness_of(h))[-1][-1], "working=restoring")
 
     def test_only_a_change_is_reported_until_the_resend_interval(self):
         h, harness = self.ready()
@@ -500,7 +559,8 @@ class NotYet(unittest.TestCase):
         h.deck.follow(RESTORE_SETTLE_S)
         h.deck.follow(RESTORE_SETTLE_S + 20)
         self.assertEqual(h.herdr.runs(), ["moveto ui"], "only the plain shell pane")
-        self.assertEqual(h.herdr.reports(harness_of(h))[-3][-1], "unknown")
+        last = h.herdr.reports(harness_of(h))[-1]
+        self.assertEqual(last[-2:], ("--display-agent", "unknown"), "the row does not read claude")
         self.assertEqual(sum("no --wait" in line for line in h.logs), 1)
 
 
@@ -518,8 +578,31 @@ class Panel(unittest.TestCase):
                          ("--display-agent", "failed", "--state-label", "blocked=failed"))
 
     def test_a_running_harness_reads_as_herdrs_own_agent_name_and_state(self):
-        clear, name = label_commands("p1", Shown("working", "working"))
+        clear, name = label_commands("p1", Shown("working", ""))
         self.assertEqual((clear[-1], name[-1]), ("--clear-state-labels", "--clear-display-agent"))
+
+    def test_moveto_modes_are_whole_option_tokens_and_resume_needs_wait(self):
+        self.assertEqual(modes_in("usage: moveto <account> [--wait|--resume|--watch]"),
+                         frozenset({WAIT, RESUME, WATCH}))
+        self.assertEqual(modes_in("usage: moveto <account> [--resume] [--waitfor N]"), frozenset())
+        self.assertEqual(modes_in("--watch-later --wait-x"), frozenset())
+
+
+class SocketPath(unittest.TestCase):
+    def test_the_session_herdr_reaches_is_the_one_probed(self):
+        import subprocess
+        from unittest import mock
+
+        listing = ('{"sessions": [{"name": "default", "default": true, "socket_path": "/d.sock"},'
+                   ' {"name": "work", "default": false, "socket_path": "/w.sock"}]}')
+        ran = mock.Mock(return_value=subprocess.CompletedProcess([], 0, stdout=listing))
+        cases = (({"HERDR_SESSION": "work", "HERDR_SOCKET_PATH": "/x.sock"}, "/w.sock"),
+                 ({"HERDR_SOCKET_PATH": "/x.sock"}, "/x.sock"), ({}, "/d.sock"))
+        for env, expected in cases:
+            with mock.patch.dict(os.environ, env, clear=False), mock.patch("subprocess.run", ran):
+                for name in {"HERDR_SESSION", "HERDR_SOCKET_PATH"} - env.keys():
+                    os.environ.pop(name, None)
+                self.assertEqual(herdr_socket_path(), expected, env)
 
 
 class Proc(unittest.TestCase):

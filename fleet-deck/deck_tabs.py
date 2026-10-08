@@ -59,6 +59,8 @@ class Seen:
     present: bool
     moveto: bool | None = None
     harness: bool | None = None
+    # moveto's mode from its argv, when moveto runs: what the pane holds.
+    mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -77,9 +79,12 @@ class Track:
     `armed_at` and `armed_mode` are when and how the deck last started a
     moveto in the pane (monotonic seconds), None for a pane it found already
     running. `harness_seen` is whether a harness has appeared since.
-    `ended_here` marks an IDLE that follows a session in this pane, shown as
-    shell rather than dormant. `session_at` is when a session on the account
-    was first seen with no harness here yet."""
+    `ended_here` marks an IDLE whose pane holds the account's shell, not a
+    `--wait`, shown as shell rather than dormant. `session_at` is when a
+    session on the account was first seen with no harness here yet.
+    `quick_ends` counts the deck's own arms in a row that ended within
+    QUICK_EXIT_S with no harness; `halted` is a pane the deck stopped
+    re-arming after them."""
 
     state: State
     armed_at: float | None = None
@@ -87,6 +92,8 @@ class Track:
     harness_seen: bool = False
     ended_here: bool = False
     session_at: float | None = None
+    quick_ends: int = 0
+    halted: bool = False
 
 
 @dataclass(frozen=True)
@@ -95,6 +102,13 @@ class Arm:
 
     mode: str
 
+
+# A moveto the deck started that ends this soon with no harness did not get
+# going (sudo refused, the account is gone, enter failed). The first such end
+# is re-armed as the contract says; a second in a row stops the deck from
+# typing the same failing command again every few seconds.
+QUICK_EXIT_S = 15
+QUICK_ENDS_TO_HALT = 2
 
 # A harness that appears within this long of a session-up is that session:
 # the stream and the process walk see one start at slightly different times,
@@ -122,17 +136,26 @@ def step(track: Track, seen: Seen, live: Live | None, now: float) -> tuple[Track
         return track, None
     if seen.moveto is False:
         return _moveto_ended(track, live, now)
+    if track.halted:
+        # A person started moveto in the pane the deck had stopped re-arming.
+        track = Track(State.IDLE, armed_mode=seen.mode, ended_here=seen.mode == PLAIN)
     if seen.harness is None:
         return track, None
     if seen.harness:
         return replace(track, state=State.RUNNING, harness_seen=True, ended_here=False,
-                       session_at=None), None
+                       session_at=None, quick_ends=0), None
     count = live.count if live is not None else None
     if track.state is State.RUNNING:
-        # harness-down: the account's shell is still in the pane.
+        # harness-down: the account's shell is still in the pane. The stream
+        # reports the session's end a little after /proc shows it, so a
+        # session still up is "elsewhere" only once the window has passed.
         if count is not None and count >= 1:
-            return replace(track, state=State.ELSEWHERE), None
-        return replace(track, state=State.IDLE, ended_here=True), None
+            if track.session_at is None:
+                return replace(track, session_at=now), None
+            if now - track.session_at < SAME_SESSION_S:
+                return track, None
+            return replace(track, state=State.ELSEWHERE, session_at=None), None
+        return replace(track, state=State.IDLE, ended_here=True, session_at=None), None
     if count is None:
         return track, None
     if count == 0:
@@ -143,7 +166,8 @@ def step(track: Track, seen: Seen, live: Live | None, now: float) -> tuple[Track
                 return replace(track, state=State.FAILED), None
             return track, None
         if track.state is State.ELSEWHERE:
-            return replace(track, state=State.IDLE, ended_here=False), None
+            # The pane holds what it was armed with: a plain shell reads shell.
+            return replace(track, state=State.IDLE, ended_here=track.armed_mode == PLAIN), None
         # IDLE stays IDLE and FAILED stays FAILED: it behaves as IDLE, shown failed.
         return track, None
     if track.state is State.ELSEWHERE:
@@ -160,14 +184,21 @@ def step(track: Track, seen: Seen, live: Live | None, now: float) -> tuple[Track
 def _moveto_ended(track: Track, live: Live | None, now: float) -> tuple[Track, Arm | None]:
     if track.armed_at is not None and now - track.armed_at < ENTRY_GRACE_S:
         return track, None
+    if track.halted:
+        return track, None
+    quick = (track.armed_at is not None and track.armed_mode is not None
+             and not track.harness_seen and now - track.armed_at < QUICK_EXIT_S)
+    ends = track.quick_ends + 1 if quick else 0
+    if ends >= QUICK_ENDS_TO_HALT:
+        return Track(State.FAILED, quick_ends=ends, halted=True), None
     if live is not None and live.count >= 1:
-        return Track(State.ELSEWHERE, armed_at=now, armed_mode=PLAIN), Arm(PLAIN)
+        return Track(State.ELSEWHERE, armed_at=now, armed_mode=PLAIN, quick_ends=ends), Arm(PLAIN)
     # Failed only for a --resume this run of the deck started that produced no
     # harness: a --wait that ends may be a person's choice (the deck cannot see
     # Enter), and a pane it found running may have had a harness before.
     if track.armed_mode == RESUME and track.armed_at is not None and not track.harness_seen:
-        return Track(State.FAILED, armed_at=now, armed_mode=WAIT), Arm(WAIT)
-    return Track(State.IDLE, armed_at=now, armed_mode=WAIT), Arm(WAIT)
+        return Track(State.FAILED, armed_at=now, armed_mode=WAIT, quick_ends=ends), Arm(WAIT)
+    return Track(State.IDLE, armed_at=now, armed_mode=WAIT, quick_ends=ends), Arm(WAIT)
 
 
 def restore(before_live: bool, live: Live | None, now: float) -> tuple[Track, Arm]:
@@ -191,10 +222,10 @@ def classify(seen: Seen, live: Live | None) -> Track | None:
     if not seen.present or seen.moveto is not True or seen.harness is None:
         return None
     if seen.harness:
-        return Track(State.RUNNING, harness_seen=True)
+        return Track(State.RUNNING, armed_mode=seen.mode, harness_seen=True)
     if live is not None and live.count >= 1:
-        return Track(State.ELSEWHERE)
-    return Track(State.IDLE)
+        return Track(State.ELSEWHERE, armed_mode=seen.mode)
+    return Track(State.IDLE, armed_mode=seen.mode, ended_here=seen.mode == PLAIN)
 
 
 # ----------------------------------------------------------------- before
@@ -276,6 +307,8 @@ class Shown:
     person reads, from the contract's "the deck shows" column."""
 
     status: str
+    # The word in the agent row in place of herdr's agent name; empty while a
+    # harness runs, when herdr's own name ("claude") is the right one.
     label: str
 
 
@@ -283,10 +316,9 @@ def display(track: Track, live: Live | None) -> Shown:
     if live is None or not live.fresh:
         return Shown("unknown", "stale")
     if track.state is State.RUNNING:
-        # A harness whose session has not posted yet is starting: herdr's
-        # working, with no word of the deck's, until the session says more.
-        s = live.state if live.count >= 1 else "working"
-        return Shown(s, s)
+        # herdr's own agent name and the session's state; a harness whose
+        # session has not posted yet is starting: working.
+        return Shown(live.state if live.count >= 1 else "working", "")
     if track.state is State.STARTING:
         return Shown("working", "restoring")
     if track.state is State.ELSEWHERE:
@@ -350,9 +382,31 @@ def is_harness(argv: list[str]) -> bool:
     program = os.path.basename(argv[0])
     if program == "claude":
         return True
-    # The launcher is a Python running launch.py as its script (the first
-    # argument that is not an option), not any process naming the file.
+    # The launcher is a Python running launch.py as its script, not any
+    # process naming the file.
     if program != "fabric-python" and not program.startswith("python"):
         return False
-    script = next((arg for arg in argv[1:] if not arg.startswith("-")), "")
-    return script.endswith("/tools/fabric/launch.py")
+    return (_python_script(argv[1:]) or "").endswith("/tools/fabric/launch.py")
+
+
+# Python options that take the next argument as their value.
+_PYTHON_VALUE_OPTIONS = frozenset({"-X", "-W", "-Q"})
+
+
+def _python_script(args: list[str]) -> str | None:
+    """The script a Python command line runs: its first argument that is
+    neither an option nor an option's value. None for -c and -m."""
+    skip = False
+    for arg in args:
+        if skip:
+            skip = False
+            continue
+        if arg in ("-c", "-m"):
+            return None
+        if arg in _PYTHON_VALUE_OPTIONS:
+            skip = True
+            continue
+        if arg.startswith("-"):
+            continue
+        return arg
+    return None

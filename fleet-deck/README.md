@@ -35,11 +35,15 @@ deck's own login) gets its tab:
   harness and gains the shell and status panes.
 - **A tab split by hand** with no `harness` pane is left alone, and the
   deck says so once.
-- **The shell and status panes** are started when they are at the
-  operator's bare shell.
-- **A harness pane with moveto running** is classified and never touched.
-- **A harness pane at the operator's bare shell**, or just created, waits
-  5 s for the stream, then:
+- **The shell and status panes** are started once their shell is at its
+  prompt. A pane just created may still be running the operator's rc
+  file; one that never reaches its prompt within 120 s is left as it is,
+  said once.
+- **A harness pane running this account's moveto** is classified and
+  never touched.
+- **Any other harness pane** waits until it is at the operator's prompt,
+  and 5 s for the stream. That covers a bare pane, one just created, or
+  one still busy. Then:
   - if a session runs on the account now, it gets a plain `moveto`
     shell, so an Enter there cannot start a second session;
   - if the account's session was running before the restart and none
@@ -59,7 +63,8 @@ agent's name, so the deck's word goes in its place, and herdr's own
 | waiting for Enter | `idle` | `dormant` |
 | the account's shell after a session ended here | `idle` | `shell` |
 | a `--resume` the deck started, no harness yet | `working` | `restoring` |
-| a `--resume` that produced no harness | `blocked` | `failed` |
+| a `--resume` that produced no harness, or a moveto that ended at once twice | `blocked` | `failed` |
+| moveto has no `--wait` yet, so the harness pane is left at the operator's shell | `unknown` | `unknown` |
 | a session runs on the account, not in this pane | `unknown` | `running elsewhere` |
 | the account's record is older than two heartbeats | `unknown` | `stale` |
 
@@ -87,15 +92,24 @@ per change.
   --json`, this host's records only. The stream is restarted after 1, 2,
   5, 10, 30, then 60 s.
 - **herdr's server instance** is the pid at the socket's other end
-  (`SO_PEERCRED`) plus that process's start ticks. A different or
-  unreadable instance is a loss of herdr, and its next answer is a
-  restore.
+  (`SO_PEERCRED`) plus that process's start ticks.
+  - The socket is the one the deck's herdr commands reach: the session
+    `HERDR_SESSION` names, else `HERDR_SOCKET_PATH`, else herdr's default
+    session, each as `herdr session list --json` reports it.
+  - A different or unreadable instance is a loss of herdr, and its next
+    answer is a restore.
+  - A failing `moveto --list` is not a loss: the last tab map stays.
 - **What the deck does to panes:** it starts a fixed `moveto <account>
   [--wait|--resume|--watch]` only in the operator's own bare shell. While
   moveto runs, it never types into a pane, sends a key or closes one. A
   pane a person closes stays closed until the next restore.
 - **What the deck never does:** it never retries a failed `--resume`. One
   Enter in the re-armed `--wait` pane does that.
+- **A moveto that keeps failing:** when a moveto the deck started ends
+  within 15 s with no harness, twice in a row, the deck stops starting it.
+  The row reads `failed`, the deck says so once, and the pane's last lines
+  say why. A person who starts moveto in that pane is followed again, and
+  so is a restore.
 
 Until agent-fabric's activation PR puts `--wait`, `--watch` and
 `fabric-resume`'s second-session refusal on main, `moveto --help` does not

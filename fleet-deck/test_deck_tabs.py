@@ -5,6 +5,7 @@ import unittest
 
 from deck_tabs import (
     ENTRY_GRACE_S,
+    QUICK_EXIT_S,
     SAME_SESSION_S,
     SETTLE_S,
     Before,
@@ -65,6 +66,10 @@ class Harness(unittest.TestCase):
         self.assertEqual((track.state, track.ended_here, arm), (State.IDLE, True, None))
         self.assertEqual(display(track, NONE), Shown("idle", "shell"))
         track, arm = step(running, NO_HARNESS, ONE, 1)
+        self.assertEqual((track.state, arm), (State.RUNNING, None), "the stream may not have caught up")
+        ended, _ = step(track, NO_HARNESS, NONE, 2)
+        self.assertEqual((ended.state, display(ended, NONE).label), (State.IDLE, "shell"))
+        track, arm = step(track, NO_HARNESS, ONE, 1 + SAME_SESSION_S)
         self.assertEqual((track.state, arm), (State.ELSEWHERE, None))
 
 
@@ -82,9 +87,13 @@ class Sessions(unittest.TestCase):
         self.assertEqual(track.state, State.RUNNING)
 
     def test_session_down_from_elsewhere_is_idle_shown_dormant(self):
-        track, arm = step(Track(State.ELSEWHERE), NO_HARNESS, NONE, 1)
+        track, arm = step(Track(State.ELSEWHERE, armed_mode=WAIT), NO_HARNESS, NONE, 1)
         self.assertEqual((track.state, arm), (State.IDLE, None))
         self.assertEqual(display(track, NONE), Shown("idle", "dormant"))
+
+    def test_session_down_in_a_pane_holding_a_plain_shell_reads_shell(self):
+        track, _ = step(Track(State.ELSEWHERE, armed_mode=PLAIN), NO_HARNESS, NONE, 1)
+        self.assertEqual(display(track, NONE), Shown("idle", "shell"), "Enter there activates nothing")
 
     def test_failed_stays_failed_while_nothing_runs(self):
         track, _ = step(Track(State.FAILED), NO_HARNESS, NONE, 1)
@@ -132,6 +141,28 @@ class MovetoEnded(unittest.TestCase):
     def test_a_pane_the_deck_found_running_is_rearmed_wait_when_moveto_ends(self):
         track, arm = step(Track(State.IDLE), BARE, NONE, 50)
         self.assertEqual((track.state, arm), (State.IDLE, Arm(WAIT)))
+
+
+class QuickExits(unittest.TestCase):
+    def test_a_moveto_that_ends_at_once_twice_in_a_row_is_halted_failed(self):
+        track = Track(State.IDLE, armed_at=0, armed_mode=WAIT)
+        track, arm = step(track, BARE, NONE, ENTRY_GRACE_S)
+        self.assertEqual((track.state, arm, track.quick_ends), (State.IDLE, Arm(WAIT), 1),
+                         "the first is re-armed, as the contract says")
+        track, arm = step(track, BARE, NONE, 2 * ENTRY_GRACE_S)
+        self.assertEqual((track.state, arm, track.halted), (State.FAILED, None, True))
+        self.assertEqual(step(track, BARE, NONE, 100), (track, None), "never typed again")
+        self.assertEqual(display(track, NONE), Shown("blocked", "failed"))
+
+    def test_an_end_after_the_quick_window_or_a_harness_resets_the_count(self):
+        track = Track(State.IDLE, armed_at=0, armed_mode=WAIT, quick_ends=1)
+        track, arm = step(track, BARE, NONE, QUICK_EXIT_S)
+        self.assertEqual((track.quick_ends, arm), (0, Arm(WAIT)))
+
+    def test_a_person_starting_moveto_in_a_halted_pane_is_followed_again(self):
+        halted = Track(State.FAILED, quick_ends=2, halted=True)
+        track, _ = step(halted, Seen(present=True, moveto=True, harness=False, mode=WAIT), NONE, 1)
+        self.assertEqual((track.state, track.halted), (State.IDLE, False))
 
 
 class Unknown(unittest.TestCase):
@@ -204,14 +235,16 @@ class Classify(unittest.TestCase):
         self.assertEqual(classify(HARNESS_HERE, NONE).state, State.RUNNING)
         self.assertEqual(classify(NO_HARNESS, ONE), Track(State.ELSEWHERE))
         self.assertEqual(classify(NO_HARNESS, NONE), Track(State.IDLE))
+        plain = Seen(present=True, moveto=True, harness=False, mode=PLAIN)
+        self.assertEqual(display(classify(plain, NONE), NONE).label, "shell")
         self.assertIsNone(classify(BARE, NONE))
         self.assertIsNone(classify(Seen(present=True, moveto=True), NONE))
 
 
 class Display(unittest.TestCase):
     def test_each_state_reads_as_the_contract_says(self):
-        self.assertEqual(display(Track(State.RUNNING), Live(2, "blocked", True)), Shown("blocked", "blocked"))
-        self.assertEqual(display(Track(State.RUNNING), NONE), Shown("working", "working"))
+        self.assertEqual(display(Track(State.RUNNING), Live(2, "blocked", True)), Shown("blocked", ""))
+        self.assertEqual(display(Track(State.RUNNING), NONE), Shown("working", ""))
         self.assertEqual(display(Track(State.STARTING), NONE), Shown("working", "restoring"))
         self.assertEqual(display(Track(State.ELSEWHERE), ONE), Shown("unknown", "running elsewhere"))
 
@@ -240,6 +273,12 @@ class Foreground(unittest.TestCase):
         self.assertIsNone(moveto_in([(5, ["sudo", "-n", "-u", "other", "-H", ENTER, "d", "t"])], "ui"))
         self.assertIsNone(moveto_in([(5, ["sudo", "-u", "ui", "vim"])], "ui"))
         self.assertIsNone(moveto_in([(5, ["vim"]), (6, [])], "ui"))
+
+    def test_a_python_option_and_its_value_are_not_the_script(self):
+        launch = "/home/ui/projects/agent-fabric/tools/fabric/launch.py"
+        self.assertTrue(is_harness(["python3", "-X", "utf8", "-I", launch]))
+        self.assertFalse(is_harness(["python3", "other.py", launch]))
+        self.assertFalse(is_harness(["python3", "-c", "import x", launch]))
 
     def test_the_launcher_and_claude_are_the_harness_and_a_shell_is_not(self):
         launch = ["/usr/local/bin/fabric-python", "-I",
