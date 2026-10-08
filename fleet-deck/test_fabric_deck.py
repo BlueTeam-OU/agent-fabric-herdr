@@ -152,6 +152,7 @@ class FakeHerdr(Herdr):
         self.n = 0
         self.new_pane = BARE
         self.workspace_lists_ok = None  # after this many, `workspace list` fails
+        self.fail_once = set()  # (subcommand, pane) pairs whose next call fails
 
     def _id(self, kind):
         self.n += 1
@@ -176,6 +177,10 @@ class FakeHerdr(Herdr):
             raise ConnectionError("herdr's socket refuses")
         self.calls.append(args)
         head = args[:2]
+        target = args[3] if head == ("pane", "process-info") else (args[2] if len(args) > 2 else None)
+        if (head[1], target) in self.fail_once:
+            self.fail_once.discard((head[1], target))
+            raise RuntimeError(f"herdr {' '.join(args)}: exit 1: server_unavailable")
         if head == ("workspace", "list"):
             if self.workspace_lists_ok is not None:
                 if self.workspace_lists_ok == 0:
@@ -316,7 +321,8 @@ class Restore(unittest.TestCase):
         h = Harness(herdr)
         h.records["ui"] = record("ui")
         h.deck.restore(0)
-        self.assertEqual(h.deck.waiting, {})
+        h.deck.follow(1)
+        self.assertEqual(h.deck.waiting, {}, "dropped at the first look")
         for at in range(1, RESTORE_WAIT_S + 10, 2):
             h.deck.follow(at)
         self.assertFalse(any("busy" in line for line in h.logs))
@@ -340,6 +346,31 @@ class Restore(unittest.TestCase):
         h.instance = OTHER  # a later restart is said again
         h.deck.follow(52)
         self.assertEqual(h.logs.count("herdr's server answers: restoring"), 2)
+
+    def test_a_failed_look_at_a_pane_during_restore_still_leaves_the_decision_to_come(self):
+        for failing in ("p1", "p3", "p4"):  # the harness, the shell, the status pane
+            h = Harness(befores={"ui": Before(running=True)})
+            h.records["ui"] = record("ui")
+            h.herdr.fail_once = {("process-info", failing)}
+            h.deck.restore(0)
+            for at in (1, RESTORE_SETTLE_S, RESTORE_SETTLE_S + 2):
+                h.deck.follow(h.at(at))
+            self.assertFalse(h.herdr.fail_once, f"{failing}'s look failed once")
+            self.assertEqual(sorted(h.herdr.runs()), ["moveto ui", "moveto ui --resume", "moveto ui --watch"],
+                             failing)
+
+    def test_an_account_whose_restore_failed_part_way_is_restored_again(self):
+        h = Harness(befores={"ui": Before(running=True)})
+        h.records["ui"] = record("ui")
+        h.herdr.fail_once = {("split", "p1")}
+        h.deck.restore(0)
+        self.assertEqual(h.deck.retry, {"ui"})
+        h.deck.follow(h.at(PANE_MAP_REFRESH_S))
+        h.deck.follow(h.at(PANE_MAP_REFRESH_S + RESTORE_SETTLE_S))
+        h.deck.follow(h.at(PANE_MAP_REFRESH_S + RESTORE_SETTLE_S + 2))
+        self.assertEqual(h.deck.retry, set())
+        self.assertEqual(sorted(p["label"] for p in h.herdr.panes.values()), ["harness", "shell", "status"])
+        self.assertIn("moveto ui --resume", h.herdr.runs(harness_of(h)))
 
     def test_a_herdr_failure_while_restoring_leaves_the_deck_waiting_not_dead(self):
         h = Harness()

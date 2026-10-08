@@ -436,6 +436,8 @@ class Deck:
     # Accounts whose live = 0 dates from before their restore decision: no fall
     # is noted for them until a session has been seen up again.
     unsettled: set[str] = field(default_factory=set)
+    # Accounts whose restore failed part-way, restored again at the next map read.
+    retry: set[str] = field(default_factory=set)
     # (login, pane, mode) -> since when a shell or status pane waits to be bare
     waiting: dict[tuple[str, str, str], float] = field(default_factory=dict)
     # login -> (what the panel shows, when it was sent)
@@ -451,13 +453,13 @@ class Deck:
 
     # ------------------------------------------------------------ restore
 
-    def restore(self, now: float) -> None:
+    def restore(self, now: float, only: set[str] | None = None) -> None:
         """Every placed account gets its tab and panes. A harness pane with
         moveto running is classified and never re-armed; one at the
         operator's bare shell, or just created, waits for the restore
         decision."""
         try:
-            self._restore(now)
+            self._restore(now, only)
         except Exception as error:  # herdr failing while it comes back must not end the deck
             self._say("restore-failed", f"cannot restore yet: {printable(str(error))}; trying again")
             self.lost = True
@@ -466,7 +468,7 @@ class Deck:
             # Said once per loss: a later loss and restore are said again.
             self.said -= {"restoring", "restore-failed"}
 
-    def _restore(self, now: float) -> None:
+    def _restore(self, now: float, only: set[str] | None = None) -> None:
         if not self.loaded:
             self._load()
         accounts = self._accounts()
@@ -480,11 +482,15 @@ class Deck:
         spare: list[str] = []
         try:
             for account in accounts:
+                if only is not None and account.login not in only:
+                    continue
                 try:
                     self._restore_account(account, tabs.get(account.login), workspace_labels,
                                           first_setup, spare, now)
+                    self.retry.discard(account.login)
                 except Exception as error:  # one account's failure must not stop the others
-                    self.log(f"{account.login}: cannot restore its tab: {printable(str(error))}")
+                    self.log(f"{account.login}: cannot restore its tab yet: {printable(str(error))}")
+                    self.retry.add(account.login)
         finally:
             for tab_id in spare:
                 try:
@@ -518,23 +524,24 @@ class Deck:
             panes[SHELL] = self._split(harness, "right", HARNESS_RATIO, SHELL)
         if STATUS not in panes:
             panes[STATUS] = self._split(panes[SHELL], "down", 0.5, STATUS)
+        # Everything the restore owes this account is recorded before the
+        # first observation, so a herdr call failing below leaves it waiting
+        # for its decision, never followed half-restored. The harness waits
+        # for the decision at its prompt, the shell and status panes to be
+        # started at theirs; decide_pending drops whichever turns out to run
+        # this account's moveto already.
         self.harness_pane[login] = harness
-        for role, mode in ((SHELL, PLAIN), (STATUS, WATCH)):
-            # Started once its shell is at the prompt: a pane just created may
-            # still be running the operator's rc file. One already running this
-            # account's moveto is left as it is.
-            if self.observe(login, panes[role]).moveto is not True:
-                self.waiting[(login, panes[role], mode)] = now
-        seen = self.observe(login, harness)
-        if seen.moveto is True:
-            # The account's moveto holds the pane: classified, never re-armed.
-            self.tracks[login] = classify(seen, self.live(login)) or Track(State.IDLE)
-            return
-        # Bare, just created, or still busy: the restore decision is taken
-        # once it is at the operator's prompt and the stream has settled.
         self.pending[login] = now
         self.unsettled.add(login)
         self.tracks[login] = Track(State.IDLE)
+        for role, mode in ((SHELL, PLAIN), (STATUS, WATCH)):
+            self.waiting[(login, panes[role], mode)] = now
+        seen = self.observe(login, harness)
+        if seen.moveto is True:
+            # The account's moveto holds the pane: classified, never re-armed.
+            del self.pending[login]
+            self.unsettled.discard(login)
+            self.tracks[login] = classify(seen, self.live(login)) or Track(State.IDLE)
 
     def _split(self, pane: str, direction: str, ratio: float, label: str) -> str:
         made = self.herdr.call("pane", "split", pane, "--direction", direction,
@@ -606,6 +613,8 @@ class Deck:
         if self.lost or self.mapped_at is None or now - self.mapped_at >= PANE_MAP_REFRESH_S:
             if not self._refresh(now):
                 return
+            if self.retry:
+                self.restore(now, only=set(self.retry))
         self.decide_pending(now)
         self._note_befores(server)
         parents = self.parents()
@@ -655,6 +664,9 @@ class Deck:
             self.restore(now)
             return not self.lost
         self.placed = {a.login for a in accounts}
+        listed = {pane for tab in tabs.values() for pane in tab.panes.values()}
+        for key in [k for k in self.waiting if k[1] not in listed]:
+            del self.waiting[key]  # closed by a person: re-created only at a restore
         for login in list(self.harness_pane):
             tab = tabs.get(login)
             if tab is None or tab.panes.get(HARNESS) != self.harness_pane[login]:
