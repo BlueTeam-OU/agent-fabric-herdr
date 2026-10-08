@@ -1,17 +1,20 @@
 """Fleet Deck: the operator's console over the fleet, on herdr.
 
-One herdr tab per agent account, each entered with `moveto <account>`. The
-deck's first duty is recovery: after a herdr server restart every account tab
-comes back as a bare operator shell (the agent and its moveto session died
-with the server), and the deck re-enters each one.
+One herdr tab per agent account, labelled with its login, holding three
+panes: the harness (moveto <account> --wait, activated by one Enter), the
+account's shell, and its status. The deck restores the tabs after a herdr or
+host restart and then follows them, showing each harness pane's state in
+herdr's agent panel.
 
 The deck owns no session ids. The control plane owns which session belongs to
-which account; herdr keeps only the layout; the deck compares the two and acts
-on the tabs (agent-fabric plan, decisions 1 to 5, 2026-10-07).
+which account; herdr keeps only the layout; moveto and fabric-resume start
+sessions. The deck observes the panes and the state stream and acts on the
+tabs only by starting a fixed moveto in the operator's own bare shell
+(agent-fabric docs/fleet-deck/tab-states.md, #115).
 
-The planning core is pure: it takes what herdr, moveto and the control plane
-report and returns actions, so it is tested without a server. The adapters at
-the bottom run the real commands.
+The states and decisions are pure (deck_tabs.py); the `Deck` runs them with
+herdr, the stream and /proc injected, so its rules are tested without a
+server. The adapters at the bottom run the real commands.
 """
 
 from __future__ import annotations
@@ -19,73 +22,57 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
+from deck_tabs import (
+    HARNESS,
+    HARNESS_RATIO,
+    MODES,
+    PANE_ROLES,
+    PLAIN,
+    RESTORE_WAIT_S,
+    RESUME,
+    SHELL,
+    STATUS,
+    WAIT,
+    WATCH,
+    Before,
+    Live,
+    Seen,
+    Shown,
+    State,
+    Track,
+    at_start,
+    before_live,
+    classify,
+    display,
+    is_harness,
+    live_from_record,
+    lost,
+    moveto_in,
+    note_live,
+    restore,
+    settle,
+    step,
+)
+
 # The workspace an account goes to when the catalogue names no group for it,
 # or when its group's workspace no longer exists (the operator removed it).
 NEW_WORKSPACE = "New"
+
+# A login is typed into the operator's shell as part of a moveto command, so
+# only a plain Linux login is ever used; anything else is skipped, said.
+SAFE_LOGIN = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
 
 @dataclass(frozen=True)
 class Account:
     login: str
     role: str
-
-
-@dataclass(frozen=True)
-class AccountTab:
-    """A herdr tab whose label is an account login, with its root pane."""
-
-    login: str
-    tab_id: str
-    workspace_id: str
-    pane_id: str
-    # A split account tab is the operator's arrangement; the deck cannot tell
-    # which pane is the account's, so it does not type into any of them.
-    pane_count: int = 1
-
-
-@dataclass(frozen=True)
-class PaneProcess:
-    """herdr's `pane.process_info` for one pane."""
-
-    shell_pid: int | None
-    foreground_process_group_id: int | None
-    foreground_names: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class CreateTab:
-    login: str
-    workspace_label: str
-
-
-@dataclass(frozen=True)
-class Reenter:
-    login: str
-    pane_id: str
-
-
-@dataclass(frozen=True)
-class Leave:
-    """The tab is occupied (its moveto session runs): nothing to do."""
-
-    login: str
-    pane_id: str
-
-
-@dataclass(frozen=True)
-class Undetermined:
-    """herdr could not say what runs in the pane; the deck does not guess."""
-
-    login: str
-    pane_id: str
-
-
-Action = CreateTab | Reenter | Leave | Undetermined
 
 
 def parse_moveto_list(text: str, exclude: Iterable[str]) -> list[Account]:
@@ -99,18 +86,6 @@ def parse_moveto_list(text: str, exclude: Iterable[str]) -> list[Account]:
     return accounts
 
 
-def is_bare_shell(process: PaneProcess) -> bool | None:
-    """Whether the pane is only its shell, waiting at a prompt.
-
-    A bare shell is its own foreground process group; a moveto session puts
-    sudo, and then the account's shell, in the foreground instead. Measured
-    on herdr 0.9.3 (fork 99d4887a). None when herdr could not tell.
-    """
-    if process.shell_pid is None or process.foreground_process_group_id is None:
-        return None
-    return process.foreground_process_group_id == process.shell_pid
-
-
 def seed_workspace(role: str, catalog: dict | None) -> str:
     """The workspace the role catalogue seeds for a role, or NEW_WORKSPACE."""
     if not catalog:
@@ -122,83 +97,41 @@ def seed_workspace(role: str, catalog: dict | None) -> str:
     return NEW_WORKSPACE
 
 
-def plan(
-    accounts: list[Account],
-    tabs: list[AccountTab],
-    processes: dict[str, PaneProcess],
-    workspace_labels: set[str],
-    catalog: dict | None,
-) -> list[Action]:
-    """What the deck does for each account, in `accounts` order.
-
-    - No tab for the account: create one. The catalogue's group is used only
-      when the deck sets up a host for the first time (no account has a tab
-      yet). After that, a new account goes to its group's workspace if the
-      operator kept one, else to NEW_WORKSPACE: the operator's layout is the
-      truth and is never re-seeded.
-    - A tab that is a bare shell: re-enter it with moveto.
-    - A tab whose foreground is something else: leave it.
-    The first tab carrying a login wins; a duplicate is the operator's to sort
-    out, not the deck's to close.
-    """
-    by_login: dict[str, AccountTab] = {}
-    for tab in tabs:
-        by_login.setdefault(tab.login, tab)
-    first_setup = not any(account.login in by_login for account in accounts)
-
-    actions: list[Action] = []
-    for account in accounts:
-        tab = by_login.get(account.login)
-        if tab is not None and tab.pane_count != 1:
-            actions.append(Undetermined(account.login, tab.pane_id))
-            continue
-        if tab is None:
-            seeded = seed_workspace(account.role, catalog)
-            workspace = (
-                seeded if first_setup or seeded in workspace_labels else NEW_WORKSPACE
-            )
-            actions.append(CreateTab(account.login, workspace))
-            continue
-        bare = is_bare_shell(processes.get(tab.pane_id, PaneProcess(None, None)))
-        if bare is None:
-            actions.append(Undetermined(account.login, tab.pane_id))
-        elif bare:
-            actions.append(Reenter(account.login, tab.pane_id))
-        else:
-            actions.append(Leave(account.login, tab.pane_id))
-    return actions
+# ------------------------------------------------------------------ layout
 
 
-def reenter_command(login: str, moveto_has_resume: bool) -> str:
-    """The command typed into a bare account tab.
-
-    `moveto <account> --resume` lets the account's own launcher resume its
-    last session; until moveto has that flag, plain `moveto <account>` brings
-    the tab back into its account, and the session is resumed by hand.
-    """
-    return f"moveto {login} --resume" if moveto_has_resume else f"moveto {login}"
+@dataclass(frozen=True)
+class PaneInfo:
+    pane_id: str
+    tab_id: str
+    label: str | None
 
 
-# ----------------------------------------------------------------- statuses
+@dataclass(frozen=True)
+class AccountTab:
+    """A herdr tab whose label is an account login, and its panes by role.
+    `adopt` is a single unlabelled pane (a milestone-1 tab) to label as the
+    harness; `undetermined` is a tab the operator split by hand, whose panes
+    the deck cannot tell apart and so never touches."""
 
-# How long an account may stay restoring before the deck calls it failed: the
-# daemon upgrade's stop budget (90 s) plus a launcher's start (architect-cto,
-# 2026-10-08). The owner may change it; the deck prints it beside the status.
-RESTORE_WAIT_S = 120
-
-LIVE_STATES = frozenset({"working", "idle"})
-
-# The stream posts on every change and every ten minutes; a record older than
-# two heartbeats means the account's agent stopped answering (agent-fabric
-# docs/fleet-deck/session-recovery.md, decision 5).
-STALE_AFTER_S = 2 * 600
+    login: str
+    tab_id: str
+    workspace_id: str
+    panes: dict[str, str]
+    adopt: str | None = None
+    undetermined: bool = False
 
 
-# A bare pane this soon after the deck typed into it is the shell not yet
-# having started moveto, not moveto having exited.
-ENTRY_GRACE_S = 5
+def read_tab(login: str, tab_id: str, workspace_id: str, panes: list[PaneInfo]) -> AccountTab:
+    by_role = {p.label: p.pane_id for p in panes if p.label in PANE_ROLES}
+    if HARNESS in by_role:
+        return AccountTab(login, tab_id, workspace_id, by_role)
+    if len(panes) == 1 and not panes[0].label:
+        return AccountTab(login, tab_id, workspace_id, by_role, adopt=panes[0].pane_id)
+    return AccountTab(login, tab_id, workspace_id, by_role, undetermined=True)
 
-ONE_SECOND = datetime.timedelta(seconds=1)
+
+# ------------------------------------------------------------- the stream
 
 
 @dataclass(frozen=True)
@@ -219,8 +152,6 @@ class StateRecord:
     # The host part of the stream's address: fabric-ctl all states reports
     # every host, and the same login may exist on more than one.
     host: str = ""
-    # agent-fabric ADR-029 rule 16, amended 2026-10-08; absent from an older
-    # agentd's record, in which case the deck re-enters regardless.
     last_session: str | None = None
     resumable: bool | None = None
 
@@ -263,8 +194,6 @@ def text_or(value, default):
 
 
 def parse_utc(stamp):
-    import datetime
-
     if not isinstance(stamp, str):
         return None
     try:
@@ -280,73 +209,14 @@ def for_this_host(record: StateRecord | None, host: str | None) -> bool:
     return record is not None and (host is None or record.host == host)
 
 
-def baselines_from_snapshot(
-    lines: Iterable[str], host: str | None = None
-) -> dict[str, frozenset[str]]:
-    """Per account, the sessions live in a snapshot taken before the deck acts:
-    sessions elsewhere, which its re-entry cannot have started. The account's
-    last_session is never part of it: bringing that session back is what the
-    deck waits for, and a record from before the restart may still list it."""
-    baselines: dict[str, frozenset[str]] = {}
-    for line in lines:
-        record = parse_state_line(line)
-        if not for_this_host(record, host):
-            continue
-        baselines[record.login] = frozenset(
-            s.session for s in record.sessions
-            if s.state in LIVE_STATES and s.session != record.last_session
-        )
-    return baselines
-
-
-def newer_live_sessions(
-    record: StateRecord | None, acted_at: str, baseline: frozenset[str] = frozenset()
-) -> list[Session]:
-    """Sessions the deck's re-entry may have started: live, in their state
-    since after the action, and not already live before it (`baseline`). A
-    session's `since` is a state change, not a start, so an older session
-    turning working after the action is excluded by the baseline, not by time."""
-    acted = parse_utc(acted_at)
-    if record is None or acted is None:
-        return []
-    return [
-        s for s in record.sessions
-        if s.state in LIVE_STATES
-        and s.session not in baseline
-        # Stamps are whole seconds: a session that went live in the second of
-        # the action counts; one live before it is in the baseline instead. A
-        # session whose since cannot be read is never counted as the deck's.
-        and (parse_utc(s.since) or acted - ONE_SECOND) >= acted
-    ]
-
-
-def recovery_status(
-    acted_at: str,
-    now: str,
-    elapsed_s: float,
-    record: StateRecord | None,
-    pane_bare: bool | None,
-    pane_last_line: str = "",
-    baseline: frozenset[str] = frozenset(),
-) -> str:
-    """The status of an account tab the deck re-entered (decision 5).
-    `baseline` holds the account's sessions live before the action."""
-    posted, current = (parse_utc(record.ts) if record else None), parse_utc(now)
-    if posted is None or current is None or (current - posted).total_seconds() > STALE_AFTER_S:
-        return "stale"
-    # The deck's re-entry runs in the pane: once the pane is a bare shell again
-    # it has ended, whatever other sessions of the account do elsewhere.
-    if pane_bare and elapsed_s >= ENTRY_GRACE_S:
-        return "failed"
-    newer = newer_live_sessions(record, acted_at, baseline)
-    if newer and not pane_bare:
-        if record.last_session is not None:
-            return "resumed" if any(s.session == record.last_session for s in newer) else "fresh"
-        # An older agentd names no last_session: fabric-resume says which it did.
-        return "fresh" if "fresh" in pane_last_line.lower() else "resumed"
-    if elapsed_s >= RESTORE_WAIT_S:
-        return "failed"
-    return "restoring"
+def live_of(record: StateRecord | None, now_utc: datetime.datetime) -> Live | None:
+    if record is None:
+        return None
+    posted = parse_utc(record.ts)
+    if posted is None:
+        return None
+    age = (now_utc - posted).total_seconds()
+    return live_from_record([(s.session, s.state) for s in record.sessions], age)
 
 
 def printable(text: str) -> str:
@@ -354,32 +224,540 @@ def printable(text: str) -> str:
     return "".join(ch for ch in text if ch == "\t" or (ch.isprintable() and ord(ch) >= 0x20))
 
 
-# ------------------------------------------------------------ agent status
+# ------------------------------------------------------- the process walk
 
-# Milestone 2: the fleet's state shown in herdr's agent panel, reported by the
-# deck from the state stream (fabric-coordinator's request 01a11442-6e06).
+
+def proc_parents(proc_root: str = "/proc") -> dict[int, int]:
+    """pid -> parent pid, from each process's `stat`. Only `stat` is read here:
+    another account's processes are walked, never inspected."""
+    parents: dict[int, int] = {}
+    try:
+        names = os.listdir(proc_root)
+    except OSError:
+        return parents
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            with open(os.path.join(proc_root, name, "stat"), encoding="utf-8", errors="replace") as f:
+                stat = f.read()
+        except OSError:
+            continue  # gone since the listing
+        # "pid (comm) state ppid ...": comm may hold spaces and parentheses.
+        fields = stat[stat.rfind(")") + 2:].split()
+        if len(fields) > 1 and fields[1].isdigit():
+            parents[int(name)] = int(fields[1])
+    return parents
+
+
+def proc_argv(pid: int, proc_root: str = "/proc") -> list[str]:
+    """A descendant's `cmdline`, the one other file of another account's
+    process the deck reads (fabric-coordinator, 01a11ab6-46f3)."""
+    try:
+        with open(os.path.join(proc_root, str(pid), "cmdline"), "rb") as f:
+            raw = f.read()
+    except OSError:
+        return []
+    return [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
+
+
+def harness_under(root: int, parents: dict[int, int], argv: Callable[[int], list[str]]) -> bool:
+    """Whether a harness runs among the descendants of `root` (a pane's
+    moveto sudo). sudo runs the account in a pty of its own (use_pty), so
+    the harness is never in the pane's foreground and is found here instead
+    (measured live, GZCoord seq 22145)."""
+    children: dict[int, list[int]] = {}
+    for pid, parent in parents.items():
+        children.setdefault(parent, []).append(pid)
+    queue, seen = list(children.get(root, [])), set()
+    while queue:
+        pid = queue.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        if is_harness(argv(pid)):
+            return True
+        queue.extend(children.get(pid, []))
+    return False
+
+
+# ------------------------------------------------------------ the record
+
+
+def load_befores(path: str) -> dict[str, Before] | None:
+    """The deck's record of whether each account's session was running, read
+    only at a restore. None when there is none yet (a first run); an entry
+    of the wrong shape is read as absent."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except OSError:
+        return None
+    except ValueError:
+        return {}
+    accounts = data.get("accounts") if isinstance(data, dict) else None
+    if not isinstance(accounts, dict):
+        return {}
+    befores = {}
+    for login, entry in accounts.items():
+        if not isinstance(entry, dict) or not isinstance(entry.get("running"), bool):
+            continue
+        fall_at, server = entry.get("fall_at"), entry.get("fall_server")
+        pending = (isinstance(fall_at, (int, float)) and isinstance(server, list) and len(server) == 2
+                   and all(isinstance(x, int) for x in server))
+        befores[login] = Before(entry["running"], fall_at if pending else None,
+                                tuple(server) if pending else None)
+    return befores
+
+
+def save_befores(path: str, befores: dict[str, Before]) -> None:
+    """Written whole and renamed into place, readable only by the operator: it
+    holds a login, whether its session was running, and a pending fall's time
+    and herdr server, nothing else."""
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    data = {"accounts": {
+        login: {"running": b.running, "fall_at": b.fall_at,
+                "fall_server": list(b.fall_server) if b.fall_server else None}
+        for login, b in befores.items()
+    }}
+    tmp = f"{path}.{os.getpid()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(data, f, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def befores_path() -> str:
+    state = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return os.path.join(state, "fabric-deck", "before.json")
+
+
+# ------------------------------------------------------------- the server
+
+
+def herdr_socket_path() -> str | None:
+    """The socket the deck's herdr commands reach: HERDR_SOCKET_PATH, or the
+    default session's, as herdr itself lists it (never re-derived here)."""
+    if os.environ.get("HERDR_SOCKET_PATH"):
+        return os.environ["HERDR_SOCKET_PATH"]
+    try:
+        result = subprocess.run(["herdr", "session", "list", "--json"],
+                                capture_output=True, text=True, timeout=30)
+        sessions = json.loads(result.stdout).get("result", json.loads(result.stdout)).get("sessions", [])
+    except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
+        return None
+    return next((s.get("socket_path") for s in sessions if isinstance(s, dict) and s.get("default")), None)
+
+
+def server_instance(path: str | None, proc_root: str = "/proc") -> tuple[int, int] | None:
+    """herdr's server instance: the pid at the socket's other end
+    (SO_PEERCRED) and that process's raw start time in clock ticks (field 22
+    of its stat), so a server restarted under a reused pid is still another
+    instance. None when the socket does not answer or the process cannot be
+    read, which the deck treats as a loss."""
+    import socket
+    import struct
+
+    if not path:
+        return None
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(5)
+            sock.connect(path)
+            cred = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+    except OSError:
+        return None
+    pid = struct.unpack("3i", cred)[0]
+    ticks = start_ticks(pid, proc_root)
+    return (pid, ticks) if ticks is not None else None
+
+
+def start_ticks(pid: int, proc_root: str = "/proc") -> int | None:
+    try:
+        with open(os.path.join(proc_root, str(pid), "stat"), encoding="utf-8", errors="replace") as f:
+            stat = f.read()
+    except OSError:
+        return None
+    fields = stat[stat.rfind(")") + 2:].split()
+    # starttime is the 22nd field of stat, the 20th after "pid (comm)".
+    return int(fields[19]) if len(fields) > 19 and fields[19].isdigit() else None
+
+
+# ---------------------------------------------------------------- the deck
+
 AGENT_SOURCE = "fabric"
 AGENT_LABEL = "claude"
-REPORTED_STATES = frozenset({"working", "idle", "blocked", "unknown"})
+# How often the deck looks at every harness pane.
+POLL_S = 2
+# How long a restore waits for the changes the restart caused to reach the
+# stream (one STATE_POLL_MS plus a margin) before it trusts a fresh record.
+RESTORE_SETTLE_S = 5
+# The account list and the tab map are read again this often.
+PANE_MAP_REFRESH_S = 10
+# Every pane's report is sent again after this long even when nothing
+# changed, so a herdr server restarted with the same pane ids (which
+# forgets every report) is put right.
+RESEND_AFTER_S = 600
 
 
-@dataclass(frozen=True)
-class Report:
-    state: str
+@dataclass
+class Deck:
+    """Restores the account tabs and follows their harness panes. herdr, the
+    account list, the stream's records, /proc, the record of what was shown,
+    the clock and the log are injected."""
+
+    herdr: "Herdr"
+    accounts: Callable[[], list[Account]]
+    # Written by the stream's thread, one whole record per assignment.
+    records: dict[str, StateRecord]
+    modes: frozenset[str]
+    cwd: str
+    catalog: dict | None
+    parents: Callable[[], dict[int, int]]
+    argv: Callable[[int], list[str]]
+    load: Callable[[], dict[str, Before] | None]
+    save: Callable[[dict[str, Before]], None]
+    server: Callable[[], tuple[int, int] | None]
+    log: Callable[[str], None]
+    utc: Callable[[], datetime.datetime] = field(
+        default=lambda: datetime.datetime.now(datetime.timezone.utc)
+    )
+    tracks: dict[str, Track] = field(default_factory=dict)
+    harness_pane: dict[str, str] = field(default_factory=dict)
+    # login -> when its harness pane began waiting for the restore decision
+    pending: dict[str, float] = field(default_factory=dict)
+    # login -> (what the panel shows, when it was sent)
+    sent: dict[str, tuple[Shown, float]] = field(default_factory=dict)
+    befores: dict[str, Before] = field(default_factory=dict)
+    loaded: bool = False
+    instance: tuple[int, int] | None = None
+    placed: set[str] = field(default_factory=set)
+    unarmed: set[str] = field(default_factory=set)
+    said: set[str] = field(default_factory=set)
+    mapped_at: float | None = None
+    lost: bool = False
+
+    # ------------------------------------------------------------ restore
+
+    def restore(self, now: float) -> None:
+        """Every placed account gets its tab and panes. A harness pane with
+        moveto running is classified and never re-armed; one at the
+        operator's bare shell, or just created, waits for the restore
+        decision."""
+        if not self.loaded:
+            self._load()
+        accounts = self._accounts()
+        tabs = self._tabs({a.login for a in accounts}) if accounts is not None else None
+        if tabs is None:
+            self.lost = True
+            return
+        self.placed = {a.login for a in accounts}
+        workspace_labels = {w.get("label") for w in self.herdr.workspaces()}
+        first_setup = not tabs
+        spare: list[str] = []
+        try:
+            for account in accounts:
+                try:
+                    self._restore_account(account, tabs.get(account.login), workspace_labels,
+                                          first_setup, spare, now)
+                except Exception as error:  # one account's failure must not stop the others
+                    self.log(f"{account.login}: cannot restore its tab: {printable(str(error))}")
+        finally:
+            for tab_id in spare:
+                try:
+                    self.herdr.call("tab", "close", tab_id)
+                except Exception as error:
+                    self.log(f"cannot close the spare tab {tab_id}: {printable(str(error))}")
+        self.mapped_at = now
+
+    def _restore_account(self, account, tab, workspace_labels, first_setup, spare, now) -> None:
+        login = account.login
+        if not SAFE_LOGIN.match(login):
+            self._say(login, f"{login!r}: not a plain login; its tab is left alone")
+            return
+        if tab is None:
+            seeded = seed_workspace(account.role, self.catalog)
+            label = seeded if first_setup or seeded in workspace_labels else NEW_WORKSPACE
+            workspace = ensure_workspace(self.herdr, label, self.cwd, spare)
+            made = self.herdr.call("tab", "create", "--workspace", workspace, "--cwd", self.cwd,
+                                   "--label", login, "--no-focus")
+            tab = AccountTab(login, made["tab"]["tab_id"], workspace, {},
+                             adopt=made["root_pane"]["pane_id"])
+        if tab.undetermined:
+            self._say(login, f"{login}: its tab was split by hand and has no harness pane; left alone")
+            return
+        panes = dict(tab.panes)
+        if tab.adopt is not None:
+            self.herdr.call("pane", "rename", tab.adopt, HARNESS)
+            panes[HARNESS] = tab.adopt
+        harness = panes[HARNESS]
+        if SHELL not in panes:
+            panes[SHELL] = self._split(harness, "right", HARNESS_RATIO, SHELL)
+        if STATUS not in panes:
+            panes[STATUS] = self._split(panes[SHELL], "down", 0.5, STATUS)
+        self.harness_pane[login] = harness
+        for role, mode in ((SHELL, PLAIN), (STATUS, WATCH)):
+            if self._bare(panes[role]):
+                self._arm(login, panes[role], mode)
+        seen = self.observe(login, harness)
+        if seen.moveto is False:
+            self.pending[login] = now
+            self.tracks[login] = Track(State.IDLE)
+            return
+        # moveto (or something else) holds the pane: classified when it can
+        # be, and never re-armed by a restore.
+        self.tracks[login] = classify(seen, self.live(login)) or Track(State.IDLE)
+
+    def _split(self, pane: str, direction: str, ratio: float, label: str) -> str:
+        made = self.herdr.call("pane", "split", pane, "--direction", direction,
+                               "--ratio", str(ratio), "--cwd", self.cwd, "--no-focus")
+        new = made["pane"]["pane_id"]
+        self.herdr.call("pane", "rename", new, label)
+        return new
+
+    def decide_pending(self, now: float) -> None:
+        for login, since in list(self.pending.items()):
+            waited = now - since
+            live = self.live(login)
+            fresh = live is not None and live.fresh
+            if waited < RESTORE_SETTLE_S or (not fresh and waited < RESTORE_WAIT_S):
+                continue
+            pane = self.harness_pane.get(login)
+            try:
+                if pane is None or not self._bare(pane):
+                    # A person started something in it meanwhile: followed, not armed.
+                    del self.pending[login]
+                    continue
+                track, arm = restore(before_live(self.befores.get(login), live), live, now)
+                self._arm(login, pane, arm.mode)
+            except Exception as error:  # kept pending; the map is read again first
+                self.log(f"{login}: {printable(str(error))}")
+                self.mapped_at = None
+                return
+            del self.pending[login]
+            if login not in self.unarmed:
+                self.tracks[login] = track
+
+    # ------------------------------------------------------------- follow
+
+    def follow(self, now: float) -> None:
+        """One look at every followed harness pane."""
+        server = self.server()
+        if server is None:
+            self._lose("herdr's server does not answer; waiting for it")
+            return
+        if self.instance is not None and server != self.instance:
+            # Another server answers: the panes the deck knew are gone with the
+            # old one, even though no request failed.
+            self._lose("herdr's server was restarted")
+        self.instance = server
+        # While herdr's server is lost, only the map is read, until it answers.
+        if self.lost or self.mapped_at is None or now - self.mapped_at >= PANE_MAP_REFRESH_S:
+            if not self._refresh(now):
+                return
+        self.decide_pending(now)
+        self._note_befores(server)
+        parents = self.parents()
+        for login, pane in list(self.harness_pane.items()):
+            if login in self.pending:
+                continue
+            try:
+                seen = self.observe(login, pane, parents)
+                live = self.live(login)
+                track, arm = step(self.tracks.get(login, Track(State.IDLE)), seen, live, now)
+                self.tracks[login] = track
+                if arm is not None:
+                    self._arm(login, pane, arm.mode)
+                shown = Shown("unknown", "") if login in self.unarmed else display(self.tracks[login], live)
+                self._show(login, pane, shown, now)
+            except Exception as error:  # one account's failure must not stop the others
+                self.log(f"{login}: {printable(str(error))}")
+                self.mapped_at = None
+
+    def _refresh(self, now: float) -> bool:
+        """Read the tab map again. A harness pane that is gone (closed, or its
+        shell ended) is followed again only after the next restore. A herdr
+        server that could not be reached and now answers again was
+        restarted: that is a restore."""
+        self.mapped_at = now
+        accounts = self._accounts()
+        tabs = self._tabs({a.login for a in accounts}, quiet=self.lost) if accounts is not None else None
+        if tabs is None:
+            self._lose("herdr's server does not answer; waiting for it")
+            return False
+        if self.lost:
+            self.lost = False
+            self.log("herdr's server answers: restoring")
+            for kept in (self.tracks, self.harness_pane, self.pending, self.sent):
+                kept.clear()
+            self.restore(now)
+            return not self.lost
+        self.placed = {a.login for a in accounts}
+        for login in list(self.harness_pane):
+            tab = tabs.get(login)
+            if tab is None or tab.panes.get(HARNESS) != self.harness_pane[login]:
+                del self.harness_pane[login]
+                self.pending.pop(login, None)
+                self.tracks.pop(login, None)
+                self.sent.pop(login, None)
+        return True
+
+    # ---------------------------------------------------------- observing
+
+    def observe(self, login: str, pane: str, parents: dict[int, int] | None = None) -> Seen:
+        info = self.herdr.process_info(pane)
+        shell, group = info.get("shell_pid"), info.get("foreground_process_group_id")
+        if shell is None or group is None:
+            return Seen(present=True)
+        if shell == group:
+            return Seen(present=True, moveto=False)
+        foreground = [
+            (p["pid"], p.get("argv") or []) for p in info.get("foreground_processes", [])
+            if isinstance(p.get("pid"), int)
+        ]
+        found = moveto_in(foreground, login)
+        if found is None:
+            # Something else holds the operator's shell in this pane: not this
+            # account's moveto, and not the deck's to judge.
+            return Seen(present=True)
+        tree = parents if parents is not None else self.parents()
+        return Seen(present=True, moveto=True, harness=harness_under(found.pid, tree, self.argv))
+
+    def live(self, login: str) -> Live | None:
+        return live_of(self.records.get(login), self.utc())
+
+    # ------------------------------------------------------------- acting
+
+    def _arm(self, login: str, pane: str, mode: str) -> None:
+        """Start `moveto <login> <mode>` in a pane at the operator's bare
+        shell. A mode moveto does not have yet is not armed, said once: the
+        deck builds against stand-ins until agent-fabric's activation PR is on
+        main, and arms no pane with what is not there."""
+        if mode in MODES and mode not in self.modes:
+            self._say(f"{login}:{mode}", f"{login}: moveto has no {mode} yet; that pane is left as it is")
+            if pane == self.harness_pane.get(login):
+                self.unarmed.add(login)
+                self.tracks[login] = Track(State.IDLE)
+            return
+        if pane == self.harness_pane.get(login):
+            self.unarmed.discard(login)
+        self.herdr.call("pane", "run", pane, " ".join(filter(None, ("moveto", login, mode))))
+
+    def _bare(self, pane: str) -> bool:
+        info = self.herdr.process_info(pane)
+        shell = info.get("shell_pid")
+        return shell is not None and shell == info.get("foreground_process_group_id")
+
+    def _show(self, login: str, pane: str, shown: Shown, now: float) -> None:
+        last = self.sent.get(login)
+        if last is None or last[0] != shown or now - last[1] >= RESEND_AFTER_S:
+            for command in (report_command(pane, shown), *label_commands(pane, shown)):
+                self.herdr.call(*command)
+            self.sent[login] = (shown, now)
+            if last is None or last[0] != shown:
+                self.log(status_line(login, shown.label or shown.status))
+
+    # ------------------------------------------------------------- before
+
+    def _load(self) -> None:
+        """The record left by the last run, a pending fall in it settled or
+        dropped by whether this herdr server is the one that answered before
+        the fall."""
+        stored = self.load()
+        server = self.server()
+        self.befores = {login: at_start(b, server) for login, b in (stored or {}).items()}
+        self.loaded = True
+        if stored is not None and stored != self.befores:
+            self.save(self.befores)
+
+    def _note_befores(self, server: tuple[int, int]) -> None:
+        """Each account's live count goes into its record, and a pending fall
+        settles once this same server answers SETTLE_S after it. A fall is not
+        noted for an account whose restore is still undecided."""
+        at = self.utc().timestamp()
+        befores = dict(self.befores)
+        for login in self.placed:
+            live = self.live(login)
+            current = befores.get(login, Before())
+            if live is not None:
+                current = note_live(current, live.count, at, server, login not in self.pending)
+            befores[login] = settle(current, server, at)
+        # An account no longer placed is dropped from the record here.
+        befores = {k: v for k, v in befores.items() if k in self.placed}
+        if befores != self.befores:
+            self.befores = befores
+            self.save(befores)
+
+    def _lose(self, line: str) -> None:
+        """herdr-lost: pending falls are discarded, so a session that died with
+        herdr is still recorded as running at the restore that ends the loss."""
+        if not self.lost:
+            self.log(line)
+        self.lost = True
+        self.instance = None
+        befores = {login: lost(b) for login, b in self.befores.items()}
+        if befores != self.befores:
+            self.befores = befores
+            self.save(befores)
+
+    # ------------------------------------------------------------- reading
+
+    def _accounts(self) -> list[Account] | None:
+        try:
+            return self.accounts()
+        except Exception as error:
+            self.log(f"cannot read the accounts (moveto --list): {printable(str(error))}")
+            return None
+
+    def _tabs(self, logins: set[str], quiet: bool = False) -> dict[str, AccountTab] | None:
+        try:
+            return self.herdr.account_tabs(logins)
+        except Exception as error:
+            if not quiet:
+                self.log(f"cannot read herdr's tabs: {printable(str(error))}")
+            return None
+
+    def _say(self, key: str, line: str) -> None:
+        if key not in self.said:
+            self.said.add(key)
+            self.log(line)
 
 
-@dataclass(frozen=True)
-class Release:
-    """The account runs no session: herdr's agent row for the tab goes."""
+def report_command(pane: str, shown: Shown) -> tuple[str, ...]:
+    """Without --seq: herdr refuses a sequence number not above the last one
+    from this source, and a restarted deck would start again from zero. The
+    pane id comes first: release-agent's parser needs it there, and every
+    command the deck sends has the one shape."""
+    return ("pane", "report-agent", pane, "--source", AGENT_SOURCE, "--agent", AGENT_LABEL,
+            "--state", shown.status)
 
 
-def agent_report(record: StateRecord) -> Report | Release:
-    """What herdr's agent panel shows for an account's record: working,
-    idle and blocked as they are; none releases the agent; anything else,
-    the stream's stale rows included, is unknown."""
-    if record.state == "none":
-        return Release()
-    return Report(record.state if record.state in REPORTED_STATES else "unknown")
+def label_commands(pane: str, shown: Shown) -> list[tuple[str, ...]]:
+    """The word a person reads for the state.
+
+    herdr's default agent row shows the agent's name, not its state text,
+    so the deck's word goes into the displayed name ("dormant" instead of
+    "claude"), and back to herdr's own name while a harness runs. It also
+    goes in as the state's label, for a layout that shows `state_text`; the
+    labels from an earlier state are cleared first, so a status that comes
+    back later (blocked, once shown as failed) reads as herdr's word again.
+    herdr refuses a clear and a set in one call, so they are two."""
+    base = ("pane", "report-metadata", pane, "--source", AGENT_SOURCE, "--agent", AGENT_LABEL)
+    word = shown.label if shown.label and shown.label != shown.status else ""
+    if not word:
+        return [base + ("--clear-state-labels",), base + ("--clear-display-agent",)]
+    # herdr shows an idle the person has not looked at yet as done: the
+    # deck's word holds for both (measured live on the fork).
+    statuses = (shown.status, "done") if shown.status == "idle" else (shown.status,)
+    command = base + ("--display-agent", word)
+    for status in statuses:
+        command += ("--state-label", f"{status}={word}")
+    return [base + ("--clear-state-labels",), command]
+
+
+def status_line(login: str, status: str, detail: str = "") -> str:
+    suffix = f"  {detail}" if detail else ""
+    return f"{login:<28} {status}{suffix}"
 
 
 # ---------------------------------------------------------------- adapters
@@ -407,63 +785,65 @@ class Herdr:
     def workspaces(self) -> list[dict]:
         return self.call("workspace", "list").get("workspaces", [])
 
-    def account_tabs(self, logins: set[str]) -> list[AccountTab]:
-        panes = self.call("pane", "list").get("panes", [])
-        root_pane: dict[str, str] = {}
-        pane_count: dict[str, int] = {}
-        for pane in panes:
-            root_pane.setdefault(pane["tab_id"], pane["pane_id"])
-            pane_count[pane["tab_id"]] = pane_count.get(pane["tab_id"], 0) + 1
-        tabs = []
+    def account_tabs(self, logins: set[str]) -> dict[str, AccountTab]:
+        """The first tab carrying each login wins; a duplicate is the
+        operator's to sort out, not the deck's to close."""
+        by_tab: dict[str, list[PaneInfo]] = {}
+        for pane in self.call("pane", "list").get("panes", []):
+            by_tab.setdefault(pane["tab_id"], []).append(
+                PaneInfo(pane["pane_id"], pane["tab_id"], pane.get("label"))
+            )
+        tabs: dict[str, AccountTab] = {}
         for workspace in self.workspaces():
             listing = self.call("tab", "list", "--workspace", workspace["workspace_id"])
             for tab in listing.get("tabs", []):
                 label = tab.get("label")
-                if label in logins and tab["tab_id"] in root_pane:
-                    tabs.append(
-                        AccountTab(
-                            label, tab["tab_id"], workspace["workspace_id"],
-                            root_pane[tab["tab_id"]], pane_count[tab["tab_id"]],
-                        )
-                    )
+                if label in logins and label not in tabs and tab["tab_id"] in by_tab:
+                    tabs[label] = read_tab(label, tab["tab_id"], workspace["workspace_id"],
+                                           by_tab[tab["tab_id"]])
         return tabs
 
-    def process(self, pane_id: str) -> PaneProcess:
-        info = self.call("pane", "process-info", "--pane", pane_id).get("process_info", {})
-        return PaneProcess(
-            shell_pid=info.get("shell_pid"),
-            foreground_process_group_id=info.get("foreground_process_group_id"),
-            foreground_names=tuple(p.get("name", "") for p in info.get("foreground_processes", [])),
-        )
+    def process_info(self, pane_id: str) -> dict:
+        return self.call("pane", "process-info", "--pane", pane_id).get("process_info", {})
 
 
 class DeckError(RuntimeError):
     pass
 
 
-def report_to_herdr(herdr: "Herdr", pane: str, outcome: Report | Release) -> None:
-    """Report without --seq: herdr refuses a sequence number not above the
-    last one from this source, and a restarted deck would start again from
-    zero. With no sequence ever sent, every report from the source applies."""
-    herdr.call(*agent_command(pane, outcome))
-
-
-def agent_command(pane: str, outcome: Report | Release) -> tuple[str, ...]:
-    """`release-agent` takes its pane id as the first argument (an option
-    before it reads as unknown); `report-agent` takes it anywhere, and is
-    given the same order for one shape."""
-    if isinstance(outcome, Release):
-        return ("pane", "release-agent", pane, "--source", AGENT_SOURCE, "--agent", AGENT_LABEL)
-    return (
-        "pane", "report-agent", pane, "--source", AGENT_SOURCE, "--agent", AGENT_LABEL,
-        "--state", outcome.state,
-    )
+def ensure_workspace(herdr: Herdr, label: str, cwd: str, spare_tabs: list[str]) -> str:
+    """The workspace with this label, created if missing. A new workspace
+    starts with one numbered tab; it is noted in `spare_tabs` to be closed
+    once the account tabs exist, never one the operator had."""
+    for workspace in herdr.workspaces():
+        if workspace.get("label") == label:
+            return workspace["workspace_id"]
+    made = herdr.call("workspace", "create", "--label", label, "--cwd", cwd, "--no-focus")
+    if made.get("tab", {}).get("tab_id"):
+        spare_tabs.append(made["tab"]["tab_id"])
+    return made["workspace"]["workspace_id"]
 
 
 def moveto_list() -> str:
     return subprocess.run(
         ["moveto", "--list"], capture_output=True, text=True, timeout=60, check=True
     ).stdout
+
+
+def moveto_modes() -> frozenset[str]:
+    """The modes this host's moveto has. agent-fabric's activation PR adds
+    --wait and --watch, and fabric-resume's second-session refusal with
+    them; --resume is armed only once --wait is there, because that refusal
+    is what makes arming it safe (tab-states.md, fabric side)."""
+    try:
+        result = subprocess.run(["moveto", "--help"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return frozenset()
+    said = result.stdout + result.stderr
+    modes = {mode for mode in (WAIT, WATCH, RESUME) if mode in said}
+    if WAIT not in modes:
+        modes.discard(RESUME)
+    return frozenset(modes)
 
 
 def local_host() -> str | None:
@@ -480,10 +860,8 @@ def local_host() -> str | None:
     return host or None
 
 
-def states_snapshot() -> list[str]:
+def states_snapshot(log: Callable[[str], None]) -> list[str]:
     """One read of the state stream: a line per placed account."""
-    import sys
-
     try:
         result = subprocess.run(
             ["fabric-ctl", "all", "states", "--json"], capture_output=True, text=True, timeout=60
@@ -496,14 +874,8 @@ def states_snapshot() -> list[str]:
         if result.returncode in (0, 1) and result.stdout.strip():
             return result.stdout.splitlines()
         reason = (result.stderr.strip() or f"exit {result.returncode}, no records")[:300]
-    print(f"fabric-deck: no state snapshot before acting ({reason}); "
-          "sessions already running elsewhere may be mistaken for resumed ones", file=sys.stderr)
+    log(f"no state snapshot before restoring ({reason}); the stream is waited for")
     return []
-
-
-def moveto_has_resume() -> bool:
-    result = subprocess.run(["moveto", "--help"], capture_output=True, text=True, timeout=30)
-    return "--resume" in (result.stdout + result.stderr)
 
 
 def load_catalog(path: str | None) -> dict | None:
@@ -513,206 +885,7 @@ def load_catalog(path: str | None) -> dict | None:
         return json.load(handle)
 
 
-# --------------------------------------------------------------------- run
-
-SETTLED = frozenset({"resumed", "fresh", "failed"})
-
-
-def utc_now() -> str:
-    import datetime
-
-    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def ensure_workspace(
-    herdr: Herdr, label: str, cwd: str, spare_tabs: list[str]
-) -> str:
-    """The workspace with this label, created if missing. A new workspace
-    starts with one numbered tab; it is noted in `spare_tabs` to be closed
-    once the account tabs exist, never one the operator had."""
-    for workspace in herdr.workspaces():
-        if workspace.get("label") == label:
-            return workspace["workspace_id"]
-    made = herdr.call("workspace", "create", "--label", label, "--cwd", cwd, "--no-focus")
-    if made.get("tab", {}).get("tab_id"):
-        spare_tabs.append(made["tab"]["tab_id"])
-    return made["workspace"]["workspace_id"]
-
-
-def execute(herdr: Herdr, actions: list[Action], cwd: str, resume_flag: bool) -> dict[str, str]:
-    """Carry out the plan; returns the pane each re-entered account went to."""
-    entered: dict[str, str] = {}
-    spare_tabs: list[str] = []
-    try:
-        _execute(herdr, actions, cwd, resume_flag, entered, spare_tabs)
-    finally:
-        for tab_id in spare_tabs:
-            try:
-                herdr.call("tab", "close", tab_id)
-            except DeckError as error:
-                # Never let a failed cleanup hide why execute stopped.
-                print(f"fabric-deck: could not close spare tab {tab_id}: {error}")
-    return entered
-
-
-def _execute(
-    herdr: Herdr, actions: list[Action], cwd: str, resume_flag: bool,
-    entered: dict[str, str], spare_tabs: list[str],
-) -> None:
-    for action in actions:
-        if isinstance(action, CreateTab):
-            workspace = ensure_workspace(herdr, action.workspace_label, cwd, spare_tabs)
-            made = herdr.call(
-                "tab", "create", "--workspace", workspace, "--cwd", cwd,
-                "--label", action.login, "--no-focus",
-            )
-            pane = made["root_pane"]["pane_id"]
-        elif isinstance(action, Reenter):
-            pane = action.pane_id
-        else:
-            continue
-        herdr.call("pane", "run", pane, reenter_command(action.login, resume_flag))
-        entered[action.login] = pane
-
-
-def last_line(herdr: Herdr, pane: str) -> str:
-    read = herdr.text("pane", "read", pane, "--source", "recent", "--lines", "5", "--format", "text")
-    lines = [line.strip() for line in read.splitlines() if line.strip()]
-    # The shell's prompt follows whatever moveto or fabric-resume printed last,
-    # so the reason is the line before it.
-    return printable(" | ".join(lines[-2:]))
-
-
-def fabric_resume_line(herdr: Herdr, pane: str) -> str:
-    """fabric-resume's own line in the pane's recent output. Once the agent's
-    screen is up, the pane's last lines are the agent's, so the line is
-    searched for rather than taken from the bottom."""
-    read = herdr.text("pane", "read", pane, "--source", "recent", "--lines", "200", "--format", "text")
-    said = [line.strip() for line in read.splitlines() if line.strip().startswith("fabric-resume")]
-    return printable(said[-1]) if said else ""
-
-
-def poll(
-    herdr: Herdr,
-    entered: dict[str, str],
-    records: dict[str, StateRecord],
-    acted_at: str,
-    now: str,
-    elapsed_s: float,
-    baselines: dict[str, frozenset[str]] | None = None,
-) -> dict[str, tuple[str, str]]:
-    """One pass over the re-entered accounts: login -> (status, detail).
-
-    The pane is read when it can decide or explain the status: a bare pane
-    (its last lines say why it failed), and a new session with no last_session
-    to judge it by (fabric-resume's line says whether it resumed or started
-    fresh). A herdr error is retried on the next pass until the wait ends."""
-    result: dict[str, tuple[str, str]] = {}
-    for login, pane in entered.items():
-        record = records.get(login)
-        baseline = frozenset((baselines or {}).get(login, ()))
-        try:
-            bare = is_bare_shell(herdr.process(pane))
-            if bare:
-                tail = last_line(herdr, pane)
-            elif record is not None and record.last_session is None and newer_live_sessions(
-                record, acted_at, baseline
-            ):
-                tail = fabric_resume_line(herdr, pane)
-            else:
-                tail = ""
-        except DeckError as error:
-            waited = elapsed_s >= RESTORE_WAIT_S
-            result[login] = ("failed" if waited else "restoring", printable(str(error)))
-            continue
-        status = recovery_status(acted_at, now, elapsed_s, record, bare, tail, baseline)
-        result[login] = (status, tail if status in {"failed", "fresh"} else "")
-    return result
-
-
-def snapshot_then_act(snapshot, act) -> tuple[dict[str, frozenset[str]], str, dict[str, str]]:
-    """The baseline is read before any pane is touched, so a session of an
-    account that runs elsewhere is known as not the deck's however soon it
-    changes state. Returns the baselines, the action's time and the panes."""
-    baselines = snapshot()
-    acted_at = utc_now()
-    return baselines, acted_at, act()
-
-
-def status_line(login: str, status: str, detail: str = "") -> str:
-    suffix = f"  {detail}" if detail else ""
-    return f"{login:<28} {status}{suffix}"
-
-
-# The pane map is rebuilt this often, so a tab closed, moved, split or
-# created since is followed without restarting the deck.
-PANE_MAP_REFRESH_S = 10
-# Every pane's report is sent again after this long even when nothing
-# changed, so a herdr server restarted with the same pane ids (which
-# forgets every report) is put right within one stream heartbeat.
-RESEND_AFTER_S = 600
-
-
-@dataclass
-class Watcher:
-    """Keeps herdr's agent panel in step with the state stream: one record
-    at a time, with the clock, herdr and the account list injected so the
-    loop's rules are tested without a server."""
-
-    herdr: "Herdr"
-    accounts: Callable[[], set[str]]
-    host: str | None
-    log: Callable[[str], None]
-    pane_for_login: dict[str, str] = field(default_factory=dict)
-    # pane -> (what it shows, when it was sent)
-    shown: dict[str, tuple[Report | Release, float]] = field(default_factory=dict)
-    mapped_at: float | None = None
-
-    def refresh_map(self, now: float) -> None:
-        self.mapped_at = now
-        try:
-            tabs = self.herdr.account_tabs(self.accounts())
-        except Exception as error:  # herdr or moveto failing must not stop the deck
-            self.log(f"cannot map account tabs: {printable(str(error))}")
-            return
-        # A split account tab is the operator's arrangement: not reported into.
-        mapped = {t.login: t.pane_id for t in tabs if t.pane_count == 1}
-        for pane in set(self.shown) - set(mapped.values()):
-            # A tab gone from the map (closed, split, relabelled) loses the
-            # agent row the deck gave it; a closed one has nothing to release.
-            outcome, _ = self.shown.pop(pane)
-            if isinstance(outcome, Report):
-                self._send(pane, Release(), now, quiet=True)
-                self.shown.pop(pane, None)
-        self.pane_for_login = mapped
-
-    def on_line(self, raw: str, now: float) -> None:
-        record = parse_state_line(raw)
-        if not for_this_host(record, self.host):
-            return
-        if self.mapped_at is None or now - self.mapped_at >= PANE_MAP_REFRESH_S:
-            self.refresh_map(now)
-        pane = self.pane_for_login.get(record.login)
-        if pane is None:
-            return
-        outcome = agent_report(record)
-        last = self.shown.get(pane)
-        if last is not None and last[0] == outcome and now - last[1] < RESEND_AFTER_S:
-            return
-        self._send(pane, outcome, now)
-
-    def _send(self, pane: str, outcome: Report | Release, now: float, quiet: bool = False) -> None:
-        try:
-            report_to_herdr(self.herdr, pane, outcome)
-        except Exception as error:  # one account's failure must not stop the others
-            if not quiet:
-                self.log(f"{pane}: {printable(str(error))}")
-            self.shown.pop(pane, None)
-            # Map again at the next record: the tab may be gone or moved.
-            self.mapped_at = None
-            return
-        self.shown[pane] = (outcome, now)
-
+# ------------------------------------------------------------- the stream
 
 # The stream child is restarted after it exits, waiting longer each time it
 # dies young, and from the start again once it has run a while.
@@ -734,8 +907,7 @@ def stop_child(child: subprocess.Popen) -> None:
     """Terminate the child and reap it, killing it if it outlives the grace.
     A ctrl-c or kill while this runs is held, not acted on, so the child is
     reaped first; then it raises KeyboardInterrupt. Ignoring it instead would
-    drop a stop that arrives after the stream ended by itself, and the deck
-    would restart the stream rather than exit."""
+    drop a stop that arrives while the deck is on its way out."""
     import signal
 
     caught: list[int] = []
@@ -758,11 +930,58 @@ def stop_child(child: subprocess.Popen) -> None:
         raise KeyboardInterrupt
 
 
-def watch(herdr: Herdr, exclude: set[str]) -> int:
-    """Follow the state stream and keep herdr's agent panel in step with it,
-    one account tab at a time, until interrupted."""
+@dataclass
+class Stream:
+    """`fabric-ctl all states --follow --json` on a reader thread, started
+    again after the back-off whenever it ends. Lines go to `on_line`; the
+    main thread stops it with `close`, which reaps the child (signals can
+    only be held from the main thread)."""
+
+    on_line: Callable[[str], None]
+    log: Callable[[str], None]
+    command: tuple[str, ...] = ("fabric-ctl", "all", "states", "--follow", "--json")
+    child: subprocess.Popen | None = None
+    closing: bool = False
+
+    def run(self) -> None:
+        import time
+
+        failures = 0
+        while not self.closing:
+            started = time.monotonic()
+            try:
+                self.child = subprocess.Popen(self.command, stdout=subprocess.PIPE, text=True)
+            except OSError as error:
+                self.log(f"cannot start the state stream: {error}")
+                self.child = None
+            if self.child is not None and self.child.stdout is not None:
+                for raw in self.child.stdout:
+                    try:
+                        self.on_line(raw)
+                    except Exception as error:  # a bad line must not end the stream
+                        self.log(f"a state record was skipped: {printable(str(error))}")
+                self.child.wait()
+            if self.closing:
+                return
+            failures, wait = next_backoff(failures, time.monotonic() - started)
+            code = self.child.returncode if self.child is not None else "none"
+            self.log(f"the state stream ended (exit {code}); restarting in {wait}s")
+            time.sleep(wait)
+
+    def close(self) -> None:
+        self.closing = True
+        if self.child is not None:
+            stop_child(self.child)
+
+
+# --------------------------------------------------------------------- run
+
+
+def run(deck: Deck, stream: Stream, woken: "threading.Event") -> int:
+    """Restore, then follow: every POLL_S, and at once when the stream
+    delivers a record, so a harness and its session are seen together."""
     import signal
-    import sys
+    import threading
     import time
 
     def stop(_signum, _frame):
@@ -770,159 +989,82 @@ def watch(herdr: Herdr, exclude: set[str]) -> int:
 
     # Stopped by `kill` as by ctrl-c (a backgrounded process ignores SIGINT).
     signal.signal(signal.SIGTERM, stop)
-
-    host = local_host()
-    if host is None:
-        print("fabric-deck: cannot tell this host's fleet name (fabric-whoami); "
-              "state records of the same login on other hosts may be mixed in", file=sys.stderr)
-    watcher = Watcher(
-        herdr=herdr,
-        accounts=lambda: {a.login for a in parse_moveto_list(moveto_list(), exclude=exclude)},
-        host=host,
-        log=lambda line: print(f"fabric-deck: {line}", file=sys.stderr, flush=True),
-    )
-    failures = 0
-    while True:
-        started = time.monotonic()
+    threading.Thread(target=stream.run, name="fabric-deck-states", daemon=True).start()
+    try:
         try:
-            stream = subprocess.Popen(
-                ["fabric-ctl", "all", "states", "--follow", "--json"],
-                stdout=subprocess.PIPE, text=True,
-            )
-        except OSError as error:
-            watcher.log(f"cannot start the state stream: {error}")
-            stream = None
-        try:
-            try:
-                for raw in (stream.stdout if stream and stream.stdout else []):
-                    watcher.on_line(raw, time.monotonic())
-            finally:
-                # On every way out of the loop, the stream child goes with it.
-                if stream is not None:
-                    stop_child(stream)
-        except KeyboardInterrupt:  # also a stop held while the child was reaped
-            return 0
-        failures, wait = next_backoff(failures, time.monotonic() - started)
-        code = stream.returncode if stream is not None else "none"
-        watcher.log(f"the state stream ended (exit {code}); restarting in {wait}s")
-        try:
-            time.sleep(wait)
-        except KeyboardInterrupt:
-            return 0
+            deck.restore(time.monotonic())
+            while True:
+                deck.follow(time.monotonic())
+                woken.wait(POLL_S)
+                woken.clear()
+        finally:
+            stream.close()
+    except KeyboardInterrupt:  # also a stop held while the stream child was reaped
+        return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     import argparse
     import getpass
-    import queue
-    import threading
     import sys
-    import time
+    import threading
 
     parser = argparse.ArgumentParser(
         prog="fabric-deck",
-        description="Fleet Deck: bring every agent account's herdr tab back into its account.",
+        description="Fleet Deck: every agent account's herdr tab, restored and followed.",
     )
-    dry_run = ("--dry-run", "print the plan, change nothing")
     parser.add_argument("--catalog", help="the role catalogue (identities/roles/catalog.json)")
     parser.add_argument("--exclude", action="append", default=[], help="a login to leave out")
     parser.add_argument("--cwd", default=os.path.expanduser("~/projects"))
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument(dry_run[0], action="store_true", help=dry_run[1])
-    mode.add_argument(
-        "--watch", action="store_true",
-        help="keep herdr's agent panel in step with the state stream, until interrupted",
-    )
     args = parser.parse_args(argv)
 
-    herdr = Herdr()
-    if args.watch:
-        return watch(herdr, exclude={getpass.getuser(), *args.exclude})
-    accounts = parse_moveto_list(moveto_list(), exclude={getpass.getuser(), *args.exclude})
-    logins = {account.login for account in accounts}
-    tabs = herdr.account_tabs(logins)
-    processes = {tab.pane_id: herdr.process(tab.pane_id) for tab in tabs}
-    workspace_labels = {w.get("label") for w in herdr.workspaces()}
-    actions = plan(accounts, tabs, processes, workspace_labels, load_catalog(args.catalog))
+    def log(line: str) -> None:
+        print(f"fabric-deck: {line}", file=sys.stderr, flush=True)
 
-    for action in actions:
-        kind = type(action).__name__
-        where = getattr(action, "workspace_label", None) or getattr(action, "pane_id", "")
-        print(status_line(action.login, kind.lower(), where))
-    if args.dry_run:
-        return 0
-
-    resume_flag = moveto_has_resume()
     host = local_host()
     if host is None:
-        print("fabric-deck: cannot tell this host's fleet name (fabric-whoami); "
-              "state records of the same login on other hosts may be mixed in", file=sys.stderr)
-    def snapshot_baselines() -> dict[str, frozenset[str]]:
-        lines = states_snapshot()
-        hosts = {r.host for r in map(parse_state_line, lines) if r is not None}
-        if host is not None and hosts and host not in hosts:
-            # fabric-whoami's short hostname and the stream's placement name
-            # disagree: every account would read stale without saying why.
-            print(f"fabric-deck: no state record is for this host ({host}); the stream "
-                  f"names {', '.join(sorted(hosts))}", file=sys.stderr)
-        return baselines_from_snapshot(lines, host)
-
-    baselines, acted_at, entered = snapshot_then_act(
-        snapshot_baselines,
-        lambda: execute(herdr, actions, args.cwd, resume_flag),
-    )
-    started = time.monotonic()
-    if not entered:
-        return 0
-    print(f"re-entered {len(entered)} account(s) at {acted_at}; "
-          f"waiting up to {RESTORE_WAIT_S}s (RESTORE_WAIT_S)"
-          + ("" if resume_flag else "; moveto has no --resume yet: sessions are not resumed"))
-
-    stream = subprocess.Popen(
-        ["fabric-ctl", "all", "states", "--follow", "--json"],
-        stdout=subprocess.PIPE, text=True,
-    )
-    # A reader thread, so a quiet stream never stalls the restoring wait and a
-    # burst of lines is never left unread in a buffer select cannot see.
-    lines: "queue.Queue[str | None]" = queue.Queue()
-
-    def pump() -> None:
-        for raw in stream.stdout or []:
-            lines.put(raw)
-        lines.put(None)
-
-    threading.Thread(target=pump, name="fabric-deck-states", daemon=True).start()
+        log("cannot tell this host's fleet name (fabric-whoami); "
+            "state records of the same login on other hosts may be mixed in")
     records: dict[str, StateRecord] = {}
-    shown: dict[str, str] = {}
-    stream_ended = False
-    try:
-        while True:
-            try:
-                raw = lines.get(timeout=1.0)
-                while True:
-                    if raw is None:
-                        stream_ended = True
-                    else:
-                        parsed = parse_state_line(raw)
-                        if for_this_host(parsed, host):
-                            records[parsed.login] = parsed
-                    raw = lines.get_nowait()
-            except queue.Empty:
-                pass
-            elapsed = time.monotonic() - started
-            for login, (status, detail) in poll(
-                herdr, entered, records, acted_at, utc_now(), elapsed, baselines
-            ).items():
-                if shown.get(login) != status:
-                    shown[login] = status
-                    print(status_line(login, status, detail), flush=True)
-            if all(shown.get(login) in SETTLED for login in entered) or elapsed > RESTORE_WAIT_S + 5:
-                return 0 if all(shown.get(login) != "failed" for login in entered) else 1
-            if stream_ended:
-                print("fabric-deck: the state stream ended", file=sys.stderr)
-                return 2
-    finally:
-        stream.terminate()
+    woken = threading.Event()
+
+    def take(raw: str) -> None:
+        record = parse_state_line(raw)
+        if for_this_host(record, host):
+            records[record.login] = record
+            woken.set()
+
+    lines = states_snapshot(log)
+    hosts = {r.host for r in map(parse_state_line, lines) if r is not None}
+    if host is not None and hosts and host not in hosts:
+        # fabric-whoami's short hostname and the stream's placement name
+        # disagree: every account would read stale without saying why.
+        log(f"no state record is for this host ({host}); the stream names {', '.join(sorted(hosts))}")
+    for line in lines:
+        take(line)
+
+    exclude = {getpass.getuser(), *args.exclude}
+    path = befores_path()
+    socket_path = herdr_socket_path()
+    modes = moveto_modes()
+    missing = sorted({WAIT, WATCH, RESUME} - modes)
+    if missing:
+        log(f"moveto has no {', '.join(missing)} yet: no pane is armed with it")
+    deck = Deck(
+        herdr=Herdr(),
+        accounts=lambda: parse_moveto_list(moveto_list(), exclude=exclude),
+        records=records,
+        modes=modes,
+        cwd=args.cwd,
+        catalog=load_catalog(args.catalog),
+        parents=proc_parents,
+        argv=proc_argv,
+        load=lambda: load_befores(path),
+        save=lambda befores: save_befores(path, befores),
+        server=lambda: server_instance(socket_path),
+        log=log,
+    )
+    return run(deck, Stream(on_line=take, log=log), woken)
 
 
 if __name__ == "__main__":

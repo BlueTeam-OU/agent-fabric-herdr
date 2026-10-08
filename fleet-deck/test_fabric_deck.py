@@ -1,40 +1,36 @@
+import datetime
+import os
+import stat
+import tempfile
 import unittest
 
+from deck_tabs import RESTORE_WAIT_S, RESUME, SAME_SESSION_S, SETTLE_S, WAIT, WATCH, Before, Shown
 from fabric_deck import (
-    Release,
-    Report,
-    agent_command,
-    agent_report,
-    Watcher,
-    next_backoff,
+    NEW_WORKSPACE,
     PANE_MAP_REFRESH_S,
     RESEND_AFTER_S,
-    ENTRY_GRACE_S,
-    RESTORE_WAIT_S,
-    DeckError,
-    Session,
-    baselines_from_snapshot,
-    for_this_host,
-    snapshot_then_act,
-    StateRecord,
-    poll,
-    printable,
-    parse_state_line,
-    stop_child,
-    recovery_status,
-    NEW_WORKSPACE,
+    RESTORE_SETTLE_S,
     Account,
-    AccountTab,
-    CreateTab,
-    Leave,
-    PaneProcess,
-    Reenter,
-    Undetermined,
-    is_bare_shell,
+    Deck,
+    Herdr,
+    Session,
+    StateRecord,
+    Stream,
+    for_this_host,
+    harness_under,
+    label_commands,
+    load_befores,
+    next_backoff,
     parse_moveto_list,
-    plan,
-    reenter_command,
+    parse_state_line,
+    proc_argv,
+    proc_parents,
+    report_command,
+    save_befores,
+    server_instance,
+    start_ticks,
     seed_workspace,
+    stop_child,
 )
 
 CATALOG = {
@@ -47,12 +43,9 @@ CATALOG = {
     ],
 }
 
-BARE = PaneProcess(shell_pid=10, foreground_process_group_id=10, foreground_names=("bash",))
-IN_MOVETO = PaneProcess(shell_pid=10, foreground_process_group_id=22, foreground_names=("sudo",))
-
-
-def tab(login, pane):
-    return AccountTab(login=login, tab_id=f"t-{login}", workspace_id="w1", pane_id=pane)
+NOW = datetime.datetime(2026, 10, 8, 9, 0, 0, tzinfo=datetime.timezone.utc)
+SERVER, OTHER = (4242, 777), (4343, 999)
+ENTER = "/usr/local/share/moveto/enter"
 
 
 class ParseMovetoList(unittest.TestCase):
@@ -69,18 +62,6 @@ class ParseMovetoList(unittest.TestCase):
         )
 
 
-class BareShell(unittest.TestCase):
-    def test_a_shell_that_is_its_own_foreground_group_is_bare(self):
-        self.assertIs(is_bare_shell(BARE), True)
-
-    def test_a_running_moveto_session_is_not_bare(self):
-        self.assertIs(is_bare_shell(IN_MOVETO), False)
-
-    def test_unknown_when_herdr_cannot_tell(self):
-        self.assertIsNone(is_bare_shell(PaneProcess(None, 10)))
-        self.assertIsNone(is_bare_shell(PaneProcess(10, None)))
-
-
 class Seed(unittest.TestCase):
     def test_a_role_goes_to_its_catalogue_group(self):
         self.assertEqual(seed_workspace("rust-ui-dev", CATALOG), "Rust Developer")
@@ -91,61 +72,7 @@ class Seed(unittest.TestCase):
         self.assertEqual(seed_workspace("rust-ui-dev", None), NEW_WORKSPACE)
 
 
-class Plan(unittest.TestCase):
-    accounts = [Account("coord", "fabric-coordinator"), Account("ui", "rust-ui-dev")]
-
-    def test_first_setup_seeds_every_tab_from_the_catalogue(self):
-        actions = plan(self.accounts, [], {}, set(), CATALOG)
-        self.assertEqual(
-            actions,
-            [CreateTab("coord", "Coordinator"), CreateTab("ui", "Rust Developer")],
-        )
-
-    def test_after_restart_bare_tabs_are_reentered_and_live_ones_left(self):
-        tabs = [tab("coord", "p1"), tab("ui", "p2")]
-        actions = plan(self.accounts, tabs, {"p1": BARE, "p2": IN_MOVETO}, {"fabric"}, CATALOG)
-        self.assertEqual(actions, [Reenter("coord", "p1"), Leave("ui", "p2")])
-
-    def test_a_later_account_goes_to_its_group_only_if_the_operator_kept_it(self):
-        tabs = [tab("coord", "p1")]
-        kept = plan(self.accounts, tabs, {"p1": IN_MOVETO}, {"Rust Developer"}, CATALOG)
-        self.assertEqual(kept[1], CreateTab("ui", "Rust Developer"))
-        removed = plan(self.accounts, tabs, {"p1": IN_MOVETO}, {"Mine"}, CATALOG)
-        self.assertEqual(removed[1], CreateTab("ui", NEW_WORKSPACE))
-
-    def test_a_pane_herdr_cannot_describe_is_not_guessed_at(self):
-        tabs = [tab("coord", "p1"), tab("ui", "p2")]
-        actions = plan(self.accounts, tabs, {"p2": IN_MOVETO}, set(), CATALOG)
-        self.assertEqual(actions[0], Undetermined("coord", "p1"))
-
-    def test_a_duplicate_label_does_not_create_a_third_tab(self):
-        tabs = [tab("coord", "p1"), AccountTab("coord", "t-dup", "w2", "p9"), tab("ui", "p2")]
-        actions = plan(self.accounts, tabs, {"p1": BARE, "p2": IN_MOVETO, "p9": BARE}, set(), CATALOG)
-        self.assertEqual(actions, [Reenter("coord", "p1"), Leave("ui", "p2")])
-
-
-class ReenterCommand(unittest.TestCase):
-    def test_uses_resume_once_moveto_offers_it(self):
-        self.assertEqual(reenter_command("ui", True), "moveto ui --resume")
-        self.assertEqual(reenter_command("ui", False), "moveto ui")
-
-
-ACTED = "2026-10-08T05:00:00Z"
-
-
-NOW = "2026-10-08T05:01:00Z"
-
-
-def record(state="idle", since="2026-10-08T05:00:30Z", sessions=("s-new",), last=None,
-           ts="2026-10-08T05:00:50Z"):
-    """`since` is when each session entered its state; `ts` is when the stream
-    posted the record."""
-    return StateRecord(
-        "ui", state, tuple(Session(sid, state, since) for sid in sessions), ts, last_session=last
-    )
-
-
-class Statuses(unittest.TestCase):
+class Records(unittest.TestCase):
     def test_parses_a_stream_line_of_today(self):
         line = (
             '{"address":"develop-qzapp/ui","ts":"2026-10-08T05:00:31Z","role":"rust-ui-dev",'
@@ -154,10 +81,9 @@ class Statuses(unittest.TestCase):
         )
         parsed = parse_state_line(line)
         self.assertEqual(
-            (parsed.login, parsed.state, [x.session for x in parsed.sessions]), ("ui", "idle", ["s1"])
+            (parsed.login, parsed.host, [x.session for x in parsed.sessions]),
+            ("ui", "develop-qzapp", ["s1"]),
         )
-        self.assertIsNone(parsed.resumable)
-        self.assertIsNone(parsed.last_session)
         self.assertIsNone(parse_state_line("not json"))
 
     def test_a_field_of_the_wrong_type_is_read_as_absent(self):
@@ -179,124 +105,6 @@ class Statuses(unittest.TestCase):
         self.assertIsNone(parse_state_line(row))
         self.assertIsNone(parse_state_line('{"address":"develop-qzapp/ui","ts":"yesterday"}'))
         self.assertIsNone(parse_state_line('{"address":"develop-qzapp/ui","ts":"2026-10-08T05:00:00"}'))
-        with_null_since = ('{"address":"develop-qzapp/ui","ts":"2026-10-08T05:00:00Z","state":"idle",'
-                           '"sessions":[{"session":"s1","state":"idle","since":null}]}')
-        self.assertEqual(recovery_status(ACTED, NOW, 5, parse_state_line(with_null_since), False), "restoring")
-
-    def test_a_missing_record_is_stale_not_failed(self):
-        self.assertEqual(recovery_status(ACTED, NOW, 500, None, True), "stale")
-
-    def test_a_record_older_than_two_heartbeats_is_stale(self):
-        acted = "2026-10-08T04:29:00Z"
-        quiet = record(since="2026-10-08T04:00:00Z", ts="2026-10-08T04:30:00Z")
-        self.assertEqual(recovery_status(acted, "2026-10-08T04:50:00Z", 5, quiet, False), "restoring")
-        self.assertEqual(recovery_status(acted, "2026-10-08T04:50:01Z", 5, quiet, False), "stale")
-
-    def test_waiting_after_the_action_is_restoring_until_the_wait_runs_out(self):
-        old = record(since="2026-10-08T04:00:00Z")
-        self.assertEqual(recovery_status(ACTED, NOW, 5, old, False), "restoring")
-        self.assertEqual(recovery_status(ACTED, NOW, RESTORE_WAIT_S, old, False), "failed")
-
-    def test_back_to_a_bare_shell_without_a_session_is_failed(self):
-        self.assertEqual(recovery_status(ACTED, NOW, 5, record(since="2026-10-08T04:00:00Z"), True), "failed")
-
-    def test_a_bare_pane_is_failed_whatever_another_session_does(self):
-        # Another live session of the account changed state after the action:
-        # the deck's own re-entry still ended.
-        self.assertEqual(recovery_status(ACTED, NOW, 30, record(), True), "failed")
-
-    def test_a_bare_pane_just_after_typing_is_still_restoring(self):
-        self.assertEqual(
-            recovery_status(ACTED, NOW, ENTRY_GRACE_S - 1, record(since="2026-10-08T04:00:00Z"), True),
-            "restoring",
-        )
-
-    def test_a_new_live_session_is_resumed_or_fresh(self):
-        self.assertEqual(recovery_status(ACTED, NOW, 5, record(), False), "resumed")
-        self.assertEqual(
-            recovery_status(ACTED, NOW, 5, record(), False, "fabric-resume: no transcript, started fresh"),
-            "fresh",
-        )
-        self.assertEqual(recovery_status(ACTED, NOW, 5, record(last="s-new"), False), "resumed")
-        self.assertEqual(recovery_status(ACTED, NOW, 5, record(last="s-old"), False), "fresh")
-
-
-class StubHerdr:
-    """Just enough of Herdr for poll(): pane processes and pane text."""
-
-    def __init__(self, processes, texts, gone=()):
-        self.processes, self.texts, self.gone = processes, texts, set(gone)
-
-    def process(self, pane):
-        if pane in self.gone:
-            raise DeckError(f"herdr pane process-info --pane {pane}: exit 1: pane not found")
-        return self.processes[pane]
-
-    def text(self, *args):
-        return self.texts[args[2]]
-
-
-class Poll(unittest.TestCase):
-    def test_reads_fresh_from_the_pane_while_the_new_session_runs(self):
-        # The agent's screen fills the bottom of the pane; fabric-resume's line
-        # is above it.
-        screen = "\n".join(["fabric-resume: no transcript; starting fresh in /home/ui/projects"]
-                           + [f"agent screen row {i}" for i in range(30)])
-        herdr = StubHerdr({"p1": IN_MOVETO}, {"p1": screen})
-        result = poll(herdr, {"ui": "p1"}, {"ui": record()}, ACTED, NOW, 10)
-        self.assertEqual(result["ui"][0], "fresh")
-        self.assertIn("starting fresh", result["ui"][1])
-
-    def test_a_herdr_error_is_retried_then_failed_not_a_crash(self):
-        herdr = StubHerdr({}, {}, gone={"p1"})
-        self.assertEqual(poll(herdr, {"ui": "p1"}, {"ui": record()}, ACTED, NOW, 10)["ui"][0], "restoring")
-        self.assertEqual(
-            poll(herdr, {"ui": "p1"}, {"ui": record()}, ACTED, NOW, RESTORE_WAIT_S)["ui"][0], "failed"
-        )
-
-    def test_another_session_turning_working_is_not_the_decks(self):
-        # The snapshot before the action lists s-other live; it turns working
-        # just after the action, before the stream's first row is read.
-        snapshot = [
-            '{"address":"develop-qzapp/ui","ts":"2026-10-08T04:59:00Z","state":"idle",'
-            '"sessions":[{"session":"s-other","state":"idle","since":"2026-10-08T04:00:00Z"}],'
-            '"last_session":"s-last"}'
-        ]
-        after = StateRecord("ui", "working", (Session("s-other", "working", "2026-10-08T05:00:20Z"),),
-                            "2026-10-08T05:00:20Z", last_session="s-last")
-        herdr = StubHerdr({"p1": IN_MOVETO}, {"p1": ""})
-        result = poll(herdr, {"ui": "p1"}, {"ui": after}, ACTED, NOW, 10,
-                      baselines_from_snapshot(snapshot))
-        self.assertEqual(result["ui"][0], "restoring")
-
-    def test_last_session_listed_live_before_the_restart_can_still_resume(self):
-        # A record from before the restart still lists last_session live.
-        snapshot = [
-            '{"address":"develop-qzapp/ui","ts":"2026-10-08T04:59:00Z","state":"idle",'
-            '"sessions":[{"session":"s-last","state":"idle","since":"2026-10-08T04:00:00Z"}],'
-            '"last_session":"s-last"}'
-        ]
-        resumed = StateRecord("ui", "idle", (Session("s-last", "idle", "2026-10-08T05:00:30Z"),),
-                              "2026-10-08T05:00:30Z", last_session="s-last")
-        herdr = StubHerdr({"p1": IN_MOVETO}, {"p1": ""})
-        result = poll(herdr, {"ui": "p1"}, {"ui": resumed}, ACTED, NOW, 10,
-                      baselines_from_snapshot(snapshot))
-        self.assertEqual(result["ui"][0], "resumed")
-
-    def test_pane_text_is_printed_without_control_characters(self):
-        self.assertEqual(printable("ok\x1b]0;title\x07\x9bdone\tend"), "ok]0;titledone\tend")
-
-
-class Hosts(unittest.TestCase):
-    def test_records_of_the_same_login_on_another_host_are_ignored(self):
-        lines = [
-            '{"address":"host-a/ui","ts":"2026-10-08T04:59:00Z","state":"idle",'
-            '"sessions":[{"session":"s-a","state":"idle","since":"2026-10-08T04:00:00Z"}]}',
-            '{"address":"host-b/ui","ts":"2026-10-08T04:59:00Z","state":"idle",'
-            '"sessions":[{"session":"s-b","state":"idle","since":"2026-10-08T04:00:00Z"}]}',
-        ]
-        self.assertEqual(baselines_from_snapshot(lines, "host-a"), {"ui": frozenset({"s-a"})})
-        self.assertEqual(parse_state_line(lines[1]).host, "host-b")
 
     def test_the_stream_filter_keeps_only_this_hosts_records(self):
         here = StateRecord("ui", "idle", (), "2026-10-08T05:00:00Z", host="host-a")
@@ -307,104 +115,483 @@ class Hosts(unittest.TestCase):
         self.assertFalse(for_this_host(None, "host-a"))
 
 
-class SameSecond(unittest.TestCase):
-    def test_a_session_live_in_the_second_of_the_action_counts(self):
-        same = record(since=ACTED)
-        self.assertEqual(recovery_status(ACTED, NOW, 10, same, False), "resumed")
+def record(login, *states, age_s=10):
+    ts = (NOW - datetime.timedelta(seconds=age_s)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    sessions = tuple(Session(f"s{i}", s, ts) for i, s in enumerate(states))
+    return StateRecord(login, states[0] if states else "none", sessions, ts, host="h")
 
 
-def state_row(state):
-    return StateRecord("ui", state, (), "2026-10-08T05:00:00Z", host="host-a")
+BARE = {"shell_pid": 10, "foreground_process_group_id": 10,
+        "foreground_processes": [{"pid": 10, "argv": ["bash"]}]}
 
 
-class AgentPanel(unittest.TestCase):
-    def test_states_map_one_to_one_and_none_releases(self):
-        for state in ("working", "idle", "blocked", "unknown"):
-            self.assertEqual(agent_report(state_row(state)), Report(state))
-        self.assertEqual(agent_report(state_row("none")), Release())
-        self.assertEqual(agent_report(state_row("stopped-answering")), Report("unknown"))
+def in_moveto(login, mode="", pid=20):
+    argv = ["sudo", "-n", "-u", login, "-H", ENTER, f"/home/{login}/projects", login]
+    return {"shell_pid": 10, "foreground_process_group_id": pid,
+            "foreground_processes": [{"pid": pid, "argv": argv + ([mode] if mode else [])}]}
 
 
+class FakeHerdr(Herdr):
+    """herdr's server as the deck's calls see it: workspaces, tabs, labelled
+    panes and each pane's process info, every call recorded. The adapter's
+    own account_tabs and process_info run on top of it."""
 
-def row_line(login, state, host="host-a"):
-    return ('{"address":"%s/%s","ts":"2026-10-08T05:00:00Z","sessions":[],"state":"%s"}'
-            % (host, login, state))
+    def __init__(self):
+        super().__init__(binary="herdr")
+        self.workspace_list = [{"workspace_id": "w1", "label": "New"}]
+        self.tabs = {"w1": []}
+        self.panes = {}
+        self.proc = {}
+        self.calls = []
+        self.down = False
+        self.n = 0
 
+    def _id(self, kind):
+        self.n += 1
+        return f"{kind}{self.n}"
 
-class FakeHerdr:
-    """account_tabs from a mutable table; every herdr call recorded, and a
-    set of panes whose calls fail as a closed tab's would."""
+    def add_tab(self, label, panes, workspace="w1"):
+        tab = self._id("t")
+        self.tabs[workspace].append({"tab_id": tab, "label": label})
+        for pane, pane_label, info in panes:
+            self.panes[pane] = {"pane_id": pane, "tab_id": tab, "label": pane_label}
+            self.proc[pane] = info
+        return tab
 
-    def __init__(self, tabs):
-        self.tabs, self.calls, self.dead = tabs, [], set()
+    def runs(self, pane=None):
+        return [c[3] for c in self.calls if c[:2] == ("pane", "run") and (pane is None or c[2] == pane)]
 
-    def account_tabs(self, logins):
-        return [t for t in self.tabs if t.login in logins]
+    def reports(self, pane):
+        return [c for c in self.calls if c[1] in ("report-agent", "report-metadata") and c[2] == pane]
 
     def call(self, *args):
+        if self.down:
+            raise ConnectionError("herdr's socket refuses")
         self.calls.append(args)
-        if args[2] in self.dead:
-            raise DeckError(f"pane {args[2]} not found")
-        return {}
+        head = args[:2]
+        if head == ("workspace", "list"):
+            return {"workspaces": list(self.workspace_list)}
+        if head == ("workspace", "create"):
+            w = self._id("w")
+            self.workspace_list.append({"workspace_id": w, "label": args[3]})
+            self.tabs[w] = []
+            return {"workspace": {"workspace_id": w}, "tab": {"tab_id": self.add_tab(None, [], w)}}
+        if head == ("tab", "list"):
+            return {"tabs": list(self.tabs[args[3]])}
+        if head == ("tab", "create"):
+            pane = self._id("p")
+            tab = self.add_tab(args[args.index("--label") + 1], [(pane, None, BARE)], args[3])
+            return {"tab": {"tab_id": tab}, "root_pane": {"pane_id": pane}}
+        if head == ("tab", "close"):
+            for tabs in self.tabs.values():
+                tabs[:] = [t for t in tabs if t["tab_id"] != args[2]]
+            return {}
+        if head == ("pane", "list"):
+            return {"panes": list(self.panes.values())}
+        if head == ("pane", "split"):
+            pane = self._id("p")
+            self.panes[pane] = {"pane_id": pane, "tab_id": self.panes[args[2]]["tab_id"], "label": None}
+            self.proc[pane] = BARE
+            return {"pane": {"pane_id": pane}}
+        if head == ("pane", "rename"):
+            self.panes[args[2]]["label"] = args[3]
+            return {}
+        if head == ("pane", "process-info"):
+            return {"process_info": self.proc[args[3]]}
+        if head[0] == "pane" and head[1] in ("run", "report-agent", "report-metadata"):
+            return {}
+        raise AssertionError(f"unexpected herdr call {args}")
 
 
-def watcher(herdr, logins=("ui",)):
-    return Watcher(herdr=herdr, accounts=lambda: set(logins), host="host-a", log=lambda _: None)
+ALL_MODES = frozenset({WAIT, WATCH, RESUME})
 
 
-class WatchLoop(unittest.TestCase):
-    def test_only_a_change_is_sent_until_the_resend_interval(self):
-        herdr = FakeHerdr([AccountTab("ui", "t1", "w1", "p1")])
-        w = watcher(herdr)
-        w.on_line(row_line("ui", "working"), 0)
-        w.on_line(row_line("ui", "working"), 5)
-        self.assertEqual(len(herdr.calls), 1, "a heartbeat sends nothing")
-        w.on_line(row_line("ui", "working"), RESEND_AFTER_S + 1)
-        self.assertEqual(len(herdr.calls), 2, "sent again after the interval")
-        w.on_line(row_line("ui", "idle"), RESEND_AFTER_S + 2)
-        self.assertEqual(herdr.calls[-1][-1], "idle")
+class Harness:
+    """A deck over a FakeHerdr, with the stream's records, a /proc tree and
+    the record of what was shown as plain values a test sets."""
 
-    def test_another_hosts_record_is_ignored(self):
-        herdr = FakeHerdr([AccountTab("ui", "t1", "w1", "p1")])
-        watcher(herdr).on_line(row_line("ui", "working", host="host-b"), 0)
-        self.assertEqual(herdr.calls, [])
+    def __init__(self, herdr=None, logins=("ui",), modes=ALL_MODES, befores=None):
+        self.herdr = herdr or FakeHerdr()
+        self.records = {}
+        self.tree, self.argvs = {}, {}
+        self.store = None if befores is None else dict(befores)
+        self.logs = []
+        self.logins = list(logins)
+        self.instance = SERVER
+        self.wall = NOW
 
-    def test_a_tab_that_moved_is_found_again_after_a_failed_report(self):
-        herdr = FakeHerdr([AccountTab("ui", "t1", "w1", "p1")])
-        w = watcher(herdr)
-        w.on_line(row_line("ui", "working"), 0)
-        herdr.dead.add("p1")
-        herdr.tabs = [AccountTab("ui", "t2", "w2", "p9")]
-        w.on_line(row_line("ui", "idle"), 1)   # fails on p1, forces a re-map
-        w.on_line(row_line("ui", "idle"), 2)   # goes to the tab's new pane
-        self.assertEqual(herdr.calls[-1][2], "p9")
+        def save(befores):
+            self.store = dict(befores)
 
-    def test_a_tab_split_after_mapping_is_released_and_no_longer_reported(self):
-        herdr = FakeHerdr([AccountTab("ui", "t1", "w1", "p1")])
-        w = watcher(herdr)
-        w.on_line(row_line("ui", "working"), 0)
-        herdr.tabs = [AccountTab("ui", "t1", "w1", "p1", pane_count=2)]
-        w.on_line(row_line("ui", "idle"), PANE_MAP_REFRESH_S)
-        self.assertEqual(herdr.calls[-1][1], "release-agent")
-        self.assertEqual(len(herdr.calls), 2, "nothing reported into the split tab")
+        self.deck = Deck(
+            herdr=self.herdr,
+            accounts=lambda: [Account(login, "rust-ui-dev") for login in self.logins],
+            records=self.records,
+            modes=modes,
+            cwd="/c",
+            catalog=None,
+            parents=lambda: dict(self.tree),
+            argv=lambda pid: self.argvs.get(pid, []),
+            load=lambda: None if self.store is None else dict(self.store),
+            save=save,
+            server=lambda: None if self.herdr.down else self.instance,
+            log=self.logs.append,
+            utc=lambda: self.wall,
+        )
 
-    def test_a_malformed_record_does_not_stop_the_watcher(self):
-        herdr = FakeHerdr([AccountTab("ui", "t1", "w1", "p1")])
-        w = watcher(herdr)
-        w.on_line('{"address":5,"ts":"2026-10-08T05:00:00Z"}', 0)
-        w.on_line(row_line("ui", "working").replace('"working"', '["working"]', 1), 1)
-        self.assertEqual(herdr.calls[-1][-1], "unknown")
+    def at(self, deck_s):
+        """The deck's clock and the wall clock, moved together."""
+        self.wall = NOW + datetime.timedelta(seconds=deck_s)
+        return deck_s
 
-    def test_a_herdr_timeout_does_not_stop_the_watcher(self):
-        herdr = FakeHerdr([AccountTab("ui", "t1", "w1", "p1")])
+    def harness_runs(self, pane, login="ui", mode=WAIT):
+        """A person pressed Enter: moveto holds the pane, a harness under it."""
+        self.herdr.proc[pane] = in_moveto(login, mode)
+        self.tree.update({21: 20, 22: 21})
+        self.argvs[22] = ["claude", "--model", "x"]
 
-        def hung(*args):
-            raise __import__("subprocess").TimeoutExpired(args, 30)
 
-        herdr.call = hung
-        w = watcher(herdr)
-        w.on_line(row_line("ui", "working"), 0)
-        self.assertEqual(w.shown, {})
+def harness_of(h, login="ui"):
+    return h.deck.harness_pane[login]
+
+
+class Restore(unittest.TestCase):
+    def test_a_new_account_gets_a_three_pane_tab_its_harness_waiting_for_the_decision(self):
+        h = Harness()
+        h.deck.restore(0)
+        labels = sorted(p["label"] for p in h.herdr.panes.values())
+        self.assertEqual(labels, ["harness", "shell", "status"])
+        harness = harness_of(h)
+        self.assertEqual(h.herdr.panes[harness]["label"], "harness")
+        split = next(c for c in h.herdr.calls if c[:2] == ("pane", "split"))
+        self.assertEqual((split[2], split[4], split[6]), (harness, "right", "0.65"))
+        self.assertEqual(sorted(h.herdr.runs()), ["moveto ui", "moveto ui --watch"])
+        self.assertEqual(h.herdr.runs(harness), [], "the harness waits for the stream")
+
+    def test_nothing_running_before_or_now_arms_wait_after_the_settle(self):
+        h = Harness()
+        h.records["ui"] = record("ui")
+        h.deck.restore(0)
+        harness = harness_of(h)
+        h.deck.follow(RESTORE_SETTLE_S - 1)
+        self.assertEqual(h.herdr.runs(harness), [])
+        h.deck.follow(RESTORE_SETTLE_S)
+        self.assertEqual(h.herdr.runs(harness), ["moveto ui --wait"])
+
+    def test_what_ran_before_and_died_is_resumed_and_what_still_runs_gets_a_plain_shell(self):
+        for live, expected in (((), "moveto ui --resume"), (("working",), "moveto ui")):
+            h = Harness(befores={"ui": Before(running=True)})
+            h.records["ui"] = record("ui", *live)
+            h.deck.restore(0)
+            h.deck.follow(RESTORE_SETTLE_S)
+            self.assertEqual(h.herdr.runs(harness_of(h)), [expected], live)
+
+    def test_with_no_fresh_record_it_waits_then_arms_wait_never_resume(self):
+        h = Harness(befores={"ui": Before(running=True)})
+        h.records["ui"] = record("ui", age_s=3600)
+        h.deck.restore(0)
+        harness = harness_of(h)
+        h.deck.follow(RESTORE_WAIT_S - 1)
+        self.assertEqual(h.herdr.runs(harness), [])
+        h.deck.follow(RESTORE_WAIT_S)
+        self.assertEqual(h.herdr.runs(harness), ["moveto ui --wait"])
+
+    def test_a_pane_a_person_started_something_in_during_the_wait_is_not_armed(self):
+        h = Harness()
+        h.records["ui"] = record("ui")
+        h.deck.restore(0)
+        harness = harness_of(h)
+        h.herdr.proc[harness] = in_moveto("ui")
+        h.deck.follow(RESTORE_SETTLE_S)
+        self.assertEqual(h.herdr.runs(harness), [])
+
+    def test_a_milestone_one_tab_is_adopted_as_the_harness(self):
+        herdr = FakeHerdr()
+        herdr.add_tab("ui", [("p0", None, BARE)])
+        h = Harness(herdr)
+        h.deck.restore(0)
+        self.assertEqual(herdr.panes["p0"]["label"], "harness")
+        self.assertEqual(sorted(p["label"] for p in herdr.panes.values()), ["harness", "shell", "status"])
+        self.assertFalse(any(c[:2] == ("tab", "create") for c in herdr.calls))
+
+    def test_a_tab_split_by_hand_is_left_alone_and_said_once(self):
+        herdr = FakeHerdr()
+        herdr.add_tab("ui", [("p0", None, BARE), ("p1", None, BARE)])
+        h = Harness(herdr)
+        h.deck.restore(0)
+        h.deck.restore(1)
+        self.assertEqual(h.herdr.runs(), [])
+        self.assertFalse(any(c[1] in ("split", "rename") for c in herdr.calls))
+        self.assertEqual(sum("split by hand" in line for line in h.logs), 1)
+
+    def test_a_surviving_harness_is_classified_and_never_rearmed(self):
+        herdr = FakeHerdr()
+        herdr.add_tab("ui", [("p0", "harness", BARE), ("p1", "shell", in_moveto("ui")),
+                             ("p2", "status", in_moveto("ui", WATCH))])
+        h = Harness(herdr)
+        h.harness_runs("p0")
+        h.records["ui"] = record("ui", "working")
+        h.deck.restore(0)
+        h.deck.follow(RESTORE_SETTLE_S)
+        self.assertEqual(h.herdr.runs(), [], "nothing is typed while moveto runs")
+        self.assertEqual(h.herdr.reports("p0")[0][-1], "working")
+
+    def test_an_account_with_an_unsafe_login_is_never_typed(self):
+        h = Harness(logins=("ui; rm -rf ~",))
+        h.deck.restore(0)
+        h.deck.follow(RESTORE_WAIT_S)
+        self.assertEqual(h.herdr.runs(), [])
+        self.assertFalse(any(c[:2] == ("tab", "create") for c in h.herdr.calls))
+
+
+class Follow(unittest.TestCase):
+    def ready(self, befores=None):
+        """A restored account whose harness pane runs `moveto ui --wait`."""
+        h = Harness(befores=befores)
+        h.records["ui"] = record("ui")
+        h.deck.restore(0)
+        h.deck.follow(RESTORE_SETTLE_S)
+        harness = harness_of(h)
+        h.herdr.proc[harness] = in_moveto("ui", WAIT)
+        h.deck.follow(RESTORE_SETTLE_S + 1)
+        return h, harness
+
+    def test_dormant_then_enter_shows_the_session_and_records_running(self):
+        h, harness = self.ready()
+        self.assertEqual(h.herdr.reports(harness)[-1][-3:], ("idle=dormant", "--state-label", "done=dormant"))
+        self.assertIn(("--display-agent", "dormant"), list(zip(h.herdr.reports(harness)[-1], h.herdr.reports(harness)[-1][1:])))
+        h.harness_runs(harness)
+        h.records["ui"] = record("ui", "working")
+        h.deck.follow(20)
+        self.assertEqual(h.herdr.reports(harness)[-3][-1], "working")
+        self.assertEqual(h.store, {"ui": Before(running=True)})
+
+    def test_a_session_elsewhere_reads_running_elsewhere_and_touches_nothing(self):
+        h, harness = self.ready()
+        h.records["ui"] = record("ui", "blocked")
+        h.deck.follow(20)
+        self.assertEqual(h.herdr.reports(harness)[-1][-1], "done=dormant", "not within the same-session window")
+        h.deck.follow(20 + SAME_SESSION_S)
+        self.assertEqual(h.herdr.reports(harness)[-1][-1], "unknown=running elsewhere")
+        self.assertEqual(h.herdr.runs(harness), ["moveto ui --wait"])
+
+    def test_a_wait_that_ends_is_rearmed_wait_and_reads_dormant_not_failed(self):
+        h, harness = self.ready()
+        h.herdr.proc[harness] = BARE
+        h.deck.follow(30)
+        self.assertEqual(h.herdr.reports(harness)[-1][-3:], ("idle=dormant", "--state-label", "done=dormant"))
+        self.assertEqual(h.herdr.runs(harness), ["moveto ui --wait"] * 2)
+
+    def test_a_resume_that_ends_before_any_harness_is_failed_and_rearmed_wait(self):
+        h = Harness(befores={"ui": Before(running=True)})
+        h.records["ui"] = record("ui")
+        h.deck.restore(0)
+        h.deck.follow(RESTORE_SETTLE_S)
+        harness = harness_of(h)
+        self.assertEqual(h.herdr.runs(harness), ["moveto ui --resume"])
+        h.deck.follow(RESTORE_SETTLE_S * 3)
+        self.assertEqual(h.herdr.reports(harness)[-1][-1], "blocked=failed")
+        self.assertEqual(h.herdr.runs(harness), ["moveto ui --resume", "moveto ui --wait"])
+
+    def test_only_a_change_is_reported_until_the_resend_interval(self):
+        h, harness = self.ready()
+        sent = len(h.herdr.reports(harness))
+        h.deck.follow(20)
+        self.assertEqual(len(h.herdr.reports(harness)), sent)
+        h.deck.follow(RESTORE_SETTLE_S + 1 + RESEND_AFTER_S)
+        self.assertEqual(len(h.herdr.reports(harness)), sent + 3, "the state, the clear and the label")
+
+    def test_a_harness_pane_closed_by_hand_is_followed_no_more(self):
+        h, harness = self.ready()
+        del h.herdr.panes[harness]
+        h.deck.follow(RESTORE_SETTLE_S + 1 + PANE_MAP_REFRESH_S)
+        calls = len(h.herdr.calls)
+        h.deck.follow(RESTORE_SETTLE_S + 3 + PANE_MAP_REFRESH_S)
+        self.assertFalse(any(harness in c for c in h.herdr.calls[calls:]))
+
+    def test_a_herdr_server_that_comes_back_is_a_restore(self):
+        h, harness = self.ready()
+        h.herdr.down = True
+        h.deck.follow(100)
+        self.assertTrue(h.deck.lost)
+        logged = len(h.logs)
+        h.deck.follow(102)
+        self.assertEqual(len(h.logs), logged, "lost, the deck only tries the map again, quietly")
+        h.herdr.down = False
+        h.herdr.proc[harness] = BARE
+        h.deck.follow(100 + PANE_MAP_REFRESH_S)
+        self.assertIn("herdr's server answers: restoring", h.logs)
+        self.assertEqual(h.deck.pending.keys(), {"ui"})
+
+    def test_one_accounts_herdr_failure_does_not_stop_the_others(self):
+        h = Harness(logins=("ui", "vo"))
+        h.records.update(ui=record("ui"), vo=record("vo"))
+        h.deck.restore(0)
+        h.deck.follow(RESTORE_SETTLE_S)
+        del h.herdr.proc[harness_of(h, "ui")]
+        vo = harness_of(h, "vo")
+        h.herdr.proc[vo] = in_moveto("vo", WAIT)
+        h.records["vo"] = record("vo", "idle")
+        h.deck.follow(RESTORE_SETTLE_S + 1)
+        h.deck.follow(RESTORE_SETTLE_S + 1 + SAME_SESSION_S)
+        self.assertEqual(h.herdr.reports(vo)[-1][-1], "unknown=running elsewhere")
+        self.assertTrue(any(line.startswith("ui:") for line in h.logs))
+
+    def test_the_record_keeps_only_placed_accounts(self):
+        h, harness = self.ready(befores={"gone": Before(running=True)})
+        h.harness_runs(harness)
+        h.records["ui"] = record("ui", "working")
+        h.deck.follow(20)
+        self.assertEqual(h.store, {"ui": Before(running=True)})
+
+    def test_another_server_answering_is_herdr_lost_and_a_restore(self):
+        h, harness = self.ready()
+        h.instance = OTHER
+        h.herdr.proc[harness] = BARE
+        h.deck.follow(20)
+        self.assertIn("herdr's server was restarted", h.logs)
+        self.assertIn("herdr's server answers: restoring", h.logs)
+        self.assertEqual(h.deck.pending.keys(), {"ui"})
+
+
+class BeforeFollow(unittest.TestCase):
+    def running(self):
+        h = Harness()
+        h.records["ui"] = record("ui")
+        h.deck.restore(0)
+        h.deck.follow(h.at(RESTORE_SETTLE_S))
+        h.records["ui"] = record("ui", "working")
+        h.deck.follow(h.at(10))
+        self.assertEqual(h.store, {"ui": Before(running=True)})
+        return h
+
+    def test_a_session_that_ends_while_herdr_stays_up_settles_as_ended(self):
+        h = self.running()
+        h.records["ui"] = record("ui")
+        h.deck.follow(h.at(20))
+        self.assertEqual(h.store["ui"].fall_at, h.wall.timestamp())
+        h.deck.follow(h.at(20 + SETTLE_S))
+        self.assertEqual(h.store, {"ui": Before(running=False)})
+
+    def test_a_session_that_ends_with_herdr_stays_recorded_as_running(self):
+        h = self.running()
+        h.records["ui"] = record("ui")
+        h.deck.follow(h.at(20))
+        h.herdr.down = True
+        h.deck.follow(h.at(22))
+        h.deck.follow(h.at(40))
+        self.assertEqual(h.store, {"ui": Before(running=True)})
+
+    def test_a_fall_left_pending_settles_at_start_only_on_the_same_server(self):
+        fall = Before(running=True, fall_at=NOW.timestamp() - 30, fall_server=SERVER)
+        for instance, running in ((SERVER, False), (OTHER, True)):
+            h = Harness(befores={"ui": fall})
+            h.instance = instance
+            h.deck.restore(0)
+            self.assertEqual(h.deck.befores["ui"].running, running, instance)
+            self.assertEqual(h.store["ui"].fall_at, None, "settled or dropped, and written")
+
+
+class NotYet(unittest.TestCase):
+    def test_modes_moveto_lacks_are_never_armed_and_the_pane_reads_unknown(self):
+        h = Harness(modes=frozenset())
+        h.records["ui"] = record("ui")
+        h.deck.restore(0)
+        h.deck.follow(RESTORE_SETTLE_S)
+        h.deck.follow(RESTORE_SETTLE_S + 20)
+        self.assertEqual(h.herdr.runs(), ["moveto ui"], "only the plain shell pane")
+        self.assertEqual(h.herdr.reports(harness_of(h))[-3][-1], "unknown")
+        self.assertEqual(sum("no --wait" in line for line in h.logs), 1)
+
+
+class Panel(unittest.TestCase):
+    def test_the_pane_id_comes_first_and_no_seq_is_sent(self):
+        report = report_command("p1", Shown("idle", "dormant"))
+        self.assertEqual(report[:3], ("pane", "report-agent", "p1"))
+        self.assertNotIn("--seq", report)
+        clear, label = label_commands("p1", Shown("idle", "dormant"))
+        self.assertEqual(clear[-1], "--clear-state-labels")
+        self.assertNotIn("--clear-state-labels", label, "herdr refuses a clear and a set in one call")
+        self.assertEqual(label[-6:], ("--display-agent", "dormant", "--state-label", "idle=dormant",
+                                      "--state-label", "done=dormant"))
+        self.assertEqual(label_commands("p1", Shown("blocked", "failed"))[1][-4:],
+                         ("--display-agent", "failed", "--state-label", "blocked=failed"))
+
+    def test_a_running_harness_reads_as_herdrs_own_agent_name_and_state(self):
+        clear, name = label_commands("p1", Shown("working", "working"))
+        self.assertEqual((clear[-1], name[-1]), ("--clear-state-labels", "--clear-display-agent"))
+
+
+class Proc(unittest.TestCase):
+    def fake_proc(self, processes):
+        root = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, root)
+        for pid, (ppid, comm, argv) in processes.items():
+            os.makedirs(os.path.join(root, str(pid)))
+            with open(os.path.join(root, str(pid), "stat"), "w") as f:
+                f.write(f"{pid} ({comm}) S {ppid} {pid} {pid} 0 -1\n")
+            with open(os.path.join(root, str(pid), "cmdline"), "wb") as f:
+                f.write(b"\0".join(a.encode() for a in argv) + b"\0")
+        os.makedirs(os.path.join(root, "self"))
+        return root
+
+    def test_a_harness_is_found_under_the_panes_sudo_through_its_own_pty(self):
+        root = self.fake_proc({
+            20: (10, "sudo", ["sudo", "-u", "ui"]),
+            21: (20, "sudo", ["sudo", "-u", "ui"]),
+            22: (21, "bash", ["bash", "-i"]),
+            23: (22, "fabric-python", ["/usr/local/bin/fabric-python", "-I", "/a/tools/fabric/launch.py"]),
+            30: (1, "claude ) (x", ["claude"]),
+        })
+        parents = proc_parents(root)
+        self.assertEqual(parents[30], 1, "a comm with parentheses is read past")
+        argv = lambda pid: proc_argv(pid, root)
+        self.assertTrue(harness_under(20, parents, argv))
+        self.assertFalse(harness_under(21, {21: 20, 22: 21}, lambda pid: ["bash"]))
+        self.assertFalse(harness_under(99, parents, argv), "a pid with no children")
+
+    def test_a_cycle_in_a_racing_tree_does_not_hang(self):
+        self.assertFalse(harness_under(1, {2: 3, 3: 2, 4: 1}, lambda pid: []))
+
+
+class BeforeFile(unittest.TestCase):
+    def test_the_record_is_written_owner_only_and_read_back_whole(self):
+        root = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, root)
+        path = os.path.join(root, "fabric-deck", "before.json")
+        self.assertIsNone(load_befores(path), "no file is a first run")
+        befores = {"ui": Before(running=True, fall_at=12.5, fall_server=SERVER), "vo": Before()}
+        save_befores(path, befores)
+        self.assertEqual(load_befores(path), befores)
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+
+    def test_an_entry_of_the_wrong_shape_is_read_as_absent(self):
+        root = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, root)
+        path = os.path.join(root, "before.json")
+        with open(path, "w") as f:
+            f.write('{"accounts": {"ui": {"running": "yes"}, "vo": {"running": true, "fall_at": 3, '
+                    '"fall_server": ["x", 1]}, "wo": 5}}')
+        self.assertEqual(load_befores(path), {"vo": Before(running=True)})
+        with open(path, "w") as f:
+            f.write("[")
+        self.assertEqual(load_befores(path), {})
+
+
+class ServerInstance(unittest.TestCase):
+    def test_the_peer_pid_and_its_start_time_name_the_instance(self):
+        import socket
+
+        root = tempfile.mkdtemp(dir=f"/run/user/{os.getuid()}" if os.path.isdir(f"/run/user/{os.getuid()}") else None)
+        self.addCleanup(__import__("shutil").rmtree, root)
+        path = os.path.join(root, "s.sock")
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(listener.close)
+        listener.bind(path)
+        listener.listen(1)
+        self.assertEqual(server_instance(path), (os.getpid(), start_ticks(os.getpid())))
+        self.assertIsNone(server_instance(os.path.join(root, "none.sock")))
+        self.assertIsNone(server_instance(None))
 
 
 class Backoff(unittest.TestCase):
@@ -417,32 +604,24 @@ class Backoff(unittest.TestCase):
         self.assertEqual(next_backoff(failures, 61), (1, 1))
 
 
-class AgentCommand(unittest.TestCase):
-    def test_the_pane_id_comes_first_as_herdrs_parser_wants(self):
-        self.assertEqual(
-            agent_command("w1:p2", Report("working")),
-            ("pane", "report-agent", "w1:p2", "--source", "fabric", "--agent", "claude",
-             "--state", "working"),
-        )
-        self.assertEqual(
-            agent_command("w1:p3", Release()),
-            ("pane", "release-agent", "w1:p3", "--source", "fabric", "--agent", "claude"),
-        )
+class StreamLines(unittest.TestCase):
+    def test_a_line_that_fails_to_apply_does_not_end_the_stream(self):
+        import sys
 
+        seen, logs = [], []
+        stream = None
 
-class Order(unittest.TestCase):
-    def test_the_snapshot_is_read_before_any_pane_is_touched(self):
-        calls = []
-        snapshot_then_act(lambda: calls.append("snapshot") or {}, lambda: calls.append("act") or {})
-        self.assertEqual(calls, ["snapshot", "act"])
+        def on_line(raw):
+            seen.append(raw.strip())
+            if raw.strip() == "a":
+                raise ValueError("bad")
+            stream.closing = True
 
-
-class SplitTab(unittest.TestCase):
-    def test_a_split_account_tab_is_not_typed_into(self):
-        tabs = [AccountTab("coord", "t1", "w1", "p1", pane_count=2)]
-        actions = plan([Account("coord", "fabric-coordinator")], tabs, {"p1": BARE}, set(), CATALOG)
-        self.assertEqual(actions, [Undetermined("coord", "p1")])
-
+        stream = Stream(on_line=on_line, log=logs.append,
+                        command=(sys.executable, "-c", "print('a'); print('b')"))
+        stream.run()
+        self.assertEqual(seen, ["a", "b"])
+        self.assertEqual(logs, ["a state record was skipped: bad"])
 
 
 class StopChild(unittest.TestCase):
@@ -462,7 +641,6 @@ class StopChild(unittest.TestCase):
         return child
 
     def stop(self, child, grace=0.5, signal_after=None):
-        import os
         import signal
         import threading
         import fabric_deck
