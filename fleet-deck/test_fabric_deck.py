@@ -265,10 +265,28 @@ class Poll(unittest.TestCase):
         self.assertEqual(printable("ok\x1b]0;title\x07\x9bdone\tend"), "ok]0;titledone\tend")
 
 
+class Hosts(unittest.TestCase):
+    def test_records_of_the_same_login_on_another_host_are_ignored(self):
+        lines = [
+            '{"address":"host-a/ui","ts":"2026-10-08T04:59:00Z","state":"idle",'
+            '"sessions":[{"session":"s-a","state":"idle","since":"2026-10-08T04:00:00Z"}]}',
+            '{"address":"host-b/ui","ts":"2026-10-08T04:59:00Z","state":"idle",'
+            '"sessions":[{"session":"s-b","state":"idle","since":"2026-10-08T04:00:00Z"}]}',
+        ]
+        self.assertEqual(baselines_from_snapshot(lines, "host-a"), {"ui": frozenset({"s-a"})})
+        self.assertEqual(parse_state_line(lines[1]).host, "host-b")
+
+
+class SameSecond(unittest.TestCase):
+    def test_a_session_live_in_the_second_of_the_action_counts(self):
+        same = record(since=ACTED)
+        self.assertEqual(recovery_status(ACTED, NOW, 10, same, False), "resumed")
+
+
 class Order(unittest.TestCase):
     def test_the_snapshot_is_read_before_any_pane_is_touched(self):
         calls = []
-        snapshot_then_act(lambda: calls.append("snapshot") or [], lambda: calls.append("act") or {})
+        snapshot_then_act(lambda: calls.append("snapshot") or {}, lambda: calls.append("act") or {})
         self.assertEqual(calls, ["snapshot", "act"])
 
 

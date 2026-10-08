@@ -16,6 +16,7 @@ the bottom run the real commands.
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import shutil
@@ -197,6 +198,8 @@ STALE_AFTER_S = 2 * 600
 # having started moveto, not moveto having exited.
 ENTRY_GRACE_S = 5
 
+ONE_SECOND = datetime.timedelta(seconds=1)
+
 
 @dataclass(frozen=True)
 class Session:
@@ -213,6 +216,9 @@ class StateRecord:
     state: str
     sessions: tuple[Session, ...]
     ts: str
+    # The host part of the stream's address: fabric-ctl all states reports
+    # every host, and the same login may exist on more than one.
+    host: str = ""
     # agent-fabric ADR-029 rule 16, amended 2026-10-08; absent from an older
     # agentd's record, in which case the deck re-enters regardless.
     last_session: str | None = None
@@ -235,8 +241,10 @@ def parse_state_line(line: str) -> StateRecord | None:
         for s in row.get("sessions") or []
         if isinstance(s, dict) and s.get("session")
     )
+    host, _, login = address.rpartition("/")
     return StateRecord(
-        login=address.rsplit("/", 1)[-1],
+        login=login,
+        host=host,
         state=row.get("state", "unknown"),
         sessions=sessions,
         ts=ts,
@@ -257,7 +265,15 @@ def parse_utc(stamp):
     return parsed if parsed.tzinfo is not None else None
 
 
-def baselines_from_snapshot(lines: Iterable[str]) -> dict[str, frozenset[str]]:
+def for_this_host(record: StateRecord | None, host: str | None) -> bool:
+    """Whether a stream record describes an account on the deck's own host.
+    With the host unknown every record is taken, as before hosts mattered."""
+    return record is not None and (host is None or record.host == host)
+
+
+def baselines_from_snapshot(
+    lines: Iterable[str], host: str | None = None
+) -> dict[str, frozenset[str]]:
     """Per account, the sessions live in a snapshot taken before the deck acts:
     sessions elsewhere, which its re-entry cannot have started. The account's
     last_session is never part of it: bringing that session back is what the
@@ -265,7 +281,7 @@ def baselines_from_snapshot(lines: Iterable[str]) -> dict[str, frozenset[str]]:
     baselines: dict[str, frozenset[str]] = {}
     for line in lines:
         record = parse_state_line(line)
-        if record is None:
+        if not for_this_host(record, host):
             continue
         baselines[record.login] = frozenset(
             s.session for s in record.sessions
@@ -288,7 +304,10 @@ def newer_live_sessions(
         s for s in record.sessions
         if s.state in LIVE_STATES
         and s.session not in baseline
-        and (parse_utc(s.since) or acted) > acted
+        # Stamps are whole seconds: a session that went live in the second of
+        # the action counts; one live before it is in the baseline instead. A
+        # session whose since cannot be read is never counted as the deck's.
+        and (parse_utc(s.since) or acted - ONE_SECOND) >= acted
     ]
 
 
@@ -389,6 +408,20 @@ def moveto_list() -> str:
     return subprocess.run(
         ["moveto", "--list"], capture_output=True, text=True, timeout=60, check=True
     ).stdout
+
+
+def local_host() -> str | None:
+    """This host's name as the fleet addresses it (the host part of
+    fabric-whoami's address), or None when it cannot be told."""
+    try:
+        result = subprocess.run(
+            ["fabric-whoami", "--json"], capture_output=True, text=True, timeout=30
+        )
+        address = json.loads(result.stdout).get("address", "")
+    except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
+        return None
+    host, _, _ = address.rpartition("/")
+    return host or None
 
 
 def states_snapshot() -> list[str]:
@@ -545,7 +578,7 @@ def snapshot_then_act(snapshot, act) -> tuple[dict[str, frozenset[str]], str, di
     """The baseline is read before any pane is touched, so a session of an
     account that runs elsewhere is known as not the deck's however soon it
     changes state. Returns the baselines, the action's time and the panes."""
-    baselines = baselines_from_snapshot(snapshot())
+    baselines = snapshot()
     acted_at = utc_now()
     return baselines, acted_at, act()
 
@@ -589,8 +622,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     resume_flag = moveto_has_resume()
+    host = local_host()
+    if host is None:
+        print("fabric-deck: cannot tell this host's fleet name (fabric-whoami); "
+              "state records of the same login on other hosts may be mixed in", file=sys.stderr)
     baselines, acted_at, entered = snapshot_then_act(
-        lambda: states_snapshot(),
+        lambda: baselines_from_snapshot(states_snapshot(), host),
         lambda: execute(herdr, actions, args.cwd, resume_flag),
     )
     started = time.monotonic()
@@ -626,7 +663,7 @@ def main(argv: list[str] | None = None) -> int:
                         stream_ended = True
                     else:
                         parsed = parse_state_line(raw)
-                        if parsed is not None:
+                        if for_this_host(parsed, host):
                             records[parsed.login] = parsed
                     raw = lines.get_nowait()
             except queue.Empty:
