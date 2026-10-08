@@ -400,10 +400,16 @@ def states_snapshot() -> list[str]:
             ["fabric-ctl", "all", "states", "--json"], capture_output=True, text=True, timeout=60
         )
     except (OSError, subprocess.TimeoutExpired) as error:
-        print(f"fabric-deck: no state snapshot before acting ({error}); "
-              "sessions already running elsewhere may be mistaken for resumed ones", file=sys.stderr)
-        return []
-    return result.stdout.splitlines()
+        reason = str(error)
+    else:
+        # Exit 1 only means some account has no record; the relay's own
+        # failures (unreachable, refused) exit higher with nothing on stdout.
+        if result.returncode in (0, 1) and result.stdout.strip():
+            return result.stdout.splitlines()
+        reason = (result.stderr.strip() or f"exit {result.returncode}, no records")[:300]
+    print(f"fabric-deck: no state snapshot before acting ({reason}); "
+          "sessions already running elsewhere may be mistaken for resumed ones", file=sys.stderr)
+    return []
 
 
 def moveto_has_resume() -> bool:
@@ -535,6 +541,15 @@ def poll(
     return result
 
 
+def snapshot_then_act(snapshot, act) -> tuple[dict[str, frozenset[str]], str, dict[str, str]]:
+    """The baseline is read before any pane is touched, so a session of an
+    account that runs elsewhere is known as not the deck's however soon it
+    changes state. Returns the baselines, the action's time and the panes."""
+    baselines = baselines_from_snapshot(snapshot())
+    acted_at = utc_now()
+    return baselines, acted_at, act()
+
+
 def status_line(login: str, status: str, detail: str = "") -> str:
     suffix = f"  {detail}" if detail else ""
     return f"{login:<28} {status}{suffix}"
@@ -574,12 +589,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     resume_flag = moveto_has_resume()
-    # Taken before any pane is touched, so a session of an account that runs
-    # elsewhere is known as not the deck's however soon it changes state.
-    baselines = baselines_from_snapshot(states_snapshot())
-    acted_at = utc_now()
+    baselines, acted_at, entered = snapshot_then_act(
+        lambda: states_snapshot(),
+        lambda: execute(herdr, actions, args.cwd, resume_flag),
+    )
     started = time.monotonic()
-    entered = execute(herdr, actions, args.cwd, resume_flag)
     if not entered:
         return 0
     print(f"re-entered {len(entered)} account(s) at {acted_at}; "

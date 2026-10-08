@@ -6,6 +6,7 @@ from fabric_deck import (
     DeckError,
     Session,
     baselines_from_snapshot,
+    snapshot_then_act,
     StateRecord,
     poll,
     printable,
@@ -262,6 +263,13 @@ class Poll(unittest.TestCase):
 
     def test_pane_text_is_printed_without_control_characters(self):
         self.assertEqual(printable("ok\x1b]0;title\x07\x9bdone\tend"), "ok]0;titledone\tend")
+
+
+class Order(unittest.TestCase):
+    def test_the_snapshot_is_read_before_any_pane_is_touched(self):
+        calls = []
+        snapshot_then_act(lambda: calls.append("snapshot") or [], lambda: calls.append("act") or {})
+        self.assertEqual(calls, ["snapshot", "act"])
 
 
 class SplitTab(unittest.TestCase):
