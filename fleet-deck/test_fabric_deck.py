@@ -1,6 +1,11 @@
 import unittest
 
 from fabric_deck import (
+    Release,
+    Report,
+    agent_command,
+    agent_report,
+    status_update,
     ENTRY_GRACE_S,
     RESTORE_WAIT_S,
     DeckError,
@@ -290,6 +295,41 @@ class SameSecond(unittest.TestCase):
     def test_a_session_live_in_the_second_of_the_action_counts(self):
         same = record(since=ACTED)
         self.assertEqual(recovery_status(ACTED, NOW, 10, same, False), "resumed")
+
+
+def state_row(state):
+    return StateRecord("ui", state, (), "2026-10-08T05:00:00Z", host="host-a")
+
+
+class AgentPanel(unittest.TestCase):
+    def test_states_map_one_to_one_and_none_releases(self):
+        for state in ("working", "idle", "blocked", "unknown"):
+            self.assertEqual(agent_report(state_row(state)), Report(state))
+        self.assertEqual(agent_report(state_row("none")), Release())
+        self.assertEqual(agent_report(state_row("stopped-answering")), Report("unknown"))
+
+    def test_only_a_change_is_reported_and_only_into_a_mapped_tab(self):
+        shown = {}
+        panes = {"ui": "p1"}
+        first = status_update(state_row("working"), panes, shown)
+        self.assertEqual(first, ("p1", Report("working")))
+        shown["p1"] = Report("working")
+        self.assertIsNone(status_update(state_row("working"), panes, shown), "a heartbeat")
+        self.assertEqual(status_update(state_row("idle"), panes, shown), ("p1", Report("idle")))
+        self.assertIsNone(status_update(state_row("idle"), {}, shown), "no tab here")
+
+
+class AgentCommand(unittest.TestCase):
+    def test_the_pane_id_comes_first_as_herdrs_parser_wants(self):
+        self.assertEqual(
+            agent_command("w1:p2", Report("working")),
+            ("pane", "report-agent", "w1:p2", "--source", "fabric", "--agent", "claude",
+             "--state", "working"),
+        )
+        self.assertEqual(
+            agent_command("w1:p3", Release()),
+            ("pane", "release-agent", "w1:p3", "--source", "fabric", "--agent", "claude"),
+        )
 
 
 class Order(unittest.TestCase):
