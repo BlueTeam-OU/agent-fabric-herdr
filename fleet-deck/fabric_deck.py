@@ -42,6 +42,9 @@ class AccountTab:
     tab_id: str
     workspace_id: str
     pane_id: str
+    # A split account tab is the operator's arrangement; the deck cannot tell
+    # which pane is the account's, so it does not type into any of them.
+    pane_count: int = 1
 
 
 @dataclass(frozen=True)
@@ -145,6 +148,9 @@ def plan(
     actions: list[Action] = []
     for account in accounts:
         tab = by_login.get(account.login)
+        if tab is not None and tab.pane_count != 1:
+            actions.append(Undetermined(account.login, tab.pane_id))
+            continue
         if tab is None:
             seeded = seed_workspace(account.role, catalog)
             workspace = (
@@ -187,14 +193,25 @@ LIVE_STATES = frozenset({"working", "idle"})
 STALE_AFTER_S = 2 * 600
 
 
+# A bare pane this soon after the deck typed into it is the shell not yet
+# having started moveto, not moveto having exited.
+ENTRY_GRACE_S = 5
+
+
+@dataclass(frozen=True)
+class Session:
+    session: str
+    state: str
+    since: str
+
+
 @dataclass(frozen=True)
 class StateRecord:
     """One account's row of `fabric-ctl all states --json`."""
 
     login: str
     state: str
-    session_ids: tuple[str, ...]
-    session_since: str | None
+    sessions: tuple[Session, ...]
     ts: str
     # agent-fabric ADR-029 rule 16, amended 2026-10-08; absent from an older
     # agentd's record, in which case the deck re-enters regardless.
@@ -203,30 +220,51 @@ class StateRecord:
 
 
 def parse_state_line(line: str) -> StateRecord | None:
+    """A record, or None when the line is not one. The stream's row for an
+    account with no state on the channel has no `ts`: that is no record."""
     try:
         row = json.loads(line)
         address = row["address"]
+        ts = row["ts"]
     except (ValueError, KeyError, TypeError):
         return None
-    sessions = row.get("sessions") or []
+    if not isinstance(ts, str) or parse_utc(ts) is None:
+        return None
+    sessions = tuple(
+        Session(s["session"], s.get("state", "unknown"), s.get("since", ""))
+        for s in row.get("sessions") or []
+        if isinstance(s, dict) and s.get("session")
+    )
     return StateRecord(
         login=address.rsplit("/", 1)[-1],
         state=row.get("state", "unknown"),
-        session_ids=tuple(s.get("session", "") for s in sessions if s.get("session")),
-        session_since=max((s.get("since") or "" for s in sessions), default=None) or None,
-        ts=row.get("ts", ""),
+        sessions=sessions,
+        ts=ts,
         last_session=row.get("last_session"),
         resumable=row.get("resumable"),
     )
 
 
-def seconds_between(earlier: str, later: str) -> float:
+def parse_utc(stamp: str):
     import datetime
 
-    def parse(stamp: str) -> datetime.datetime:
-        return datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    try:
+        parsed = datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
 
-    return (parse(later) - parse(earlier)).total_seconds()
+
+def newer_live_sessions(record: StateRecord | None, acted_at: str) -> list[Session]:
+    """Sessions live after the deck's action. A session's `since` is when it
+    entered its state, so a resumed session enters it after the action."""
+    acted = parse_utc(acted_at)
+    if record is None or acted is None:
+        return []
+    return [
+        s for s in record.sessions
+        if s.state in LIVE_STATES and (parse_utc(s.since) or acted) > acted
+    ]
 
 
 def recovery_status(
@@ -237,24 +275,28 @@ def recovery_status(
     pane_bare: bool | None,
     pane_last_line: str = "",
 ) -> str:
-    """The status of an account tab the deck re-entered (decision 5).
-
-    `acted_at` and `now` are ISO-8601 UTC timestamps, like the stream's
-    `since` and `ts`, so text order is time order.
-    """
-    if record is None or seconds_between(record.ts, now) > STALE_AFTER_S:
+    """The status of an account tab the deck re-entered (decision 5)."""
+    posted, current = (parse_utc(record.ts) if record else None), parse_utc(now)
+    if posted is None or current is None or (current - posted).total_seconds() > STALE_AFTER_S:
         return "stale"
-    newer = record.session_since is not None and record.session_since > acted_at
-    if newer and record.state in LIVE_STATES:
+    # The deck's re-entry runs in the pane: once the pane is a bare shell again
+    # it has ended, whatever other sessions of the account do elsewhere.
+    if pane_bare and elapsed_s >= ENTRY_GRACE_S:
+        return "failed"
+    newer = newer_live_sessions(record, acted_at)
+    if newer and not pane_bare:
         if record.last_session is not None:
-            return "resumed" if record.last_session in record.session_ids else "fresh"
+            return "resumed" if any(s.session == record.last_session for s in newer) else "fresh"
         # An older agentd names no last_session: fabric-resume says which it did.
         return "fresh" if "fresh" in pane_last_line.lower() else "resumed"
-    if pane_bare:
-        return "failed"
     if elapsed_s >= RESTORE_WAIT_S:
         return "failed"
     return "restoring"
+
+
+def printable(text: str) -> str:
+    """Another account's pane text, safe to print on the operator's terminal."""
+    return "".join(ch for ch in text if ch == "\t" or (ch.isprintable() and ord(ch) >= 0x20))
 
 
 # ---------------------------------------------------------------- adapters
@@ -285,8 +327,10 @@ class Herdr:
     def account_tabs(self, logins: set[str]) -> list[AccountTab]:
         panes = self.call("pane", "list").get("panes", [])
         root_pane: dict[str, str] = {}
+        pane_count: dict[str, int] = {}
         for pane in panes:
             root_pane.setdefault(pane["tab_id"], pane["pane_id"])
+            pane_count[pane["tab_id"]] = pane_count.get(pane["tab_id"], 0) + 1
         tabs = []
         for workspace in self.workspaces():
             listing = self.call("tab", "list", "--workspace", workspace["workspace_id"])
@@ -294,7 +338,10 @@ class Herdr:
                 label = tab.get("label")
                 if label in logins and tab["tab_id"] in root_pane:
                     tabs.append(
-                        AccountTab(label, tab["tab_id"], workspace["workspace_id"], root_pane[tab["tab_id"]])
+                        AccountTab(
+                            label, tab["tab_id"], workspace["workspace_id"],
+                            root_pane[tab["tab_id"]], pane_count[tab["tab_id"]],
+                        )
                     )
         return tabs
 
@@ -359,6 +406,18 @@ def execute(herdr: Herdr, actions: list[Action], cwd: str, resume_flag: bool) ->
     """Carry out the plan; returns the pane each re-entered account went to."""
     entered: dict[str, str] = {}
     spare_tabs: list[str] = []
+    try:
+        _execute(herdr, actions, cwd, resume_flag, entered, spare_tabs)
+    finally:
+        for tab_id in spare_tabs:
+            herdr.call("tab", "close", tab_id)
+    return entered
+
+
+def _execute(
+    herdr: Herdr, actions: list[Action], cwd: str, resume_flag: bool,
+    entered: dict[str, str], spare_tabs: list[str],
+) -> None:
     for action in actions:
         if isinstance(action, CreateTab):
             workspace = ensure_workspace(herdr, action.workspace_label, cwd, spare_tabs)
@@ -373,9 +432,6 @@ def execute(herdr: Herdr, actions: list[Action], cwd: str, resume_flag: bool) ->
             continue
         herdr.call("pane", "run", pane, reenter_command(action.login, resume_flag))
         entered[action.login] = pane
-    for tab_id in spare_tabs:
-        herdr.call("tab", "close", tab_id)
-    return entered
 
 
 def last_line(herdr: Herdr, pane: str) -> str:
@@ -383,7 +439,38 @@ def last_line(herdr: Herdr, pane: str) -> str:
     lines = [line.strip() for line in read.splitlines() if line.strip()]
     # The shell's prompt follows whatever moveto or fabric-resume printed last,
     # so the reason is the line before it.
-    return " | ".join(lines[-2:])
+    return printable(" | ".join(lines[-2:]))
+
+
+def poll(
+    herdr: Herdr,
+    entered: dict[str, str],
+    records: dict[str, StateRecord],
+    acted_at: str,
+    now: str,
+    elapsed_s: float,
+) -> dict[str, tuple[str, str]]:
+    """One pass over the re-entered accounts: login -> (status, detail).
+
+    The pane's tail is read whenever it can decide or explain the status: a
+    bare pane (why it failed) and a new session with no last_session to judge
+    it by (fabric-resume printed whether it resumed or started fresh)."""
+    result: dict[str, tuple[str, str]] = {}
+    for login, pane in entered.items():
+        record = records.get(login)
+        try:
+            bare = is_bare_shell(herdr.process(pane))
+            wants_tail = bare or (
+                record is not None and record.last_session is None
+                and bool(newer_live_sessions(record, acted_at))
+            )
+            tail = last_line(herdr, pane) if wants_tail else ""
+        except DeckError as error:
+            result[login] = ("failed", printable(str(error)))
+            continue
+        status = recovery_status(acted_at, now, elapsed_s, record, bare, tail)
+        result[login] = (status, tail if status in {"failed", "fresh"} else "")
+    return result
 
 
 def status_line(login: str, status: str, detail: str = "") -> str:
@@ -466,14 +553,11 @@ def main(argv: list[str] | None = None) -> int:
             except queue.Empty:
                 pass
             elapsed = time.monotonic() - started
-            now = utc_now()
-            for login, pane in entered.items():
-                bare = is_bare_shell(herdr.process(pane))
-                tail = last_line(herdr, pane) if bare else ""
-                status = recovery_status(acted_at, now, elapsed, records.get(login), bare, tail)
+            for login, (status, detail) in poll(
+                herdr, entered, records, acted_at, utc_now(), elapsed
+            ).items():
                 if shown.get(login) != status:
                     shown[login] = status
-                    detail = tail if status in {"failed", "fresh"} else ""
                     print(status_line(login, status, detail), flush=True)
             if all(shown.get(login) in SETTLED for login in entered) or elapsed > RESTORE_WAIT_S + 5:
                 return 0 if all(shown.get(login) != "failed" for login in entered) else 1

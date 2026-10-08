@@ -1,8 +1,13 @@
 import unittest
 
 from fabric_deck import (
+    ENTRY_GRACE_S,
     RESTORE_WAIT_S,
+    DeckError,
+    Session,
     StateRecord,
+    poll,
+    printable,
     parse_state_line,
     recovery_status,
     NEW_WORKSPACE,
@@ -121,8 +126,11 @@ NOW = "2026-10-08T05:01:00Z"
 
 def record(state="idle", since="2026-10-08T05:00:30Z", sessions=("s-new",), last=None,
            ts="2026-10-08T05:00:50Z"):
-    """`since` is the session's start; `ts` is when the stream posted the record."""
-    return StateRecord("ui", state, tuple(sessions), since, ts, last_session=last)
+    """`since` is when each session entered its state; `ts` is when the stream
+    posted the record."""
+    return StateRecord(
+        "ui", state, tuple(Session(sid, state, since) for sid in sessions), ts, last_session=last
+    )
 
 
 class Statuses(unittest.TestCase):
@@ -133,10 +141,20 @@ class Statuses(unittest.TestCase):
             '"state":"idle","since":"2026-10-08T05:00:30Z"}'
         )
         parsed = parse_state_line(line)
-        self.assertEqual((parsed.login, parsed.state, parsed.session_ids), ("ui", "idle", ("s1",)))
+        self.assertEqual(
+            (parsed.login, parsed.state, [x.session for x in parsed.sessions]), ("ui", "idle", ["s1"])
+        )
         self.assertIsNone(parsed.resumable)
         self.assertIsNone(parsed.last_session)
         self.assertIsNone(parse_state_line("not json"))
+
+    def test_the_streams_no_record_row_is_no_record(self):
+        # ctl.mjs stateRow for an account with nothing on the channel: no ts.
+        row = ('{"address":"develop-qzapp/ui","role":"rust-ui-dev","state":"unknown",'
+               '"sessions":[],"why":"no state record on the channel"}')
+        self.assertIsNone(parse_state_line(row))
+        self.assertIsNone(parse_state_line('{"address":"develop-qzapp/ui","ts":"yesterday"}'))
+        self.assertIsNone(parse_state_line('{"address":"develop-qzapp/ui","ts":"2026-10-08T05:00:00"}'))
 
     def test_a_missing_record_is_stale_not_failed(self):
         self.assertEqual(recovery_status(ACTED, NOW, 500, None, True), "stale")
@@ -155,6 +173,17 @@ class Statuses(unittest.TestCase):
     def test_back_to_a_bare_shell_without_a_session_is_failed(self):
         self.assertEqual(recovery_status(ACTED, NOW, 5, record(since="2026-10-08T04:00:00Z"), True), "failed")
 
+    def test_a_bare_pane_is_failed_whatever_another_session_does(self):
+        # Another live session of the account changed state after the action:
+        # the deck's own re-entry still ended.
+        self.assertEqual(recovery_status(ACTED, NOW, 30, record(), True), "failed")
+
+    def test_a_bare_pane_just_after_typing_is_still_restoring(self):
+        self.assertEqual(
+            recovery_status(ACTED, NOW, ENTRY_GRACE_S - 1, record(since="2026-10-08T04:00:00Z"), True),
+            "restoring",
+        )
+
     def test_a_new_live_session_is_resumed_or_fresh(self):
         self.assertEqual(recovery_status(ACTED, NOW, 5, record(), False), "resumed")
         self.assertEqual(
@@ -163,6 +192,47 @@ class Statuses(unittest.TestCase):
         )
         self.assertEqual(recovery_status(ACTED, NOW, 5, record(last="s-new"), False), "resumed")
         self.assertEqual(recovery_status(ACTED, NOW, 5, record(last="s-old"), False), "fresh")
+
+
+class StubHerdr:
+    """Just enough of Herdr for poll(): pane processes and pane text."""
+
+    def __init__(self, processes, texts, gone=()):
+        self.processes, self.texts, self.gone = processes, texts, set(gone)
+
+    def process(self, pane):
+        if pane in self.gone:
+            raise DeckError(f"herdr pane process-info --pane {pane}: exit 1: pane not found")
+        return self.processes[pane]
+
+    def text(self, *args):
+        return self.texts[args[2]]
+
+
+class Poll(unittest.TestCase):
+    def test_reads_fresh_from_the_pane_while_the_new_session_runs(self):
+        herdr = StubHerdr(
+            {"p1": IN_MOVETO},
+            {"p1": "fabric-resume: no transcript; starting fresh in /home/ui/projects\n> \n"},
+        )
+        result = poll(herdr, {"ui": "p1"}, {"ui": record()}, ACTED, NOW, 10)
+        self.assertEqual(result["ui"][0], "fresh")
+        self.assertIn("starting fresh", result["ui"][1])
+
+    def test_a_tab_closed_under_the_deck_is_failed_not_a_crash(self):
+        herdr = StubHerdr({}, {}, gone={"p1"})
+        result = poll(herdr, {"ui": "p1"}, {"ui": record()}, ACTED, NOW, 10)
+        self.assertEqual(result["ui"][0], "failed")
+
+    def test_pane_text_is_printed_without_control_characters(self):
+        self.assertEqual(printable("ok\x1b]0;title\x07\x9bdone\tend"), "ok]0;titledone\tend")
+
+
+class SplitTab(unittest.TestCase):
+    def test_a_split_account_tab_is_not_typed_into(self):
+        tabs = [AccountTab("coord", "t1", "w1", "p1", pane_count=2)]
+        actions = plan([Account("coord", "fabric-coordinator")], tabs, {"p1": BARE}, set(), CATALOG)
+        self.assertEqual(actions, [Undetermined("coord", "p1")])
 
 
 if __name__ == "__main__":
