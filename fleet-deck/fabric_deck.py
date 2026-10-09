@@ -501,8 +501,9 @@ class Deck:
     mapped_at: float | None = None
     lost: bool = False
     fleet_tab: bool = True
-    # The fleet tab's pane had not started its program when last looked at.
-    fleet_unsettled: bool = False
+    # The fleet tab whose pane had not started its program when last looked
+    # at: looked at again at a map read while it is still there as `fleet`.
+    fleet_unsettled: str | None = None
 
     # ------------------------------------------------------------ restore
 
@@ -570,7 +571,7 @@ class Deck:
                     if tab.get("label") != FLEET_TAB:
                         continue
                     held = self._fleet_tab_holds(tab["tab_id"])
-                    self.fleet_unsettled = held == "unsettled"
+                    self.fleet_unsettled = tab["tab_id"] if held == "unsettled" else None
                     if held == "remnant":
                         # herdr restores a tab by its label but not a plugin
                         # pane's program: the board's tab comes back as the
@@ -792,9 +793,20 @@ class Deck:
             tab = tabs.get(login)
             if tab is None or tab.panes.get(HARNESS) != self.harness_pane[login]:
                 self._forget(login)
-        if self.fleet_tab and self.fleet_unsettled:
-            self._restore_fleet_tab()
+        if self.fleet_tab and self.fleet_unsettled is not None:
+            if self._tab_label(self.fleet_unsettled) == FLEET_TAB:
+                self._restore_fleet_tab()
+            else:
+                # Closed or renamed by a person since: theirs until a restore.
+                self.fleet_unsettled = None
         return True
+
+    def _tab_label(self, tab_id: str) -> str | None:
+        for workspace in self.herdr.workspaces():
+            for tab in self.herdr.call("tab", "list", "--workspace", workspace["workspace_id"]).get("tabs", []):
+                if tab.get("tab_id") == tab_id:
+                    return tab.get("label")
+        return None
 
     def _forget(self, login: str) -> None:
         """The account's panes are followed no more, until a restore. A pane

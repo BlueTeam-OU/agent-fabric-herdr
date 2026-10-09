@@ -355,6 +355,16 @@ class FleetTab(unittest.TestCase):
         self.assertIn(("tab", "close", tab), h.herdr.calls)
         self.assertEqual(len([c for c in h.herdr.calls if c[:3] == ("plugin", "pane", "open")]), 1)
 
+    def test_an_unsettled_fleet_tab_a_person_closes_is_not_reopened_before_the_next_restore(self):
+        h = Harness(fleet_tab=True)
+        tab = h.herdr.add_tab("fleet", [("p90", None, {"shell_pid": None, "foreground_processes": []})])
+        h.herdr.panes["p90"]["cwd"] = BOARD_DIR
+        h.deck.restore(0)
+        h.herdr.call("tab", "close", tab)
+        h.deck.follow(PANE_MAP_REFRESH_S + 1)
+        h.deck.follow(2 * PANE_MAP_REFRESH_S + 2)
+        self.assertFalse([c for c in h.herdr.calls if c[:3] == ("plugin", "pane", "open")])
+
     def test_a_fleet_tab_running_something_else_is_left_alone_and_said_once(self):
         h = Harness(fleet_tab=True)
         tab = h.herdr.add_tab("fleet", [("p90", None, in_moveto("ui"))])
