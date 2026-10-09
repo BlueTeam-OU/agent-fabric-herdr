@@ -234,6 +234,28 @@ def printable(text: str) -> str:
 # ------------------------------------------------------- the process walk
 
 
+# Shells a restored pane starts: herdr's default program for a pane.
+SHELLS = frozenset({"bash", "zsh", "sh", "fish", "dash", "ksh", "tcsh"})
+
+
+def is_board(argv: list[str]) -> bool:
+    """fabric-view's board: the launcher execs a Python whose `-c` code
+    imports fabric_view, with the mode as the last argument."""
+    return bool(argv) and argv[-1] == FLEET_ENTRYPOINT and any(
+        "from fabric_view import main" in arg for arg in argv[1:])
+
+
+def at_bare_shell(info: dict) -> bool:
+    """A shell at its prompt: its own foreground group, and a shell's argv.
+    A plugin pane's program also leads its own group, so the group alone
+    would take a running view for a shell."""
+    shell, group = info.get("shell_pid"), info.get("foreground_process_group_id")
+    if shell is None or shell != group:
+        return False
+    fg = info.get("foreground_processes") or []
+    return bool(fg) and all(os.path.basename((p.get("argv") or ["?"])[0]).lstrip("-") in SHELLS for p in fg)
+
+
 def ssh_harness(live: Live | None) -> bool | None:
     """Whether a harness runs in a pane entered over ssh, from the stream.
     sshd starts the account's session, so its harness is no descendant of
@@ -535,8 +557,23 @@ class Deck:
             workspaces = self.herdr.workspaces()
             for workspace in workspaces:
                 listing = self.herdr.call("tab", "list", "--workspace", workspace["workspace_id"])
-                if any(tab.get("label") == FLEET_TAB for tab in listing.get("tabs", [])):
+                for tab in listing.get("tabs", []):
+                    if tab.get("label") != FLEET_TAB:
+                        continue
+                    held = self._fleet_tab_holds(tab["tab_id"])
+                    if held == "remnant":
+                        # herdr restores a tab by its label but not a plugin
+                        # pane's program: the board's tab comes back as the
+                        # operator's bare shell. That tab is the deck's own.
+                        self.herdr.call("tab", "close", tab["tab_id"])
+                        self.log(f"the {FLEET_TAB} tab held only a shell after herdr came back; reopening the board")
+                        break
+                    if held == "other":
+                        self._say("fleet-tab-other", f"the {FLEET_TAB} tab runs something else; left alone")
                     return
+                else:
+                    continue
+                break
             if not workspaces:
                 return
             made = self.herdr.call("plugin", "pane", "open", "--plugin", FLEET_PLUGIN,
@@ -591,6 +628,17 @@ class Deck:
             del self.pending[login]
             self.unsettled.discard(login)
             self.tracks[login] = classify(seen, self.live(login)) or Track(State.IDLE)
+
+    def _fleet_tab_holds(self, tab_id: str) -> str:
+        """`board` when the board's view runs in the tab, `remnant` when its
+        one pane is at a bare shell, else `other` (a person's)."""
+        panes = [p["pane_id"] for p in self.herdr.call("pane", "list").get("panes", []) if p.get("tab_id") == tab_id]
+        infos = [self.herdr.process_info(p) for p in panes]
+        if any(is_board(p.get("argv") or []) for info in infos for p in info.get("foreground_processes", [])):
+            return "board"
+        if len(infos) == 1 and at_bare_shell(infos[0]):
+            return "remnant"
+        return "other"
 
     def _split(self, pane: str, direction: str, ratio: float, label: str) -> str:
         made = self.herdr.call("pane", "split", pane, "--direction", direction,

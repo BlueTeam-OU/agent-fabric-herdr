@@ -189,8 +189,12 @@ description = "pull requests in flight"
 The deck opens the board as a tab of its own, labelled `fleet`, in the
 first workspace, unless one exists anywhere (`--no-fleet-tab` turns this
 off). Like an account's pane, a fleet tab a person closes stays closed
-until the next restore. Without the plugin linked, the deck says so once
-and restores the account tabs as before.
+until the next restore. herdr's session restore brings a tab back by its
+label but not a plugin pane's program: a `fleet` tab whose one pane is at
+a bare shell is the deck's, closed and replaced by the board. A `fleet`
+tab running anything else is a person's, left alone and said once.
+Without the plugin linked, the deck says so once and restores the
+account tabs as before.
 
 | view | opens as | shows |
 |---|---|---|

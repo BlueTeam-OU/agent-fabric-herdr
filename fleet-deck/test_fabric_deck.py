@@ -125,6 +125,11 @@ def record(login, *states, age_s=10):
 
 BARE = {"shell_pid": 10, "foreground_process_group_id": 10,
         "foreground_processes": [{"pid": 10, "argv": ["bash"]}]}
+# The fleet board, as fabric-view's launcher leaves it in its pane.
+BOARD = {"shell_pid": 30, "foreground_process_group_id": 30, "foreground_processes": [{"pid": 30, "argv": [
+    "/usr/local/bin/fabric-python", "-B", "-c",
+    "import sys; sys.path.insert(0, sys.argv[1]); from fabric_view import main; raise SystemExit(main(sys.argv[2:]))",
+    "/home/user/projects/herdr/fleet-deck", "board"]}]}
 # A shell still running the operator's rc file: neither bare nor moveto.
 BUSY = {"shell_pid": 10, "foreground_process_group_id": 11,
         "foreground_processes": [{"pid": 11, "argv": ["direnv", "hook"]}]}
@@ -228,7 +233,7 @@ class FakeHerdr(Herdr):
             if not self.plugin_linked:
                 raise RuntimeError("herdr plugin pane open: exit 1: plugin_not_found")
             pane = self._id("p")
-            tab = self.add_tab(None, [(pane, None, BARE)], args[args.index("--workspace") + 1])
+            tab = self.add_tab(None, [(pane, None, BOARD)], args[args.index("--workspace") + 1])
             return {"plugin_pane": {"plugin_id": args[4], "entrypoint": args[6],
                                     "pane": {"pane_id": pane, "tab_id": tab}}}
         if head == ("tab", "rename"):
@@ -310,13 +315,32 @@ class FleetTab(unittest.TestCase):
         h.deck.restore(10)
         self.assertEqual(len([c for c in h.herdr.calls if c[:3] == ("plugin", "pane", "open")]), 1)
 
-    def test_a_fleet_tab_anywhere_is_kept_and_none_is_added(self):
+    def test_a_fleet_tab_running_the_board_anywhere_is_kept_and_none_is_added(self):
         h = Harness(fleet_tab=True)
         h.herdr.workspace_list.append({"workspace_id": "w9", "label": "Ops"})
         h.herdr.tabs["w9"] = []
-        h.herdr.add_tab("fleet", [("p90", None, BARE)], "w9")
+        h.herdr.add_tab("fleet", [("p90", None, BOARD)], "w9")
         h.deck.restore(0)
         self.assertFalse([c for c in h.herdr.calls if c[:3] == ("plugin", "pane", "open")])
+
+    def test_a_fleet_tab_herdr_brought_back_as_a_bare_shell_gets_the_board_again(self):
+        # Measured on a real herdr: a session restore keeps the tab's label
+        # and gives its pane a shell, not the plugin's program.
+        h = Harness(fleet_tab=True)
+        old = h.herdr.add_tab("fleet", [("p90", None, BARE)])
+        h.deck.restore(0)
+        self.assertIn(("tab", "close", old), h.herdr.calls)
+        self.assertEqual(len([c for c in h.herdr.calls if c[:3] == ("plugin", "pane", "open")]), 1)
+        self.assertEqual([t for _, t in self.tabs(h)].count("fleet"), 1)
+
+    def test_a_fleet_tab_running_something_else_is_left_alone_and_said_once(self):
+        h = Harness(fleet_tab=True)
+        tab = h.herdr.add_tab("fleet", [("p90", None, in_moveto("ui"))])
+        h.deck.restore(0)
+        h.deck.restore(10)
+        self.assertNotIn(("tab", "close", tab), h.herdr.calls)
+        self.assertFalse([c for c in h.herdr.calls if c[0] == "plugin"])
+        self.assertEqual(sum("runs something else" in l for l in h.logs), 1)
 
     def test_an_account_only_restore_leaves_the_fleet_tab_alone(self):
         h = Harness(fleet_tab=True)
