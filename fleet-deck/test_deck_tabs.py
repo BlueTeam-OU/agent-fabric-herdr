@@ -287,6 +287,8 @@ class Foreground(unittest.TestCase):
         # Options after the destination are ssh's, as OpenSSH re-parses them.
         self.assertEqual(moveto_in([(9, ["ssh", "ui@h", "-t", "--", "--wait"])], "ui"), Moveto(9, WAIT, SSH))
         self.assertEqual(moveto_in([(9, ["ssh", "ui@h", "-l", "other", "--", "--wait"])], "ui"), Moveto(9, WAIT, SSH))
+        self.assertEqual(moveto_in([(9, ["ssh", "-o", "UserKnownHostsFile=/k", "ui@h", "--", "--wait"])], "ui"),
+                         Moveto(9, WAIT, SSH))
 
     def test_any_other_ssh_is_not_this_moveto(self):
         for argv in (["ssh", "other@h", "--", "--wait"],          # another account
@@ -301,6 +303,10 @@ class Foreground(unittest.TestCase):
                      ["ssh", "-o", "User=other", "ui@h", "--", "--wait"],
                      ["ssh", "-oUser=other", "ui@h", "--", "--wait"],
                      ["ssh", "-o", "user other", "ui@h", "--", "--wait"],
+                     ["ssh", "-o", "User\tother", "ui@h", "--", "--wait"],
+                     ["ssh", "-o", " User=other", "ui@h", "--", "--wait"],
+                     ["ssh", "-o", "User = other", "ui@h", "--", "--wait"],
+                     ["ssh", "-o", 'User="other"', "ui@h", "--", "--wait"],
                      ["ssh", "ui@h", "-l"]):                       # an option without its value
             self.assertIsNone(moveto_in([(9, argv)], "ui"), argv)
 

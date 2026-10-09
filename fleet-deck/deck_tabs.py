@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import enum
 import os
+import re
 from dataclasses import dataclass, replace
 
 # How long a --resume the deck started may run without a harness before the
@@ -437,10 +438,15 @@ def _ssh_user_option(letter: str, value: str) -> str | None:
     if letter == "l":
         return value
     if letter == "o":
-        key, _, rest = value.replace("=", " ", 1).partition(" ")
-        if key.lower() == "user":
-            return rest.strip() or None
+        # As OpenSSH splits a configuration line: blanks, the keyword, then
+        # `=` or blanks (spaces or tabs), then the value, quotes removed.
+        m = _SSH_OPTION.match(value)
+        if m and m.group(1).lower() == "user":
+            return m.group(2).strip().strip('"') or None
     return None
+
+
+_SSH_OPTION = re.compile(r"\s*(\w+)(?:\s*=\s*|\s+)(.*)", re.DOTALL)
 
 
 def _sudo_user_is(argv: list[str], login: str) -> bool:
