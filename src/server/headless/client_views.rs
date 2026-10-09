@@ -311,6 +311,26 @@ impl HeadlessServer {
         )
     }
 
+    /// A public request that creates a surface and asks for it to be
+    /// focused: when the server's target moves because of it, every client
+    /// shell follows, as it would after an explicit focus. A plugin pane
+    /// opened with focus in a new tab is one: without it the server focuses
+    /// the tab while every attached client keeps drawing the old one.
+    pub(super) fn public_create_requests_focus(method: &api::schema::Method) -> bool {
+        use api::schema::Method;
+
+        match method {
+            Method::WorkspaceCreate(params) => params.focus,
+            Method::TabCreate(params) => params.focus,
+            // A zoomed plugin pane is focused whatever `focus` says
+            // (open_plugin_split_pane).
+            Method::PluginPaneOpen(params) => {
+                params.focus || params.placement == Some(api::schema::PluginPanePlacement::Zoomed)
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn deferred_endpoint_navigation_tab_id(response: &[u8]) -> Option<String> {
         let response = serde_json::from_slice::<serde_json::Value>(response).ok()?;
         if !matches!(
@@ -849,11 +869,7 @@ impl HeadlessServer {
             api::schema::Method::AgentFocus(params) => Some(params.target.clone()),
             _ => None,
         };
-        let create_focus_requested = match &msg.request.method {
-            api::schema::Method::WorkspaceCreate(params) => params.focus,
-            api::schema::Method::TabCreate(params) => params.focus,
-            _ => false,
-        };
+        let create_focus_requested = Self::public_create_requests_focus(&msg.request.method);
         let inspect_pane_move = matches!(
             &msg.request.method,
             api::schema::Method::PaneMove(params) if params.focus

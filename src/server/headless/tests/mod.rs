@@ -2235,6 +2235,32 @@ async fn client_local_navigation_emits_pane_focused_only_when_that_client_moves(
     shutdown_test_runtimes(&mut server);
 }
 
+#[test]
+fn a_focused_plugin_pane_open_moves_client_shells_like_a_focused_tab_create() {
+    use api::schema::{Method, PluginPaneOpenParams, PluginPanePlacement};
+
+    let open = |placement, focus| {
+        Method::PluginPaneOpen(PluginPaneOpenParams {
+            plugin_id: "example.tab".into(),
+            entrypoint: "board".into(),
+            placement,
+            width: None,
+            height: None,
+            workspace_id: None,
+            target_pane_id: None,
+            direction: None,
+            cwd: None,
+            focus,
+            env: std::collections::HashMap::new(),
+        })
+    };
+    let asks = |method| HeadlessServer::public_create_requests_focus(&method);
+    assert!(asks(open(Some(PluginPanePlacement::Tab), true)));
+    assert!(asks(open(None, true)));
+    assert!(asks(open(Some(PluginPanePlacement::Zoomed), false)));
+    assert!(!asks(open(Some(PluginPanePlacement::Tab), false)));
+}
+
 #[tokio::test]
 async fn public_focus_moves_shell_focus_between_tabs() {
     let mut server = test_headless_server();
