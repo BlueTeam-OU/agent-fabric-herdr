@@ -153,6 +153,9 @@ pub(super) fn handle_notify_with_notifiers(
 ) {
     match kind {
         NotifyKind::Sound => {
+            if crate::transition_sound::play_label(message, sound_config) {
+                return;
+            }
             let Some(sound) = sound_from_notify_message(message) else {
                 warn!(
                     message = message,

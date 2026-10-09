@@ -82,6 +82,7 @@ mod notifications;
 mod render;
 mod retained_surface;
 mod surface_interest;
+mod transition_sounds;
 
 // Producers can refill even a bounded channel while it is being drained.
 // Yield to scheduled work and rendering between batches; select! below
@@ -205,6 +206,8 @@ pub struct HeadlessServer {
     tab_geometry_controllers: HashMap<String, u64>,
     /// Stable tab id whose viewers may see and interact with the one terminal popup.
     popup_owner_tab_id: Option<String>,
+    /// Fork: one transition sound per pane per second (`crate::transition_sound`).
+    transition_sound_limiter: crate::transition_sound::PaneSoundLimiter,
     /// Process-local identity used to reject shell replacements from an earlier server boot.
     client_shell_boot_id: String,
     /// Outer window title last pushed, paired with the client that received it.
@@ -363,6 +366,7 @@ impl HeadlessServer {
             foreground_client_id: None,
             tab_geometry_controllers: HashMap::new(),
             popup_owner_tab_id: None,
+            transition_sound_limiter: Default::default(),
             client_shell_boot_id: format!(
                 "{}-{}",
                 std::process::id(),

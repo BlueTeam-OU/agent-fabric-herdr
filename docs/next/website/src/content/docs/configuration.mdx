@@ -538,6 +538,21 @@ droid = "off"
 claude = "on"
 ```
 
+In this fork, a sound can follow any agent state transition. Keys are `"FROM -> TO"` over the states `idle`, `working`, `blocked`, and `unknown`, with `*` for any state; values are an mp3 path or `"off"`. When several keys match, the most specific wins: both states named, then the destination named (`* -> blocked`), then the origin named (`idle -> *`), then `* -> *`.
+
+```toml
+[ui.sound.transitions]
+"idle -> working" = "sounds/start.mp3"
+"* -> blocked" = "sounds/attention.mp3"
+"working -> unknown" = "off"
+
+[ui.sound.accounts."rust-ui-dev-01"]
+"idle -> working" = "sounds/rust-ui-start.mp3"
+"* -> idle" = "off"
+```
+
+`[ui.sound.accounts."<login>"]` is the same table for a pane whose `account` metadata token names that login; a key it matches wins over every global key, and a transition it does not name falls to `[ui.sound.transitions]`. Fleet Deck sets the token on each harness pane; any other source can set it with `herdr pane report-metadata <pane> --source <id> --token account=<login>`. A configured sound or `"off"` replaces the finished or needs-input sound for that transition, while the notification itself still appears; a transition no table names keeps them, so empty tables change nothing. Configured sounds also play for the active tab, and each pane plays at most one per second, so a pane passing through several states at once sounds once. `[ui.sound] enabled` and the per-agent overrides apply to them too.
+
 ## Advanced configuration
 
 Search the [Config reference](/docs/config-reference/) for scrollback limits, nested launches, and other advanced or experimental settings. See [Session state and restore](/docs/session-state/) before enabling pane screen history; that guide explains the security trade-off of saving pane contents.
