@@ -14,7 +14,6 @@ views read the same without colour (NO_COLOR, a monochrome terminal).
 from __future__ import annotations
 
 import datetime
-import textwrap
 import unicodedata
 from dataclasses import dataclass, field
 
@@ -424,7 +423,12 @@ def failure_lines(agents: list[Agent], sections: tuple[str, ...], width: int, li
         out.append((name, [(fit(f"? {name} not read for {who}: {whys[0]}", width), FAILED)]))
     if len(out) > limit:
         rest = [name for name, _ in out[limit - 1:]]
-        tail = f"? also not read: {', '.join(rest)}; why in each agent's view (Enter)"
+        # Only a section the agent view shows has its why there; the host's
+        # is in the host line above.
+        where = [n for n in rest if n in AGENT_SECTIONS]
+        tail = f"? also not read: {', '.join(rest)}"
+        if where:
+            tail += f"; why for {', '.join(where)} in each agent's view (Enter)"
         return [line for _, line in out[: limit - 1]] + [[(fit(tail, width), FAILED)]]
     return [line for _, line in out]
 
@@ -523,12 +527,40 @@ def heading(title: str, record: dict | None, now: datetime.datetime) -> Line:
     return [(title, BOLD), (f"  {src}, {age(record.get('at'), now)}", DIM)]
 
 
+def wrap_cells(text: str, width: int, indent: str = "") -> list[str]:
+    """Words into lines of at most `width` cells, later lines indented; a
+    word wider than a line is split. textwrap counts characters, and a
+    line of wide characters it makes is twice as wide as it thinks."""
+    lines: list[str] = []
+    line = ""
+    for word in text.split():
+        while True:
+            lead = indent if lines else ""
+            sep = " " if line else lead
+            if cells(line + sep + word) <= width:
+                line += sep + word
+                break
+            if line:
+                lines.append(line)
+                line = ""
+                continue
+            room = width - cells(lead)
+            head = take(word, max(1, room))
+            lines.append(lead + head)
+            word = word[len(head):]
+            if not word:
+                break
+    if line:
+        lines.append(line)
+    return lines
+
+
 def not_read(record: dict | None, width: int) -> list[Line]:
     """Why a section is missing, whole: its point is often at the end (who
     refused, and why), so it is wrapped, never cut."""
     if failed(record):
         text = clean(f"not read: {record.get('why') or 'no answer'}")
-        return [[("  " + part, FAILED)] for part in textwrap.wrap(text, max(10, width - 4), subsequent_indent="  ")]
+        return [[("  " + part, FAILED)] for part in wrap_cells(text, max(10, width - 4), indent="  ")]
     if record is not None and ok_data(record) is None:
         return [[("  not read: the answer had no data", FAILED)]]
     return []

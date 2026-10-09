@@ -275,6 +275,19 @@ class OtherAccountsText(unittest.TestCase):
             self.assert_drawable(vr.agent_lines(a, vr.Samples(), status(), 0, width, 80)[0], width)
             self.assert_drawable(vr.agent_lines(self.hostile()[1], vr.Samples(), status(), 0, width, 80)[0], width)
 
+    def test_a_wide_why_is_wrapped_by_cells_and_reaches_the_screen_whole(self):
+        a = fleet()[1]
+        a.sections["jobs"] = bad("op:jobs", "拒否" * 30 + " END")
+        body = texts(vr.agent_lines(a, vr.Samples(), status(), 0, 40, 80)[0])
+        joined = "".join(t.strip() for t in body)
+        self.assertIn("拒否" * 30 + "END", joined.replace(" ", ""))
+        self.assertTrue(all(vr.cells(t) <= 40 for t in body))
+
+    def test_wrap_cells_keeps_words_and_splits_only_what_cannot_fit(self):
+        self.assertEqual(vr.wrap_cells("ab cd ef", 5), ["ab cd", "ef"])
+        self.assertEqual(vr.wrap_cells("ab cd ef", 5, indent="  "), ["ab cd", "  ef"])
+        self.assertEqual(vr.wrap_cells("漢字漢字漢", 4), ["漢字", "漢字", "漢"])
+
     def test_wide_characters_are_measured_in_cells(self):
         self.assertEqual(vr.cells("漢字ab"), 6)
         self.assertEqual(vr.cells(vr.fit("漢" * 30, 40)), 39)
@@ -295,7 +308,9 @@ class WhysOnScreen(unittest.TestCase):
                 a.sections[name] = bad(f"op:{name}", f"{name} refused")
         lines = texts(vr.failure_lines(agents, vr.BOARD_SECTIONS, 140, limit=3))
         self.assertEqual(len(lines), 3)
-        self.assertEqual(lines[-1], "? also not read: host, tokens; why in each agent's view (Enter)")
+        self.assertEqual(lines[-1], "? also not read: host, tokens; why for tokens in each agent's view (Enter)")
+        only_host = texts(vr.failure_lines(agents, ("jobs", "usage", "host"), 140, limit=2))
+        self.assertEqual(only_host[-1], "? also not read: usage, host; why for usage in each agent's view (Enter)")
 
 
 class Values(unittest.TestCase):
