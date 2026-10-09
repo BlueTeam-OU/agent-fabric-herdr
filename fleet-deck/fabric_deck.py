@@ -70,6 +70,9 @@ NEW_WORKSPACE = "New"
 FLEET_TAB = "fleet"
 FLEET_PLUGIN = "fabric.fleet"
 FLEET_ENTRYPOINT = "board"
+# The plugin's root, where herdr starts and restores the board's pane: this
+# file's directory, as README's `herdr plugin link <checkout>/fleet-deck`.
+BOARD_DIR = os.path.dirname(os.path.realpath(__file__))
 
 # A login is typed into the operator's shell as part of a moveto command, so
 # only a plain Linux login is ever used; anything else is skipped, said.
@@ -243,6 +246,10 @@ def is_board(argv: list[str]) -> bool:
     imports fabric_view, with the mode as the last argument."""
     return bool(argv) and argv[-1] == FLEET_ENTRYPOINT and any(
         "from fabric_view import main" in arg for arg in argv[1:])
+
+
+def same_dir(a: str | None, b: str) -> bool:
+    return isinstance(a, str) and os.path.realpath(a) == os.path.realpath(b)
 
 
 def at_bare_shell(info: dict) -> bool:
@@ -494,6 +501,8 @@ class Deck:
     mapped_at: float | None = None
     lost: bool = False
     fleet_tab: bool = True
+    # The fleet tab's pane had not started its program when last looked at.
+    fleet_unsettled: bool = False
 
     # ------------------------------------------------------------ restore
 
@@ -561,6 +570,7 @@ class Deck:
                     if tab.get("label") != FLEET_TAB:
                         continue
                     held = self._fleet_tab_holds(tab["tab_id"])
+                    self.fleet_unsettled = held == "unsettled"
                     if held == "remnant":
                         # herdr restores a tab by its label but not a plugin
                         # pane's program: the board's tab comes back as the
@@ -570,6 +580,7 @@ class Deck:
                         break
                     if held == "other":
                         self._say("fleet-tab-other", f"the {FLEET_TAB} tab runs something else; left alone")
+                    # unsettled: looked at again at the next map read.
                     return
                 else:
                     continue
@@ -630,13 +641,17 @@ class Deck:
             self.tracks[login] = classify(seen, self.live(login)) or Track(State.IDLE)
 
     def _fleet_tab_holds(self, tab_id: str) -> str:
-        """`board` when the board's view runs in the tab, `remnant` when its
-        one pane is at a bare shell, else `other` (a person's)."""
-        panes = [p["pane_id"] for p in self.herdr.call("pane", "list").get("panes", []) if p.get("tab_id") == tab_id]
-        infos = [self.herdr.process_info(p) for p in panes]
+        """`board` when the board's view runs in the tab; `remnant` when its
+        one pane is a bare shell in the board's own directory (where herdr
+        restores the pane, the plugin's root); `unsettled` while a pane's
+        program has not started; else `other`: a person's, never closed."""
+        panes = [p for p in self.herdr.call("pane", "list").get("panes", []) if p.get("tab_id") == tab_id]
+        infos = [self.herdr.process_info(p["pane_id"]) for p in panes]
         if any(is_board(p.get("argv") or []) for info in infos for p in info.get("foreground_processes", [])):
             return "board"
-        if len(infos) == 1 and at_bare_shell(infos[0]):
+        if any(info.get("shell_pid") is None or not info.get("foreground_processes") for info in infos):
+            return "unsettled"
+        if len(infos) == 1 and at_bare_shell(infos[0]) and same_dir(panes[0].get("cwd"), BOARD_DIR):
             return "remnant"
         return "other"
 
@@ -777,6 +792,8 @@ class Deck:
             tab = tabs.get(login)
             if tab is None or tab.panes.get(HARNESS) != self.harness_pane[login]:
                 self._forget(login)
+        if self.fleet_tab and self.fleet_unsettled:
+            self._restore_fleet_tab()
         return True
 
     def _forget(self, login: str) -> None:

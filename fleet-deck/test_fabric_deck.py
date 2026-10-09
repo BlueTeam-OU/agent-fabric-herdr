@@ -6,8 +6,9 @@ import unittest
 
 from deck_tabs import RESTORE_WAIT_S, RESUME, SAME_SESSION_S, SETTLE_S, WAIT, WATCH, Before, Shown
 from fabric_deck import (
-    NEW_WORKSPACE,
+    BOARD_DIR,
     PANE_MAP_REFRESH_S,
+    NEW_WORKSPACE,
     RESEND_AFTER_S,
     RESTORE_SETTLE_S,
     Account,
@@ -328,10 +329,31 @@ class FleetTab(unittest.TestCase):
         # and gives its pane a shell, not the plugin's program.
         h = Harness(fleet_tab=True)
         old = h.herdr.add_tab("fleet", [("p90", None, BARE)])
+        h.herdr.panes["p90"]["cwd"] = BOARD_DIR
         h.deck.restore(0)
         self.assertIn(("tab", "close", old), h.herdr.calls)
         self.assertEqual(len([c for c in h.herdr.calls if c[:3] == ("plugin", "pane", "open")]), 1)
         self.assertEqual([t for _, t in self.tabs(h)].count("fleet"), 1)
+
+    def test_a_persons_shell_tab_named_fleet_elsewhere_is_never_closed(self):
+        h = Harness(fleet_tab=True)
+        tab = h.herdr.add_tab("fleet", [("p90", None, BARE)])
+        h.herdr.panes["p90"]["cwd"] = "/home/user/projects"
+        h.deck.restore(0)
+        self.assertNotIn(("tab", "close", tab), h.herdr.calls)
+        self.assertFalse([c for c in h.herdr.calls if c[0] == "plugin"])
+
+    def test_a_fleet_tab_whose_shell_has_not_started_is_looked_at_again_at_the_next_map_read(self):
+        h = Harness(fleet_tab=True)
+        tab = h.herdr.add_tab("fleet", [("p90", None, {"shell_pid": None, "foreground_processes": []})])
+        h.herdr.panes["p90"]["cwd"] = BOARD_DIR
+        h.deck.restore(0)
+        self.assertNotIn(("tab", "close", tab), h.herdr.calls)
+        self.assertFalse([l for l in h.logs if "something else" in l])
+        h.herdr.proc["p90"] = BARE
+        h.deck.follow(PANE_MAP_REFRESH_S + 1)
+        self.assertIn(("tab", "close", tab), h.herdr.calls)
+        self.assertEqual(len([c for c in h.herdr.calls if c[:3] == ("plugin", "pane", "open")]), 1)
 
     def test_a_fleet_tab_running_something_else_is_left_alone_and_said_once(self):
         h = Harness(fleet_tab=True)

@@ -192,9 +192,12 @@ The deck opens the board as a tab of its own, labelled `fleet`, in the
 first workspace, unless one exists anywhere (`--no-fleet-tab` turns this
 off). Like an account's pane, a fleet tab a person closes stays closed
 until the next restore. herdr's session restore brings a tab back by its
-label but not a plugin pane's program: a `fleet` tab whose one pane is at
-a bare shell is the deck's, closed and replaced by the board. A `fleet`
-tab running anything else is a person's, left alone and said once.
+label but not a plugin pane's program: a `fleet` tab whose one pane is a
+bare shell in the plugin's own directory (`fleet-deck/`, where herdr
+restores it) is the deck's, closed and replaced by the board. A pane whose
+program has not started yet is looked at again at the next map read. A
+`fleet` tab running anything else, or a shell elsewhere, is a person's,
+left alone and said once.
 Without the plugin linked, the deck says so once and restores the
 account tabs as before.
 
@@ -228,7 +231,8 @@ account tabs as before.
 - **PRs.** fleet.py reads fabric-pr gate in agent-fabric's checkout only,
   and the popup says so. A pushed branch without a PR is counted under its
   owner, not listed. A PR whose owner is no placed account is listed apart.
-  A gate or GitHub that did not answer is said beside the owner.
+  A gate or GitHub that did not answer is said beside the owner. A
+  fleet.py that does not list PRs of unplaced owners is said so.
 - **The agent.** The overlay is that of the tab it was opened from: the
   deck labels an agent's tab with its login, and the view reads the label
   from `HERDR_PLUGIN_CONTEXT_JSON`. On any other tab it says so.
@@ -245,9 +249,10 @@ account tabs as before.
   opened by its action (the keys above) is opened focused and starts live.
 - **What a cell says.** `…` means not read yet. `?` means its section failed,
   and the board's footer says why, once per section. `-` means there is
-  none. A value drawn in the warning colour is stale: fleet.py's last good
-  value, kept while a fresh read fails inside the section's stale window;
-  the footer says since when and why. The selected row is marked `>`, and every state is a word, never
+  none. A value ending in `~` is stale: fleet.py's last good value, kept
+  while a fresh read fails inside the section's stale window. The footer
+  (board, compare), the owner's line (PRs) or the section (agent view)
+  says whose, since when and why. The selected row is marked `>`, and every state is a word, never
   only a colour. `NO_COLOR` turns colour off.
 - **Who can read what.** fleet.py's `jobs`, `usage`, `host`, `tokens` and
   `accounts` sections answer only a host operator. The views are meant for
