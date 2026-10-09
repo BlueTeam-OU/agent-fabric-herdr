@@ -291,6 +291,13 @@ class OtherAccountsText(unittest.TestCase):
         # width is dropped.
         self.assertEqual(vr.wrap_cells("漢", 1), ["漢"])
         self.assertEqual(vr.wrap_cells("abc def", 3, indent="    "), ["abc", "def"])
+        # A character that fits the width but not beside the indent goes
+        # without the indent.
+        self.assertEqual(vr.wrap_cells("ab 漢", 3, indent="  "), ["ab", "漢"])
+        for text, width, indent in (("ab 漢字 c", 3, "  "), ("x " * 9, 4, "  "), ("漢" * 7, 5, " ")):
+            lines = vr.wrap_cells(text, width, indent)
+            self.assertTrue(all(vr.cells(t) <= width for t in lines), lines)
+            self.assertEqual("".join(lines).replace(" ", ""), text.replace(" ", ""))
 
     def test_wide_characters_are_measured_in_cells(self):
         self.assertEqual(vr.cells("漢字ab"), 6)
