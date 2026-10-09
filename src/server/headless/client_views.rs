@@ -316,7 +316,12 @@ impl HeadlessServer {
     /// shell follows, as it would after an explicit focus. A plugin pane
     /// opened with focus in a new tab is one: without it the server focuses
     /// the tab while every attached client keeps drawing the old one.
-    pub(super) fn public_create_requests_focus(method: &api::schema::Method) -> bool {
+    /// `manifest_placement` is the opened entrypoint's own placement, which
+    /// applies when the request names none.
+    pub(super) fn public_create_requests_focus(
+        method: &api::schema::Method,
+        manifest_placement: Option<api::schema::PluginPanePlacement>,
+    ) -> bool {
         use api::schema::Method;
 
         match method {
@@ -325,7 +330,9 @@ impl HeadlessServer {
             // A zoomed plugin pane is focused whatever `focus` says
             // (open_plugin_split_pane).
             Method::PluginPaneOpen(params) => {
-                params.focus || params.placement == Some(api::schema::PluginPanePlacement::Zoomed)
+                params.focus
+                    || params.placement.or(manifest_placement)
+                        == Some(api::schema::PluginPanePlacement::Zoomed)
             }
             _ => false,
         }
@@ -869,7 +876,15 @@ impl HeadlessServer {
             api::schema::Method::AgentFocus(params) => Some(params.target.clone()),
             _ => None,
         };
-        let create_focus_requested = Self::public_create_requests_focus(&msg.request.method);
+        // Judged after the request ran: the plugin registry it refreshes
+        // supplies the entrypoint's placement when the request names none.
+        let create_request = matches!(
+            &msg.request.method,
+            api::schema::Method::WorkspaceCreate(_)
+                | api::schema::Method::TabCreate(_)
+                | api::schema::Method::PluginPaneOpen(_)
+        )
+        .then(|| msg.request.method.clone());
         let inspect_pane_move = matches!(
             &msg.request.method,
             api::schema::Method::PaneMove(params) if params.focus
@@ -881,6 +896,15 @@ impl HeadlessServer {
         });
         let reconcile = Self::shell_locations_may_need_reconcile(&msg.request.method);
         let changed = self.handle_api_request_with_shutdown_check_inner(msg, false, false);
+        let create_focus_requested = create_request.is_some_and(|method| {
+            let manifest_placement = match &method {
+                api::schema::Method::PluginPaneOpen(params) => self
+                    .app
+                    .plugin_pane_manifest_placement(&params.plugin_id, &params.entrypoint),
+                _ => None,
+            };
+            Self::public_create_requests_focus(&method, manifest_placement)
+        });
         let proxied_result = forward_proxied_api_response(response_proxy);
         let proxied_request_succeeded = proxied_result.is_some();
         // Same-tab and zoomed moves succeed without moving or requesting focus.

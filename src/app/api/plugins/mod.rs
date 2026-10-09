@@ -151,6 +151,24 @@ impl App {
         self.set_plugin_enabled(id, params.plugin_id, false)
     }
 
+    /// The placement an entrypoint's manifest declares, as installed now.
+    pub(crate) fn plugin_pane_manifest_placement(
+        &self,
+        plugin_id: &str,
+        entrypoint: &str,
+    ) -> Option<PluginPanePlacement> {
+        let plugin = self
+            .state
+            .installed_plugins
+            .get(&normalize_plugin_id(plugin_id)?)?;
+        let entrypoint = normalize_action_id(entrypoint)?;
+        plugin
+            .panes
+            .iter()
+            .find(|pane| pane.id == entrypoint)
+            .map(|pane| pane.placement)
+    }
+
     pub(super) fn handle_plugin_action_list(
         &mut self,
         id: String,
