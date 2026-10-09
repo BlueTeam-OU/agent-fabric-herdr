@@ -365,6 +365,26 @@ class FleetTab(unittest.TestCase):
         h.deck.follow(2 * PANE_MAP_REFRESH_S + 2)
         self.assertFalse([c for c in h.herdr.calls if c[:3] == ("plugin", "pane", "open")])
 
+    def test_herdr_failing_while_an_unsettled_fleet_tab_is_looked_at_again_leaves_the_deck_running(self):
+        h = Harness(fleet_tab=True)
+        h.herdr.add_tab("fleet", [("p90", None, {"shell_pid": None, "foreground_processes": []})])
+        h.herdr.panes["p90"]["cwd"] = BOARD_DIR
+        h.deck.restore(0)
+        tabs = h.herdr.account_tabs
+
+        def then_down(logins):
+            got = tabs(logins)
+            h.herdr.down = True        # the server goes between the map read and the look
+            return got
+        h.herdr.account_tabs = then_down
+        h.deck.follow(PANE_MAP_REFRESH_S + 1)   # must not raise
+        self.assertIsNotNone(h.deck.fleet_unsettled)   # looked at again once herdr answers
+        h.herdr.down = False
+        h.herdr.account_tabs = tabs
+        h.herdr.proc["p90"] = BARE
+        h.deck.follow(2 * PANE_MAP_REFRESH_S + 2)
+        self.assertEqual(len([c for c in h.herdr.calls if c[:3] == ("plugin", "pane", "open")]), 1)
+
     def test_a_fleet_tab_running_something_else_is_left_alone_and_said_once(self):
         h = Harness(fleet_tab=True)
         tab = h.herdr.add_tab("fleet", [("p90", None, in_moveto("ui"))])

@@ -558,17 +558,30 @@ class Deck:
             self._restore_fleet_tab()
         self.mapped_at = now
 
-    def _restore_fleet_tab(self) -> None:
+    def _restore_fleet_tab(self, recheck: str | None = None) -> None:
         """The fleet board as a tab of its own, labelled `fleet`, in the first
         workspace, made only when no tab has that label: like an account's
         pane, one a person closes stays closed until the next restore. The
-        board is opened unfocused, so it reads once and waits for a look."""
+        board is opened unfocused, so it reads once and waits for a look.
+        `recheck` is the tab left unsettled at the last look: at a map read
+        only that tab is looked at again, and only while it is still there
+        as `fleet`. Every herdr call is in here, under the handler, so a
+        herdr failure is said and never ends the deck."""
         try:
             workspaces = self.herdr.workspaces()
-            for workspace in workspaces:
-                listing = self.herdr.call("tab", "list", "--workspace", workspace["workspace_id"])
+            listings = [(w, self.herdr.call("tab", "list", "--workspace", w["workspace_id"])) for w in workspaces]
+            if recheck is not None and not any(
+                    tab.get("tab_id") == recheck and tab.get("label") == FLEET_TAB
+                    for _, listing in listings for tab in listing.get("tabs", [])):
+                # The unsettled tab was closed or renamed by a person since:
+                # theirs until the next restore, and nothing is opened.
+                self.fleet_unsettled = None
+                return
+            for workspace, listing in listings:
                 for tab in listing.get("tabs", []):
                     if tab.get("label") != FLEET_TAB:
+                        continue
+                    if recheck is not None and tab.get("tab_id") != recheck:
                         continue
                     held = self._fleet_tab_holds(tab["tab_id"])
                     self.fleet_unsettled = tab["tab_id"] if held == "unsettled" else None
@@ -794,19 +807,8 @@ class Deck:
             if tab is None or tab.panes.get(HARNESS) != self.harness_pane[login]:
                 self._forget(login)
         if self.fleet_tab and self.fleet_unsettled is not None:
-            if self._tab_label(self.fleet_unsettled) == FLEET_TAB:
-                self._restore_fleet_tab()
-            else:
-                # Closed or renamed by a person since: theirs until a restore.
-                self.fleet_unsettled = None
+            self._restore_fleet_tab(recheck=self.fleet_unsettled)
         return True
-
-    def _tab_label(self, tab_id: str) -> str | None:
-        for workspace in self.herdr.workspaces():
-            for tab in self.herdr.call("tab", "list", "--workspace", workspace["workspace_id"]).get("tabs", []):
-                if tab.get("tab_id") == tab_id:
-                    return tab.get("label")
-        return None
 
     def _forget(self, login: str) -> None:
         """The account's panes are followed no more, until a restore. A pane
