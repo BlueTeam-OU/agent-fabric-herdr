@@ -140,11 +140,84 @@ to decide `--resume`.
   still running.
 - **An account that leaves `moveto --list`** is dropped at the next write.
 
+## Views
+
+`fabric-view` shows what the fleet does, as a fleet and per agent, in
+herdr plugin panes (`herdr-plugin.toml`, plugin `fabric.fleet`). Its data
+is agent-fabric's `tools/fabric/fleet.py`, imported from the agent-fabric
+checkout and never copied (agent-fabric ADR-046). The checkout is
+`AGENT_FABRIC_ROOT`, else the one the installed `fabric-ctl` links into.
+
+```sh
+herdr plugin link <this checkout>/fleet-deck   # once, on the operator's login
+```
+
+and, in herdr's `config.toml`, the keys:
+
+```toml
+[[keys.command]]
+key = "prefix+f"
+type = "plugin_action"
+command = "fabric.fleet.board"
+description = "fleet board"
+
+[[keys.command]]
+key = "prefix+a"
+type = "plugin_action"
+command = "fabric.fleet.agent"
+description = "this agent"
+```
+
+| view | opens as | shows |
+|---|---|---|
+| **board** | a tab | one row per placed agent: state, current job, closed/open jobs, RSS, CPU, tokens over 7 days, the 5-hour usage window, open PR; each host's memory and memory pressure below |
+| **agent** | an overlay over the tab it was opened from, or Enter on a board row | state, role, project, session, what it waits on; resources, with a sparkline of the samples taken while open; open and closed jobs with their times; its PRs; tokens over 7 days; usage windows |
+
+- **Keys.** ↑/↓ (or j/k), PgUp/PgDn, Home/End move. Enter on the board opens
+  that agent, and Esc goes back to the board. `r` refetches every section once.
+  `q` closes the pane, as does Esc on an overlay.
+- **The agent.** The overlay is that of the tab it was opened from: the
+  deck labels an agent's tab with its login, and the view reads the label
+  from `HERDR_PLUGIN_CONTEXT_JSON`. On any other tab it says so.
+- **On demand.** At open, a view draws fleet.py's cache as it is, saying
+  how old it is, and fetches. While the pane has focus (terminal focus
+  reporting, DECSET 1004), it fetches each section again once that section's
+  time to live has passed: 5 s for proc and states, up to 600 s for tokens
+  (fleet.py's cost classes). When focus leaves, the status line says
+  `paused` and nothing new is fetched. A fetch already running finishes,
+  since fleet.py bounds every source.
+- **Focus starts unknown.** herdr reports focus changes only. So a view
+  counts as focused from the first focus-in or key, and until then it
+  stays at its open-time fetch, saying `press a key to go live`. A view
+  opened by its action (the keys above) is opened focused and starts live.
+- **What a cell says.** `…` means not read yet. `?` means its section failed,
+  and the board's footer says why, once per section. `-` means there is
+  none. The selected row is marked `>`, and every state is a word, never
+  only a colour. `NO_COLOR` turns colour off.
+- **Who can read what.** fleet.py's `jobs`, `usage`, `host`, `tokens` and
+  `accounts` sections answer only a host operator. The views are meant for
+  the operator's login; on any other they show those sections as `?`,
+  with fabric-ctl's refusal.
+- **What a view never does.** It calls no herdr socket: `outside_panes`
+  refuses a pane's process. The overlay is opened by the plugin's action,
+  which herdr runs outside the panes. A view sends no signed action and
+  reads no other source than fleet.py.
+- **What it writes.** Nothing of its own; it runs Python with `-B`.
+  - fleet.py, which it calls, keeps its shared cache under
+    `$XDG_RUNTIME_DIR/fabric-fleet/` (ADR-046 rule 2).
+  - fleet.py's `prs` section runs pr-gate, which fetches origin in the
+    agent-fabric checkout (fleet.py's documented side effect): at open,
+    on `r`, and every 120 s while focused.
+  - Quitting while a fetch is writing can leave one of fleet.py's
+    temporary files in that cache directory.
+
 ## Tests
 
 `just fleet-deck-test` runs the state machine (`test_deck_tabs`) and the
 deck against a fake herdr, a fake `/proc` and a real Unix socket
-(`test_fabric_deck`), without a server.
+(`test_fabric_deck`), without a server. It also runs both views' layout on
+fixture records (`test_view_render`), and the views' input, refresh rule
+and data location (`test_fabric_view`).
 
 The deck was also run against a real, isolated herdr server, with
 stand-ins for `moveto` and `fabric-ctl`. The `moveto` stand-in has the

@@ -2235,6 +2235,140 @@ async fn client_local_navigation_emits_pane_focused_only_when_that_client_moves(
     shutdown_test_runtimes(&mut server);
 }
 
+#[test]
+fn a_focused_plugin_pane_open_moves_client_shells_like_a_focused_tab_create() {
+    use api::schema::{Method, PluginPaneOpenParams, PluginPanePlacement};
+
+    let open = |placement, focus| {
+        Method::PluginPaneOpen(PluginPaneOpenParams {
+            plugin_id: "example.tab".into(),
+            entrypoint: "board".into(),
+            placement,
+            width: None,
+            height: None,
+            workspace_id: None,
+            target_pane_id: None,
+            direction: None,
+            cwd: None,
+            focus,
+            env: std::collections::HashMap::new(),
+        })
+    };
+    let asks = |method, manifest| HeadlessServer::public_create_requests_focus(&method, manifest);
+    assert!(asks(open(Some(PluginPanePlacement::Tab), true), None));
+    assert!(asks(open(None, true), None));
+    assert!(asks(open(Some(PluginPanePlacement::Zoomed), false), None));
+    assert!(!asks(open(Some(PluginPanePlacement::Tab), false), None));
+    // The manifest's placement applies when the request names none, and
+    // only then.
+    assert!(asks(open(None, false), Some(PluginPanePlacement::Zoomed)));
+    assert!(!asks(open(None, false), Some(PluginPanePlacement::Tab)));
+    assert!(!asks(
+        open(Some(PluginPanePlacement::Tab), false),
+        Some(PluginPanePlacement::Zoomed)
+    ));
+}
+
+#[tokio::test]
+async fn a_focused_plugin_tab_is_where_every_client_shell_goes() {
+    use api::schema::{Method, PluginLinkParams, PluginPaneOpenParams};
+
+    let mut server = test_headless_server();
+    let workspace = crate::workspace::Workspace::test_new("plugin-tab-follow");
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.ensure_test_terminals();
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.mode = crate::app::Mode::Terminal;
+    let first_tab_id = server.app.public_tab_id(0, 0).expect("first tab id");
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let root = std::env::temp_dir().join(format!(
+        "herdr-plugin-tab-follow-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("herdr-plugin.toml"),
+        r#"
+id = "example.follow"
+name = "Follow"
+version = "0.1.0"
+min_herdr_version = "0.6.10"
+platforms = ["linux", "macos"]
+
+[[panes]]
+id = "board"
+title = "Board"
+placement = "tab"
+command = ["sh", "-c", "sleep 1"]
+"#,
+    )
+    .unwrap();
+    let linked = server.app.handle_api_request(api::schema::Request {
+        id: "link".into(),
+        method: Method::PluginLink(PluginLinkParams {
+            path: root.display().to_string(),
+            enabled: true,
+            source: None,
+        }),
+    });
+    assert!(linked.contains("plugin_linked"), "{linked}");
+
+    let (control, _) = connect_matching_test_shell(&mut server, 63);
+    let _ = control.recv().expect("snapshot");
+    let open = |focus| api::schema::Request {
+        id: "open".into(),
+        method: Method::PluginPaneOpen(PluginPaneOpenParams {
+            plugin_id: "example.follow".into(),
+            entrypoint: "board".into(),
+            placement: None,
+            width: None,
+            height: None,
+            workspace_id: None,
+            target_pane_id: None,
+            direction: None,
+            cwd: None,
+            focus,
+            env: std::collections::HashMap::new(),
+        }),
+    };
+
+    // Unfocused: the client stays where it was.
+    let (respond_to, _unfocused) = std::sync::mpsc::channel();
+    server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        request: open(false),
+        respond_to,
+        response_write_complete: None,
+    });
+    assert_eq!(
+        server.shell_tab_id_for_client(63).as_deref(),
+        Some(first_tab_id.as_str())
+    );
+
+    // Focused: the client goes to the new tab with the server.
+    let (respond_to, _focused) = std::sync::mpsc::channel();
+    server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        request: open(true),
+        respond_to,
+        response_write_complete: None,
+    });
+    let workspace = &server.app.state.workspaces[0];
+    let newest = workspace.tabs.len() - 1;
+    assert_eq!(workspace.active_tab, newest);
+    let newest_id = server.app.public_tab_id(0, newest).expect("new tab id");
+    assert_eq!(
+        server.shell_tab_id_for_client(63).as_deref(),
+        Some(newest_id.as_str())
+    );
+
+    shutdown_test_runtimes(&mut server);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[tokio::test]
 async fn public_focus_moves_shell_focus_between_tabs() {
     let mut server = test_headless_server();
