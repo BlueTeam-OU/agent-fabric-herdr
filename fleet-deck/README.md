@@ -93,6 +93,18 @@ per change.
     descendants.
   - This was measured live on develop-qzapp (GZCoord seq 22145); `/proc`
     is mounted without `hidepid`.
+- **A pane entered over ssh** (`moveto --via ssh`, agent-fabric ADR-048)
+  is the account's when its foreground is `ssh` to `<login>@<host>` (or
+  `-l <login>`, or `ssh://<login>@…`) with one of the forced command's four
+  words as the whole remote command: `--wait`, `--watch`, `--resume`, or
+  `shell` (plain). It is classified, followed and never typed into, like a
+  sudo pane.
+  - sshd starts the account's session, so its harness is no descendant of
+    the pane's `ssh`, and nothing the deck may read links the two. The
+    account's live session, from the stream, is taken as the pane's.
+  - So a session started elsewhere shows as running in an ssh pane, never
+    as `running elsewhere`; an Enter there is still refused by
+    `fabric-resume`. A stale record changes nothing.
 - **The account's sessions** come from `fabric-ctl all states --follow
   --json`, this host's records only. The stream is restarted after 1, 2,
   5, 10, 30, then 60 s.

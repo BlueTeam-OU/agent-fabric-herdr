@@ -37,6 +37,7 @@ from deck_tabs import (
     RESTORE_WAIT_S,
     RESUME,
     SHELL,
+    SSH,
     STATUS,
     WAIT,
     WATCH,
@@ -231,6 +232,20 @@ def printable(text: str) -> str:
 
 
 # ------------------------------------------------------- the process walk
+
+
+def ssh_harness(live: Live | None) -> bool | None:
+    """Whether a harness runs in a pane entered over ssh, from the stream.
+    sshd starts the account's session, so its harness is no descendant of
+    the pane's `ssh` and the /proc walk cannot see it; nothing the deck may
+    read links an ssh client to the sshd session it opened. The account's
+    live session is taken as this pane's: the deck armed it, and an Enter
+    in a second pane is refused by fabric-resume. A session started
+    elsewhere therefore reads as running here, never as `running
+    elsewhere`. A stale or missing record says nothing (None)."""
+    if live is None or not live.fresh:
+        return None
+    return live.count >= 1
 
 
 def proc_parents(proc_root: str = "/proc") -> dict[int, int]:
@@ -754,6 +769,8 @@ class Deck:
             # Something else holds the operator's shell in this pane: not this
             # account's moveto, and not the deck's to judge.
             return Seen(present=True)
+        if found.via == SSH:
+            return Seen(present=True, moveto=True, harness=ssh_harness(self.live(login)), mode=found.mode)
         tree = parents if parents is not None else self.parents()
         return Seen(present=True, moveto=True, harness=harness_under(found.pid, tree, self.argv),
                     mode=found.mode)

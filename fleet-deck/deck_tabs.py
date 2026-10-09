@@ -334,12 +334,19 @@ def display(track: Track, live: Live | None) -> Shown:
 # ------------------------------------------------------------- foreground
 
 
+# How moveto entered the account: its `sudo` hand-off, or an ssh session
+# whose forced command runs `enter` as the account (agent-fabric ADR-048).
+SUDO, SSH = "sudo", "ssh"
+
+
 @dataclass(frozen=True)
 class Moveto:
-    """moveto's `sudo ... enter <dir> <title> [mode]` in a pane's foreground."""
+    """moveto's `sudo ... enter <dir> <title> [mode]`, or `ssh ... <login>@<host>
+    <mode|shell>`, in a pane's foreground."""
 
     pid: int
     mode: str
+    via: str = SUDO
 
 
 def moveto_in(foreground: list[tuple[int, list[str]]], login: str) -> Moveto | None:
@@ -351,6 +358,11 @@ def moveto_in(foreground: list[tuple[int, list[str]]], login: str) -> Moveto | N
         if not argv:
             continue
         program = os.path.basename(argv[0])
+        if program == "ssh":
+            mode = _ssh_mode(argv[1:], login)
+            if mode is not None:
+                return Moveto(pid, mode, SSH)
+            continue
         enter = any(arg.endswith("/moveto/enter") for arg in argv)
         if program == "sudo":
             if enter and _sudo_user_is(argv, login):
@@ -366,6 +378,54 @@ def moveto_in(foreground: list[tuple[int, list[str]]], login: str) -> Moveto | N
 
 def _mode(argv: list[str]) -> str:
     return argv[-1] if argv[-1] in MODES else PLAIN
+
+
+# ssh's options that take the next argument as their value (OpenSSH 9).
+_SSH_VALUE_OPTIONS = frozenset("BbcDEeFIiJLlmOoPpQRSWw")
+# What enter-ssh accepts as the whole remote command, and the mode each is.
+_SSH_WORDS = {WAIT: WAIT, WATCH: WATCH, RESUME: RESUME, "shell": PLAIN}
+
+
+def _ssh_mode(args: list[str], login: str) -> str | None:
+    """The mode of an ssh into this login's forced command: the account as
+    the destination's user (`<login>@host`, `ssh://<login>@host`, or `-l
+    <login>`), and one of enter-ssh's four words as the whole remote
+    command. Anything else is some other ssh, not this account's moveto."""
+    user = None
+    rest: list[str] = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            rest = args[i + 1:]
+            break
+        if arg.startswith("-") and len(arg) > 1:
+            # A flag cluster (-tt, -4A); the last letter may take a value,
+            # given in the same word (-p2222) or as the next one.
+            last = len(arg) - 1
+            for j, letter in enumerate(arg[1:], start=1):
+                if letter in _SSH_VALUE_OPTIONS:
+                    value = arg[j + 1:] if j < last else (args[i + 1] if i + 1 < len(args) else "")
+                    if letter == "l":
+                        user = value
+                    if j == last:
+                        i += 1
+                    break
+            i += 1
+            continue
+        rest = args[i:]
+        break
+    if not rest:
+        return None
+    destination, command = rest[0], rest[1:]
+    if command[:1] == ["--"]:
+        command = command[1:]
+    destination = destination.removeprefix("ssh://")
+    if "@" in destination:
+        user = destination.rsplit("@", 1)[0]
+    if user != login or len(command) != 1:
+        return None
+    return _SSH_WORDS.get(command[0])
 
 
 def _sudo_user_is(argv: list[str], login: str) -> bool:

@@ -136,6 +136,13 @@ def in_moveto(login, mode="", pid=20):
             "foreground_processes": [{"pid": pid, "argv": argv + ([mode] if mode else [])}]}
 
 
+def in_ssh(login, word, pid=20):
+    """moveto --via ssh: the operator's ssh into the account's forced command."""
+    argv = ["ssh", "-t", "-i", "/home/user/.ssh/fabric_deck", f"{login}@127.0.0.1", word]
+    return {"shell_pid": 10, "foreground_process_group_id": pid,
+            "foreground_processes": [{"pid": pid, "argv": argv}]}
+
+
 class FakeHerdr(Herdr):
     """herdr's server as the deck's calls see it: workspaces, tabs, labelled
     panes and each pane's process info, every call recorded. The adapter's
@@ -541,6 +548,32 @@ class Restore(unittest.TestCase):
         h.deck.follow(RESTORE_SETTLE_S)
         self.assertEqual(h.herdr.runs(), [], "nothing is typed while moveto runs")
         self.assertEqual(h.herdr.reports("p0")[0][-1], "working")
+
+    def test_a_tab_entered_over_ssh_is_classified_like_a_sudo_one_from_the_stream(self):
+        herdr = FakeHerdr()
+        herdr.add_tab("ui", [("p0", "harness", in_ssh("ui", WAIT)), ("p1", "shell", in_ssh("ui", "shell")),
+                             ("p2", "status", in_ssh("ui", WATCH))])
+        h = Harness(herdr)
+        h.records["ui"] = record("ui", "working")
+        h.deck.restore(0)
+        h.deck.follow(RESTORE_SETTLE_S)
+        self.assertEqual(h.herdr.runs(), [], "nothing is typed while ssh runs the account")
+        self.assertEqual(h.herdr.reports("p0")[0][-1], "working")
+        h.records["ui"] = record("ui", "none")
+        h.deck.follow(RESTORE_SETTLE_S + 30)
+        self.assertEqual(h.herdr.runs(), [])
+        self.assertIn("idle=shell", h.herdr.reports("p0")[-1])
+
+    def test_an_ssh_pane_with_a_stale_record_is_left_as_it_was(self):
+        herdr = FakeHerdr()
+        herdr.add_tab("ui", [("p0", "harness", in_ssh("ui", WAIT)), ("p1", "shell", in_ssh("ui", "shell")),
+                             ("p2", "status", in_ssh("ui", WATCH))])
+        h = Harness(herdr)
+        h.records["ui"] = record("ui", "working", age_s=10_000)
+        h.deck.restore(0)
+        h.deck.follow(RESTORE_SETTLE_S)
+        self.assertEqual(h.herdr.runs(), [])
+        self.assertNotIn("working", [r[-1] for r in h.herdr.reports("p0")])
 
     def test_an_account_with_an_unsafe_login_is_never_typed(self):
         h = Harness(logins=("ui; rm -rf ~",))
