@@ -50,7 +50,11 @@ impl HeadlessServer {
         let account = self.pane_account(pane_id);
         let choice = self.transition_sound_choice_for(account.as_deref(), from, to, agent);
         if matches!(choice, Choice::Play(_))
-            && self.transition_sound_limiter.allow(pane_id, Instant::now())
+            && self.transition_sound_limiter.allow(
+                pane_id,
+                Instant::now(),
+                Duration::from_millis(self.app.state.sound.fleet_min_interval_ms),
+            )
         {
             let label = Label {
                 from,

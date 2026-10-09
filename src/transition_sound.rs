@@ -32,6 +32,10 @@ pub const ACCOUNT_TOKEN: &str = "account";
 /// resumes at once does not repeat a pane's sound for each step it passes.
 pub const PANE_SOUND_INTERVAL: Duration = Duration::from_secs(1);
 
+/// `[ui.sound] fleet_min_interval_ms` unset: a fleet resuming at once plays
+/// at most four transition sounds a second.
+pub const DEFAULT_FLEET_MIN_INTERVAL_MS: u64 = 250;
+
 const LABEL_PREFIX: &str = "transition ";
 const OFF: &str = "off";
 
@@ -275,14 +279,18 @@ fn playback_for_label(message: &str, config: &SoundConfig) -> Option<Playback> {
     )
 }
 
-/// One sound per pane per `PANE_SOUND_INTERVAL`, on the server.
+/// On the server: one transition sound per pane per `PANE_SOUND_INTERVAL`,
+/// and across all panes one per `fleet_interval` (`[ui.sound]
+/// fleet_min_interval_ms`; zero: no fleet limit). A sound either limit
+/// drops is not counted against the other.
 #[derive(Debug, Default)]
-pub struct PaneSoundLimiter {
+pub struct TransitionSoundLimiter {
     last: HashMap<PaneId, Instant>,
+    last_any: Option<Instant>,
 }
 
-impl PaneSoundLimiter {
-    pub fn allow(&mut self, pane: PaneId, now: Instant) -> bool {
+impl TransitionSoundLimiter {
+    pub fn allow(&mut self, pane: PaneId, now: Instant, fleet_interval: Duration) -> bool {
         // Entries older than the window decide nothing; dropping them here
         // bounds the map by the panes that sounded within the last second.
         self.last
@@ -290,7 +298,14 @@ impl PaneSoundLimiter {
         if self.last.contains_key(&pane) {
             return false;
         }
+        if self
+            .last_any
+            .is_some_and(|at| now.saturating_duration_since(at) < fleet_interval)
+        {
+            return false;
+        }
         self.last.insert(pane, now);
+        self.last_any = Some(now);
         true
     }
 }
@@ -513,17 +528,38 @@ mod tests {
 
     #[test]
     fn a_pane_sounds_once_a_second_and_other_panes_are_not_held() {
-        let mut limiter = PaneSoundLimiter::default();
+        let mut limiter = TransitionSoundLimiter::default();
         let start = Instant::now();
         let pane = PaneId::from_raw(1);
         let other = PaneId::from_raw(2);
-        assert!(limiter.allow(pane, start));
-        assert!(!limiter.allow(pane, start + Duration::from_millis(999)));
-        assert!(limiter.allow(other, start + Duration::from_millis(999)));
-        assert!(limiter.allow(pane, start + PANE_SOUND_INTERVAL));
+        let no_fleet_limit = Duration::ZERO;
+        assert!(limiter.allow(pane, start, no_fleet_limit));
+        assert!(!limiter.allow(pane, start + Duration::from_millis(999), no_fleet_limit));
+        assert!(limiter.allow(other, start + Duration::from_millis(999), no_fleet_limit));
+        assert!(limiter.allow(pane, start + PANE_SOUND_INTERVAL, no_fleet_limit));
         assert_eq!(limiter.last.len(), 2);
-        assert!(limiter.allow(other, start + Duration::from_secs(5)));
+        assert!(limiter.allow(other, start + Duration::from_secs(5), no_fleet_limit));
         assert_eq!(limiter.last.len(), 1, "stale entries are dropped");
+    }
+
+    #[test]
+    fn across_panes_one_sound_per_fleet_interval_and_a_dropped_one_is_not_counted() {
+        let mut limiter = TransitionSoundLimiter::default();
+        let start = Instant::now();
+        let fleet = Duration::from_millis(250);
+        let [a, b, c] = [1, 2, 3].map(PaneId::from_raw);
+        assert!(limiter.allow(a, start, fleet));
+        assert!(!limiter.allow(b, start + Duration::from_millis(249), fleet));
+        assert!(
+            limiter.allow(b, start + fleet, fleet),
+            "b's dropped sound did not start a pane window for b"
+        );
+        assert!(!limiter.allow(c, start + Duration::from_millis(400), fleet));
+        assert!(limiter.allow(c, start + Duration::from_millis(500), fleet));
+        assert!(
+            !limiter.allow(a, start + Duration::from_millis(900), fleet),
+            "the pane limit still holds past the fleet interval"
+        );
     }
 
     #[test]

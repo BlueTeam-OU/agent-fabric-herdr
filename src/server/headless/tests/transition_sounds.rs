@@ -50,10 +50,21 @@ impl Deck {
     }
 
     fn report(&mut self, state: PaneAgentState) {
+        let pane = self.pane.clone();
+        self.report_on(pane, state);
+    }
+
+    /// The pane in the second workspace, which has no account token.
+    fn other_pane(&self) -> String {
+        let pane_id = self.server.app.state.workspaces[1].tabs[0].root_pane;
+        self.server.app.public_pane_id(1, pane_id).unwrap()
+    }
+
+    fn report_on(&mut self, pane: String, state: PaneAgentState) {
         completion_guard_api_report(
             &mut self.server,
             api::schema::Method::PaneReportAgent(api::schema::PaneReportAgentParams {
-                pane_id: self.pane.clone(),
+                pane_id: pane,
                 source: "fabric".into(),
                 agent: "claude".into(),
                 state,
@@ -183,4 +194,21 @@ fn a_pane_passing_several_transitions_at_once_sounds_once() {
         semantic.iter().all(Option::is_none),
         "a limited transition is still claimed: upstream's sound does not slip through"
     );
+}
+
+#[test]
+fn panes_changing_together_sound_once_per_fleet_interval_unless_it_is_zero() {
+    for (interval, expected) in [("", 1), ("fleet_min_interval_ms = 0\n", 2)] {
+        let mut deck = Deck::new(&format!(
+            "[ui.sound]\n{interval}[ui.sound.transitions]\n\"idle -> working\" = \"w.mp3\"\n"
+        ));
+        let other = deck.other_pane();
+        deck.report(PaneAgentState::Idle);
+        deck.report_on(other.clone(), PaneAgentState::Idle);
+        let _ = deck.sent();
+        deck.report(PaneAgentState::Working);
+        deck.report_on(other, PaneAgentState::Working);
+        let (labels, _) = deck.sent();
+        assert_eq!(labels.len(), expected, "{interval:?}: {labels:?}");
+    }
 }

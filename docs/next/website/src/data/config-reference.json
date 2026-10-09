@@ -1200,6 +1200,12 @@
           "description": "Optional mp3 file path for \"request\" notifications. Relative paths are resolved from the config file's directory."
         },
         {
+          "key": "ui.sound.fleet_min_interval_ms",
+          "type": "integer",
+          "default": "250",
+          "description": "Fork: across all panes, at most one transition sound per this many milliseconds, beside the limit of one per pane per second. A sound inside the interval is dropped; its notification still shows. 0 turns the fleet limit off. Applies to sounds chosen by ui.sound.transitions and ui.sound.accounts only."
+        },
+        {
           "key": "ui.sound.transitions",
           "type": "table",
           "default": "{}",

@@ -206,8 +206,8 @@ pub struct HeadlessServer {
     tab_geometry_controllers: HashMap<String, u64>,
     /// Stable tab id whose viewers may see and interact with the one terminal popup.
     popup_owner_tab_id: Option<String>,
-    /// Fork: one transition sound per pane per second (`crate::transition_sound`).
-    transition_sound_limiter: crate::transition_sound::PaneSoundLimiter,
+    /// Fork: how often transition sounds may play (`crate::transition_sound`).
+    transition_sound_limiter: crate::transition_sound::TransitionSoundLimiter,
     /// Process-local identity used to reject shell replacements from an earlier server boot.
     client_shell_boot_id: String,
     /// Outer window title last pushed, paired with the client that received it.
