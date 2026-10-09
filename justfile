@@ -52,9 +52,9 @@ ci-tests filter='all()':
     just integration-assets-test
     just fleet-deck-test
 
-# Fleet Deck (gzapi-org's fork only): the tab state machine and the deck around it
+# Fleet Deck (gzapi-org's fork only): the tab state machine, the deck around it, and the fleet views
 fleet-deck-test:
-    cd fleet-deck && {{python}} -m unittest test_deck_tabs test_fabric_deck
+    cd fleet-deck && {{python}} -m unittest test_deck_tabs test_fabric_deck test_view_render test_fabric_view
 
 # Download the Windows SDK once (requires xwin; prompts for Microsoft's SDK license)
 [unix]

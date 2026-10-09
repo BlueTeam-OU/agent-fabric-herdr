@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# fabric-view: Fleet Deck's views of the fleet. See fabric_view.py.
+# fleet.py is run by the fleet's pinned Python (agent-fabric ADR-040), so the
+# views import it under the same one; AGENT_FABRIC_PYTHON points elsewhere
+# for a test or a host without it.
+here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+py="${AGENT_FABRIC_PYTHON:-/usr/local/bin/fabric-python}"
+[[ -x "$py" ]] || py="$(command -v python3)" || { echo "fabric-view: no Python to run on" >&2; exit 127; }
+exec "$py" -c 'import sys; sys.path.insert(0, sys.argv[1]); from fabric_view import main; raise SystemExit(main(sys.argv[2:]))' "$here" "$@"

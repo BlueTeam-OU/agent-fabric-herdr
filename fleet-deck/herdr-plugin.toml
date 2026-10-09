@@ -1,0 +1,32 @@
+# Fleet Deck's views (gzapi-org's fork): what the fleet does, read when a
+# view is open and focused. See README.md, "Views".
+id = "fabric.fleet"
+name = "Fleet views"
+version = "0.1.0"
+min_herdr_version = "0.9.3"
+description = "The fleet board and an agent's overlay, from agent-fabric's fleet.py"
+platforms = ["linux"]
+
+[[actions]]
+id = "board"
+title = "Fleet board"
+contexts = ["global"]
+command = ["./fabric-view", "open", "board"]
+
+[[actions]]
+id = "agent"
+title = "This agent"
+contexts = ["tab", "pane"]
+command = ["./fabric-view", "open", "agent"]
+
+[[panes]]
+id = "board"
+title = "fleet"
+placement = "tab"
+command = ["./fabric-view", "board"]
+
+[[panes]]
+id = "agent"
+title = "agent"
+placement = "overlay"
+command = ["./fabric-view", "agent"]
