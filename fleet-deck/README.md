@@ -78,6 +78,14 @@ shows `state_text`. herdr shows an `idle` the person has not looked at as
 `done`, so the word is set for both. The deck's terminal prints one line
 per change.
 
+Each harness pane also carries the metadata token `account=<login>`, so
+herdr can tell the accounts apart although every pane reports as
+`claude`: `[ui.sound.accounts."<login>"]` in herdr's config gives an
+account its own sound per state transition (see the Sound section of the
+configuration docs). Sounds follow the herdr state column above, the
+deck's own states included: a `--resume` that fails (`working ->
+blocked`) sounds as any agent that needs attention does.
+
 ## What the deck observes, and never does
 
 - **moveto in the pane** comes from herdr's `pane process-info`. The
