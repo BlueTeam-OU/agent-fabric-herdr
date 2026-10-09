@@ -529,8 +529,12 @@ def heading(title: str, record: dict | None, now: datetime.datetime) -> Line:
 
 def wrap_cells(text: str, width: int, indent: str = "") -> list[str]:
     """Words into lines of at most `width` cells, later lines indented; a
-    word wider than a line is split. textwrap counts characters, and a
+    word wider than a line is split. The one exception: a single
+    character wider than the whole width goes on a line of its own. textwrap counts characters, and a
     line of wide characters it makes is twice as wide as it thinks."""
+    width = max(1, width)
+    # An indent that leaves no room for a cell is dropped, not overflowed.
+    indent = indent if cells(indent) < width else ""
     lines: list[str] = []
     line = ""
     for word in text.split():
@@ -545,7 +549,9 @@ def wrap_cells(text: str, width: int, indent: str = "") -> list[str]:
                 line = ""
                 continue
             room = width - cells(lead)
-            head = take(word, max(1, room))
+            # At least one character, so the word always shrinks: a wide
+            # character wider than the room goes alone, a cell over.
+            head = take(word, max(1, room)) or word[0]
             lines.append(lead + head)
             word = word[len(head):]
             if not word:

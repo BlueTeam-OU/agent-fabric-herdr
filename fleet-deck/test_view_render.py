@@ -287,6 +287,10 @@ class OtherAccountsText(unittest.TestCase):
         self.assertEqual(vr.wrap_cells("ab cd ef", 5), ["ab cd", "ef"])
         self.assertEqual(vr.wrap_cells("ab cd ef", 5, indent="  "), ["ab cd", "  ef"])
         self.assertEqual(vr.wrap_cells("漢字漢字漢", 4), ["漢字", "漢字", "漢"])
+        # A character wider than the room ends; an indent wider than the
+        # width is dropped.
+        self.assertEqual(vr.wrap_cells("漢", 1), ["漢"])
+        self.assertEqual(vr.wrap_cells("abc def", 3, indent="    "), ["abc", "def"])
 
     def test_wide_characters_are_measured_in_cells(self):
         self.assertEqual(vr.cells("漢字ab"), 6)
