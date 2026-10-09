@@ -33,10 +33,14 @@ class Input(unittest.TestCase):
 
 
 class Refresh(unittest.TestCase):
-    def test_nothing_is_fetched_without_focus(self):
-        r = fv.Refresher({"proc": 5, "jobs": 30})
-        self.assertEqual(r.due(0, focused=False), [])
-        self.assertEqual(r.due(0, focused=True), ["proc", "jobs"])
+    def test_once_at_open_whatever_the_focus_then_nothing_without_it(self):
+        for focus in (None, False, True):
+            r = fv.Refresher({"proc": 5, "jobs": 30})
+            self.assertEqual(r.due(0, focused=focus), ["proc", "jobs"])
+            for s in ("proc", "jobs"):
+                r.started(s)
+                r.ended(s, 1)
+            self.assertEqual(r.due(100, focused=focus), ["proc", "jobs"] if focus else [])
 
     def test_each_section_again_after_its_ttl_and_never_twice_at_once(self):
         r = fv.Refresher({"proc": 5, "jobs": 30})
@@ -49,6 +53,7 @@ class Refresh(unittest.TestCase):
         self.assertEqual(r.due(15, True), ["proc"])
         self.assertEqual(r.due(40, True), ["proc", "jobs"])
         self.assertEqual(r.due(40, False), [])
+        self.assertEqual(r.due(40, None), [])
 
     def test_r_refetches_what_is_not_already_running(self):
         r = fv.Refresher({"proc": 5, "jobs": 30})

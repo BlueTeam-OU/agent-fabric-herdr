@@ -382,7 +382,7 @@ def failure_lines(agents: list[Agent], sections: tuple[str, ...], width: int, li
 class Status:
     """What the person needs to judge the numbers: is this live, how old is
     it, is something being read now."""
-    focused: bool
+    focused: bool | None         # None: herdr has not said, and no key came yet
     fetching: tuple[str, ...]
     now: datetime.datetime
     oldest: str | None           # the oldest `at` among the records shown
@@ -394,9 +394,9 @@ def status_line(title: str, st: Status, width: int) -> Line:
         when = f"from cache, {age(st.oldest, st.now)}" if st.oldest else "nothing read yet"
     else:
         when = f"oldest value {age(st.oldest, st.now)}" if st.oldest else "nothing read yet"
-    mode = "live" if st.focused else "paused: not focused"
+    mode = {True: "live", False: "paused: not focused", None: "paused: press a key to go live"}[st.focused]
     tail = f" · reading {', '.join(st.fetching)}" if st.fetching else ""
-    return [(fit(f"{title} · {mode} · {when}{tail}", width), BOLD if st.focused else WARN)]
+    return [(fit(f"{title} · {mode} · {when}{tail}", width), BOLD if st.focused is True else WARN)]
 
 
 def oldest_at(records) -> str | None:

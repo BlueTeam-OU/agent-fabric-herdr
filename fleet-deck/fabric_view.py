@@ -138,18 +138,18 @@ def parse_input(buf: bytes, final: bool) -> tuple[list[str], bytes]:
 
 @dataclass
 class Refresher:
-    """Which sections to fetch, and when: each section again once its TTL
-    has passed since its last fetch ended, and only while focused. Pure:
-    the clock and the starting are the caller's."""
+    """Which sections to fetch, and when: each section once at open,
+    whatever the focus; then again once its TTL has passed since its last
+    fetch ended, and only while focused. Pure: the clock and the starting
+    are the caller's."""
     ttl: dict[str, float]
     finished: dict[str, float] = field(default_factory=dict)
     running: set[str] = field(default_factory=set)
 
-    def due(self, now: float, focused: bool) -> list[str]:
-        if not focused:
-            return []
+    def due(self, now: float, focused: bool | None) -> list[str]:
         return [s for s, ttl in self.ttl.items()
-                if s not in self.running and (s not in self.finished or now - self.finished[s] >= ttl)]
+                if s not in self.running
+                and (s not in self.finished or (focused is True and now - self.finished[s] >= ttl))]
 
     def refetch(self) -> list[str]:
         """`r`: every section not already being read."""
@@ -230,7 +230,7 @@ class View:
         self.fetcher = Fetcher(fleet, agent, results, self)
         self.whys: dict[str, str] = {}
 
-    def tick(self, focused: bool) -> None:
+    def tick(self, focused: bool | None) -> None:
         for s in self.refresher.due(time.monotonic(), focused):
             self.refresher.started(s)
             self.fetcher.start(s, force=False)
@@ -337,7 +337,10 @@ def run(curses, screen, fleet, mode: str, login: str | None) -> int:
     agent_view = View(fleet, vr.AGENT_SECTIONS, login, store, results) if mode == "agent" else None
     samples = vr.Samples()
     selected = scroll = 0
-    focused = True     # opened by the person, so looked at; herdr says otherwise when it is not
+    # Unknown until herdr reports a change or a key arrives. herdr reports
+    # focus changes only, and a pane opened in the background never had
+    # focus to lose: assuming focus at open would fetch in the background.
+    focused: bool | None = None
     pending = b""
     size = None
     while True:
@@ -381,11 +384,11 @@ def run(curses, screen, fleet, mode: str, login: str | None) -> int:
             events, pending = parse_input(pending, final=True)
         page = max(1, height - 4)
         for ev in events:
-            if ev == FOCUS_IN:
-                focused = True
-            elif ev == FOCUS_OUT:
-                focused = False
-            elif ev == "r":
+            if ev in (FOCUS_IN, FOCUS_OUT):
+                focused = ev == FOCUS_IN
+                continue
+            focused = True    # a key reached this pane, so it has focus
+            if ev == "r":
                 current.refetch()
             elif ev in ("q", "Q"):
                 return 0
@@ -461,7 +464,8 @@ def open_pane(entrypoint: str, env: dict[str, str]) -> int:
         print("fabric-view: no herdr to ask (HERDR_BIN_PATH is not set)", file=sys.stderr)
         return 2
     plugin = env.get("HERDR_PLUGIN_ID") or PLUGIN_ID
-    os.execv(herdr, [herdr, "plugin", "pane", "open", "--plugin", plugin, "--entrypoint", entrypoint])
+    # --focus: the person pressed a key to see this view.
+    os.execv(herdr, [herdr, "plugin", "pane", "open", "--plugin", plugin, "--entrypoint", entrypoint, "--focus"])
     return 0   # not reached
 
 

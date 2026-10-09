@@ -167,6 +167,8 @@ class Board(unittest.TestCase):
         self.assertIn("live", texts([vr.status_line("Fleet", status(), 100)])[0])
         paused = texts([vr.status_line("Fleet", status(focused=False), 100)])[0]
         self.assertIn("paused: not focused", paused)
+        unknown = texts([vr.status_line("Fleet", status(focused=None), 100)])[0]
+        self.assertIn("paused: press a key to go live", unknown)
         cached = texts([vr.status_line("Fleet", status(from_cache=True, fetching=("jobs", "prs")), 100)])[0]
         self.assertIn("from cache, 4 min ago", cached)
         self.assertIn("reading jobs, prs", cached)
