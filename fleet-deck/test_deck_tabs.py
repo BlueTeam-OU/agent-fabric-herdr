@@ -278,19 +278,30 @@ class Foreground(unittest.TestCase):
 
     def test_an_ssh_into_this_accounts_forced_command_is_its_moveto(self):
         key = ["-i", "/home/user/.ssh/fabric_deck", "-o", "IdentitiesOnly=yes"]
-        self.assertEqual(moveto_in([(9, ["ssh", "-t", *key, "ui@127.0.0.1", "--wait"])], "ui"), Moveto(9, WAIT, SSH))
+        self.assertEqual(moveto_in([(9, ["ssh", "-t", *key, "ui@127.0.0.1", "--", "--wait"])], "ui"),
+                         Moveto(9, WAIT, SSH))
         self.assertEqual(moveto_in([(9, ["/usr/bin/ssh", "-tt", "-p2222", "ui@h", "--", "--watch"])], "ui"),
                          Moveto(9, WATCH, SSH))
         self.assertEqual(moveto_in([(9, ["ssh", "-l", "ui", "-p", "22", "h", "shell"])], "ui"), Moveto(9, PLAIN, SSH))
-        self.assertEqual(moveto_in([(9, ["ssh", "ssh://ui@h:22", "--resume"])], "ui"), Moveto(9, RESUME, SSH))
+        self.assertEqual(moveto_in([(9, ["ssh", "ssh://ui@h:22", "--", "--resume"])], "ui"), Moveto(9, RESUME, SSH))
+        # Options after the destination are ssh's, as OpenSSH re-parses them.
+        self.assertEqual(moveto_in([(9, ["ssh", "ui@h", "-t", "--", "--wait"])], "ui"), Moveto(9, WAIT, SSH))
+        self.assertEqual(moveto_in([(9, ["ssh", "ui@h", "-l", "other", "--", "--wait"])], "ui"), Moveto(9, WAIT, SSH))
 
     def test_any_other_ssh_is_not_this_moveto(self):
-        for argv in (["ssh", "other@h", "--wait"],          # another account
-                     ["ssh", "ui@h"],                        # no word: enter-ssh refuses it
-                     ["ssh", "ui@h", "--wait", "x"],         # not the whole command
-                     ["ssh", "ui@h", "bash"],                # not one of the four words
-                     ["ssh", "-p", "ui@h", "h2", "--wait"],  # ui@h is -p's value; h2 has no user
-                     ["ssh", "-l", "other", "h", "--wait"]):
+        for argv in (["ssh", "other@h", "--", "--wait"],          # another account
+                     ["ssh", "ui@h"],                              # no word: enter-ssh refuses it
+                     ["ssh", "ui@h", "--wait"],                    # ssh refuses --wait as an option
+                     ["ssh", "ui@h", "--", "--wait", "x"],         # not the whole command
+                     ["ssh", "ui@h", "bash"],                      # not one of the four words
+                     ["ssh", "-p", "ui@h", "h2", "--", "--wait"],  # ui@h is -p's value; h2 has no user
+                     ["ssh", "-l", "other", "h", "--", "--wait"],
+                     # The first user set is the one ssh connects as (ssh -G).
+                     ["ssh", "-l", "other", "ui@h", "--", "--wait"],
+                     ["ssh", "-o", "User=other", "ui@h", "--", "--wait"],
+                     ["ssh", "-oUser=other", "ui@h", "--", "--wait"],
+                     ["ssh", "-o", "user other", "ui@h", "--", "--wait"],
+                     ["ssh", "ui@h", "-l"]):                       # an option without its value
             self.assertIsNone(moveto_in([(9, argv)], "ui"), argv)
 
     def test_a_python_option_and_its_value_are_not_the_script(self):

@@ -143,7 +143,7 @@ def in_moveto(login, mode="", pid=20):
 
 def in_ssh(login, word, pid=20):
     """moveto --via ssh: the operator's ssh into the account's forced command."""
-    argv = ["ssh", "-t", "-i", "/home/user/.ssh/fabric_deck", f"{login}@127.0.0.1", word]
+    argv = ["ssh", "-t", "-i", "/home/user/.ssh/fabric_deck", f"{login}@127.0.0.1", "--", word]
     return {"shell_pid": 10, "foreground_process_group_id": pid,
             "foreground_processes": [{"pid": pid, "argv": argv}]}
 

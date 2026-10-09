@@ -94,10 +94,12 @@ per change.
   - This was measured live on develop-qzapp (GZCoord seq 22145); `/proc`
     is mounted without `hidepid`.
 - **A pane entered over ssh** (`moveto --via ssh`, agent-fabric ADR-048)
-  is the account's when its foreground is `ssh` to `<login>@<host>` (or
-  `-l <login>`, or `ssh://<login>@…`) with one of the forced command's four
-  words as the whole remote command: `--wait`, `--watch`, `--resume`, or
-  `shell` (plain). It is classified, followed and never typed into, like a
+  is the account's when its foreground is `ssh` connecting as the account
+  with one of the forced command's four words as the whole remote command:
+  `--wait`, `--watch`, `--resume`, or `shell` (plain). The argv is read as
+  OpenSSH reads it: the user is the first one set, by `-l`, `-o User=` or
+  `<login>@`; options after the destination are ssh's too, so a word that
+  starts with `-` must follow `--` (`ssh <login>@<host> -- --wait`). It is classified, followed and never typed into, like a
   sudo pane.
   - sshd starts the account's session, so its harness is no descendant of
     the pane's `ssh`, and nothing the deck may read links the two. The
