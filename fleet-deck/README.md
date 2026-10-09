@@ -202,6 +202,14 @@ description = "this agent"
   refuses a pane's process. The overlay is opened by the plugin's action,
   which herdr runs outside the panes. A view sends no signed action and
   reads no other source than fleet.py.
+- **What it writes.** Nothing of its own; it runs Python with `-B`.
+  - fleet.py, which it calls, keeps its shared cache under
+    `$XDG_RUNTIME_DIR/fabric-fleet/` (ADR-046 rule 2).
+  - fleet.py's `prs` section runs pr-gate, which fetches origin in the
+    agent-fabric checkout (fleet.py's documented side effect): at open,
+    on `r`, and every 120 s while focused.
+  - Quitting while a fetch is writing can leave one of fleet.py's
+    temporary files in that cache directory.
 
 ## Tests
 

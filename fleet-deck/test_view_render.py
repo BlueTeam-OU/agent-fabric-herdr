@@ -241,6 +241,63 @@ class AgentView(unittest.TestCase):
             self.assertLessEqual(len(t), 40)
 
 
+class OtherAccountsText(unittest.TestCase):
+    """Titles, branches and whys come from other accounts (the threat
+    model): none may move the cursor or overflow its line."""
+
+    def hostile(self):
+        a = fleet()[0]
+        jobs = [dict(j) for j in vr.open_jobs(JOBS["data"])]
+        jobs[1]["title"] = "J1 fix\rFORGED\bx\nnext\x9bline"
+        jobs[0]["title"] = "漢" * 60
+        a.sections["jobs"] = ok("op:jobs", JOBS["at"], {"jobs": {"status": "ok", "jobs": jobs}})
+        a.sections["prs"] = ok("pr-gate", PRS["at"], dict(PRS["data"], prs=[{"pr": 9, "branch": "b\r\x1b[31mred", "ahead": 1}]))
+        b = fleet()[1]
+        b.sections["jobs"] = bad("op:jobs", "refused\rFORGED")
+        return [a, b]
+
+    def assert_drawable(self, lines, width):
+        for line in lines:
+            text = vr.line_text(line)
+            self.assertFalse([c for c in text if vr.unicodedata.category(c)[0] == "C"], repr(text))
+            self.assertLessEqual(vr.cells(text), width, repr(text))
+
+    def test_the_board_draws_no_control_character_and_fits_in_cells(self):
+        for width in (140, 70, 40):
+            self.assert_drawable(vr.board_lines(self.hostile(), {}, status(), 0, width, 20), width)
+        row = texts(vr.board_lines(self.hostile(), {}, status(), 0, 140, 20))[2]
+        self.assertTrue(row.startswith("> architect-cto-01"), row)
+        self.assertIn("J1 fix" + vr.CONTROL + "FORGED", row)
+
+    def test_the_agent_view_draws_no_control_character_and_fits_in_cells(self):
+        for width in (100, 40):
+            a = self.hostile()[0]
+            self.assert_drawable(vr.agent_lines(a, vr.Samples(), status(), 0, width, 80)[0], width)
+            self.assert_drawable(vr.agent_lines(self.hostile()[1], vr.Samples(), status(), 0, width, 80)[0], width)
+
+    def test_wide_characters_are_measured_in_cells(self):
+        self.assertEqual(vr.cells("漢字ab"), 6)
+        self.assertEqual(vr.cells(vr.fit("漢" * 30, 40)), 39)
+        self.assertEqual(vr.cells(vr.pad("漢字", 6, right=True)), 6)
+
+
+class WhysOnScreen(unittest.TestCase):
+    def test_prs_that_could_not_be_listed_are_said_in_the_footer(self):
+        agents = fleet()
+        agents[0].sections["prs"] = ok("pr-gate", PRS["at"], dict(PRS["data"], prs_ok=False))
+        lines = texts(vr.board_lines(agents, {}, status(), 0, 140, 20))
+        self.assertTrue(any(t.startswith("? prs not read for 1 agent: pr-gate could not list") for t in lines))
+
+    def test_sections_past_the_footer_are_named_with_where_their_why_is(self):
+        agents = fleet()
+        for name in ("jobs", "usage", "host", "tokens"):
+            for a in agents:
+                a.sections[name] = bad(f"op:{name}", f"{name} refused")
+        lines = texts(vr.failure_lines(agents, vr.BOARD_SECTIONS, 140, limit=3))
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(lines[-1], "? also not read: host, tokens; why in each agent's view (Enter)")
+
+
 class Values(unittest.TestCase):
     def test_clock_and_age(self):
         self.assertEqual(vr.clock("2026-10-09T10:57:46Z", NOW), "10:57Z")

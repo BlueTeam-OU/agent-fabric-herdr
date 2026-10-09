@@ -259,7 +259,9 @@ def agents_of(placements, store: Store, sections: tuple[str, ...], whys: dict[st
         recs = {}
         for s in sections:
             rec = store.get(s, login)
-            if rec is None and s in whys:
+            if s in whys:
+                # The last fetch of the whole section failed: an older
+                # record drawn as current would hide it.
                 rec = {"status": "failed", "src": "fleet", "at": None, "why": whys[s]}
             recs[s] = rec
         out.append(vr.Agent(login, a.host, a.kind, recs))
@@ -300,11 +302,12 @@ class Painter:
                     break
                 # The bottom-right cell cannot be written without scrolling.
                 room = width - x - (1 if y == height - 1 else 0)
+                part = vr.take(vr.clean(text), room)
                 try:
-                    self.screen.addstr(y, x, text[:room], self.attrs.get(style, 0))
-                except self.curses.error:
-                    pass
-                x += len(text[:room])
+                    self.screen.addstr(y, x, part, self.attrs.get(style, 0))
+                except (self.curses.error, UnicodeEncodeError):
+                    pass   # a cell the terminal cannot take stays blank, never a crash
+                x += vr.cells(part)
         self.screen.refresh()
 
 

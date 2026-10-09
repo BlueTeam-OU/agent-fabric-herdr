@@ -6,4 +6,6 @@
 here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 py="${AGENT_FABRIC_PYTHON:-/usr/local/bin/fabric-python}"
 [[ -x "$py" ]] || py="$(command -v python3)" || { echo "fabric-view: no Python to run on" >&2; exit 127; }
-exec "$py" -c 'import sys; sys.path.insert(0, sys.argv[1]); from fabric_view import main; raise SystemExit(main(sys.argv[2:]))' "$here" "$@"
+# -B: importing fleet.py must not write __pycache__ into agent-fabric's
+# checkout, which is not this view's to write.
+exec "$py" -B -c 'import sys; sys.path.insert(0, sys.argv[1]); from fabric_view import main; raise SystemExit(main(sys.argv[2:]))' "$here" "$@"

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime
 import textwrap
+import unicodedata
 from dataclasses import dataclass, field
 
 Seg = tuple[str, str]
@@ -129,15 +130,49 @@ def sparkline(values: list[float], width: int, ascii_only: bool = False) -> str:
     return "".join(glyphs[round((v - lo) / (hi - lo) * top)] for v in vals)
 
 
+# What stands for a character that would move the cursor if drawn.
+CONTROL = "\ufffd"
+
+
+def clean(text: str) -> str:
+    """Text as it may be drawn. A job title, a branch or a why comes from
+    another account, and a control character in it (\\r, \\b, \\n, a C1
+    code) moves the terminal's cursor: \\r alone repaints the row's agent
+    and state from a title. Each is shown as one visible placeholder."""
+    return "".join(CONTROL if unicodedata.category(c)[0] == "C" else c for c in text)
+
+
+def char_cells(c: str) -> int:
+    if unicodedata.combining(c) or unicodedata.category(c) in ("Mn", "Me", "Cf"):
+        return 0
+    return 2 if unicodedata.east_asian_width(c) in ("W", "F") else 1
+
+
+def cells(text: str) -> int:
+    """Terminal cells, not characters: a CJK title is twice its length."""
+    return sum(char_cells(c) for c in text)
+
+
+def take(text: str, width: int) -> str:
+    """The longest prefix of `text` that fits `width` cells."""
+    out, used = [], 0
+    for c in text:
+        w = char_cells(c)
+        if used + w > width:
+            break
+        out.append(c)
+        used += w
+    return "".join(out)
+
+
 def fit(text: str, width: int) -> str:
-    """Cut to `width` cells, marking the cut. Every glyph used here is one
-    cell wide; a login, a job title or a why from another account may not
-    be, and is cut the same way, at worst a cell short."""
+    """Clean, then cut to `width` cells, marking the cut."""
+    text = clean(text)
     if width <= 0:
         return ""
-    if len(text) <= width:
+    if cells(text) <= width:
         return text
-    return text[: width - 1] + "…" if width > 1 else text[:1]
+    return take(text, width - 1) + "…" if width > 1 else take(text, 1)
 
 
 def line_text(line: Line) -> str:
@@ -294,7 +329,7 @@ def board_cells(a: Agent) -> dict[str, tuple[str, str]]:
 def board_columns(agents: list[Agent], width: int) -> list[tuple[Column, int]]:
     """The columns that fit `width`, each with its width: drop the least
     needed first, then give the flex column what is left."""
-    login_w = max([BOARD_COLUMNS[0].width] + [len(a.login) for a in agents])
+    login_w = max([BOARD_COLUMNS[0].width] + [cells(clean(a.login)) for a in agents])
     cols = [c for c in BOARD_COLUMNS]
 
     def need(cs: list[Column]) -> int:
@@ -311,7 +346,8 @@ def board_columns(agents: list[Agent], width: int) -> list[tuple[Column, int]]:
 
 def pad(text: str, width: int, right: bool) -> str:
     text = fit(text, width)
-    return text.rjust(width) if right else text.ljust(width)
+    room = " " * (width - cells(text))
+    return room + text if right else text + room
 
 
 def board_row(a: Agent, cols: list[tuple[Column, int]], selected: bool) -> Line:
@@ -361,21 +397,36 @@ def host_line(host: str, record: dict | None) -> Line:
     return [(" ".join(parts), NORMAL)]
 
 
+def problem(name: str, record: dict | None) -> str | None:
+    """Why a section's cell reads `?`: its failure, or an answer that says
+    itself it is not one (pr-gate could not ask GitHub)."""
+    if failed(record):
+        return record.get("why") or "no answer"
+    data = ok_data(record)
+    if record is not None and data is None:
+        return "the answer had no data"
+    if name == "prs" and data is not None and data.get("prs_ok") is False:
+        return "pr-gate could not list pull requests (GitHub did not answer); PRs unknown"
+    return None
+
+
 def failure_lines(agents: list[Agent], sections: tuple[str, ...], width: int, limit: int) -> list[Line]:
-    """One line per section that failed for some agents: how many, and the
-    first why. A why is often the same for all (a source down), so each is
-    said once, not per agent."""
-    out: list[Line] = []
+    """One line per section that reads `?` for some agents: how many, and
+    the first why. A why is often the same for all (a source down), so each
+    is said once, not per agent. Past `limit`, the rest are named, and their
+    whys are in each agent's view."""
+    out: list[tuple[str, Line]] = []
     for name in sections:
-        bad = [a for a in agents if failed(a.sections.get(name))]
-        if not bad:
+        whys = [w for a in agents if (w := problem(name, a.sections.get(name))) is not None]
+        if not whys:
             continue
-        why = bad[0].sections[name].get("why") or "no answer"
-        who = "all agents" if len(bad) == len(agents) else f"{len(bad)} agent{'s' if len(bad) > 1 else ''}"
-        out.append([(fit(f"? {name} not read for {who}: {why}", width), FAILED)])
+        who = "all agents" if len(whys) == len(agents) else f"{len(whys)} agent{'s' if len(whys) > 1 else ''}"
+        out.append((name, [(fit(f"? {name} not read for {who}: {whys[0]}", width), FAILED)]))
     if len(out) > limit:
-        out = out[: limit - 1] + [[(f"? and {len(out) - limit + 1} more sections not read", FAILED)]]
-    return out
+        rest = [name for name, _ in out[limit - 1:]]
+        tail = f"? also not read: {', '.join(rest)}; why in each agent's view (Enter)"
+        return [line for _, line in out[: limit - 1]] + [[(fit(tail, width), FAILED)]]
+    return [line for _, line in out]
 
 
 @dataclass
@@ -428,13 +479,16 @@ def board_lines(agents: list[Agent], hosts: dict[str, dict | None], st: Status,
 
 
 def clip(line: Line, width: int) -> Line:
+    """A line cleaned and cut to `width` cells: every line drawn passes
+    here or through `fit`, so no drawn text moves the cursor or wraps."""
     out: Line = []
     left = width
     for text, style in line:
         if left <= 0:
             break
-        out.append((text[:left], style))
-        left -= len(text[:left])
+        part = take(clean(text), left)
+        out.append((part, style))
+        left -= cells(part)
     return out
 
 
@@ -473,7 +527,7 @@ def not_read(record: dict | None, width: int) -> list[Line]:
     """Why a section is missing, whole: its point is often at the end (who
     refused, and why), so it is wrapped, never cut."""
     if failed(record):
-        text = f"not read: {record.get('why') or 'no answer'}"
+        text = clean(f"not read: {record.get('why') or 'no answer'}")
         return [[("  " + part, FAILED)] for part in textwrap.wrap(text, max(10, width - 4), subsequent_indent="  ")]
     if record is not None and ok_data(record) is None:
         return [[("  not read: the answer had no data", FAILED)]]
@@ -482,7 +536,7 @@ def not_read(record: dict | None, width: int) -> list[Line]:
 
 def job_line(j: dict, now: datetime.datetime, width: int) -> Line:
     head = f"  {str(j.get('id', '?')):<5} {str(j.get('state') or '?'):<9} {clock(j.get('updated'), now):>6}  "
-    return [(head, NORMAL), (fit(str(j.get("title") or ""), max(0, width - len(head))), NORMAL)]
+    return [(head, NORMAL), (fit(str(j.get("title") or ""), max(0, width - cells(clean(head)))), NORMAL)]
 
 
 def agent_body(a: Agent, samples: Samples, now: datetime.datetime, width: int, ascii_only: bool = False) -> list[Line]:

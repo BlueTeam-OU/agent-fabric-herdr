@@ -91,5 +91,18 @@ class Sources(unittest.TestCase):
         self.assertEqual(fv.host_records(agents), {"h1": new, "h2": None})
 
 
+class Records(unittest.TestCase):
+    def test_a_failed_fetch_of_the_whole_section_wins_over_an_older_record(self):
+        from types import SimpleNamespace
+        store = fv.Store()
+        old = {"status": "ok", "src": "op:jobs", "at": "2026-10-09T10:00:00Z", "data": {"jobs": {"jobs": []}}}
+        store.put("jobs", {"alice": old})
+        placements = {"alice": SimpleNamespace(host="h", kind="agent")}
+        shown = fv.agents_of(placements, store, ("jobs",), {"jobs": "FleetError: alice is not a placed account"})
+        self.assertEqual(shown[0].sections["jobs"]["status"], "failed")
+        self.assertIn("not a placed account", shown[0].sections["jobs"]["why"])
+        self.assertIs(fv.agents_of(placements, store, ("jobs",), {})[0].sections["jobs"], old)
+
+
 if __name__ == "__main__":
     unittest.main()
