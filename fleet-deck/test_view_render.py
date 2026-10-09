@@ -188,7 +188,7 @@ class Stale(unittest.TestCase):
 
     def test_a_stale_value_is_marked_in_words_on_the_board_and_the_footer_says_whose_since_when_and_why(self):
         a = vr.Agent("arch", "h", "agent", {"proc": self.stale(PROC)})
-        self.assertEqual(vr.board_cells(a)["rss"], (vr.size_kb(531684) + vr.STALE, vr.WARN))
+        self.assertEqual(vr.board_cells(a)["rss"], (vr.size_kb(531684), vr.WARN))
         lines = vr.board_lines([a, vr.Agent("b", "h", "agent", {"proc": PROC})], {"h": None}, status(), 0, 140, 20)
         rows = texts(lines)
         self.assertIn(vr.size_kb(531684) + vr.STALE, next(r for r in rows if r.startswith("> arch")))  # selected
@@ -196,7 +196,20 @@ class Stale(unittest.TestCase):
 
     def test_stale_jobs_mark_the_closed_open_cell(self):
         a = vr.Agent("arch", "h", "agent", {"jobs": self.stale(JOBS), "closed_jobs": CLOSED})
-        self.assertEqual(vr.board_cells(a)["jobs"], ("23/3" + vr.STALE, vr.WARN))
+        self.assertEqual(vr.board_cells(a)["jobs"], ("23/3", vr.WARN))
+        row = texts([vr.board_row(a, vr.board_columns([a], 140), False)])[0]
+        self.assertIn("23/3~", row)
+
+    def test_a_stale_value_cut_to_its_column_keeps_its_mark(self):
+        a = vr.Agent("arch", "h", "agent", {"states": self.stale(STATES), "jobs": self.stale(JOBS),
+                                            "prs": self.stale(PRS)})
+        cols = vr.board_columns([a], 80)
+        segments = vr.board_row(a, cols, True)[1:]       # one per column, after the marker
+        for (c, w), (text, _) in zip(cols, segments):
+            cell = text[1:] if text.startswith(" ") else text
+            self.assertEqual(vr.cells(cell), w, c.key)
+            if c.key in ("state", "job", "pr"):
+                self.assertTrue(cell.endswith(vr.STALE), (c.key, cell))
 
     def test_past_the_footers_room_stales_and_failures_are_named_apart_once_each(self):
         down = bad("op:x", "down")

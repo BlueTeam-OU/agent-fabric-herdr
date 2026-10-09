@@ -199,10 +199,10 @@ def cell(record: dict | None, value) -> tuple[str, str]:
         return NOT_READ, FAILED
     if ok_data(record) is None:
         return NOT_READ, FAILED
-    # A stale value is drawn, marked; the footer says since when and why.
-    if stale(record):
-        return value(ok_data(record)) + STALE, WARN
-    return value(ok_data(record)), NORMAL
+    # A stale value is drawn in WARN, which on the board means stale and
+    # nothing else: board_row adds the `~` after fitting the value, so a
+    # value cut to its column keeps its mark.
+    return value(ok_data(record)), WARN if stale(record) else NORMAL
 
 
 def state_word(data: dict) -> str:
@@ -324,8 +324,8 @@ def board_cells(a: Agent) -> dict[str, tuple[str, str]]:
         closed_n = (ok_data(closed) or {}).get("closed_total") if ok_data(closed) is not None else None
         left = str(closed_n) if closed_n is not None else (UNREAD if closed is None else NOT_READ)
         right = str(open_n) if open_n is not None else (UNREAD if jobs is None else NOT_READ)
-        old = STALE if stale(jobs) or stale(closed) else ""
-        jobs_cell = (f"{left}/{right}{old}", FAILED if NOT_READ in (left, right) else WARN if old else NORMAL)
+        old = stale(jobs) or stale(closed)
+        jobs_cell = (f"{left}/{right}", FAILED if NOT_READ in (left, right) else WARN if old else NORMAL)
     return {
         "login": (a.login, BOLD),
         "state": cell(s.get("states"), state_word),
@@ -368,8 +368,11 @@ def board_row(a: Agent, cols: list[tuple[Column, int]], selected: bool) -> Line:
     line: Line = [("> " if selected else "  ", SELECTED if selected else NORMAL)]
     for i, (c, w) in enumerate(cols):
         text, style = cells[c.key]
+        # A stale value keeps its `~` whatever the cut: it is the mark that
+        # survives the selected row's reverse video and NO_COLOR.
+        shown = pad(text, w - 1, c.right) + STALE if style == WARN and w > 1 else pad(text, w, c.right)
         # The whole selected row is reversed; a failed cell keeps its `?`.
-        line.append((("" if i == 0 else " ") + pad(text, w, c.right), SELECTED if selected else style))
+        line.append((("" if i == 0 else " ") + shown, SELECTED if selected else style))
     return line
 
 
