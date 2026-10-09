@@ -1,9 +1,11 @@
 """fabric-view: Fleet Deck's views of the fleet, in herdr plugin panes.
 
-    fabric-view board                 every placed agent, one row each
+    fabric-view board                 the fleet tab: every placed agent, one
+                                      row each; c compare, p plan, P PRs
     fabric-view agent [--agent L]     one agent; the login defaults to the
                                       herdr tab the pane was opened from
-    fabric-view open board|agent      for a plugin action: open that pane
+    fabric-view prs                   in-flight pull requests by owner
+    fabric-view open board|agent|prs  for a plugin action: open that pane
 
 The data is agent-fabric's tools/fabric/fleet.py, imported from the
 agent-fabric checkout, never copied (agent-fabric ADR-046). A view reads on
@@ -35,6 +37,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+import report_render as rr
 import view_render as vr
 
 FOCUS_ON = "\x1b[?1004h"
@@ -86,11 +89,13 @@ def context_login(env: dict[str, str]) -> str | None:
 FOCUS_IN = "focus-in"
 FOCUS_OUT = "focus-out"
 UP, DOWN, PAGE_UP, PAGE_DOWN, HOME, END = "up", "down", "page-up", "page-down", "home", "end"
+LEFT, RIGHT = "left", "right"
 ENTER, ESCAPE, BACK = "enter", "escape", "back"
 
 SEQUENCES = {
     b"\x1b[I": FOCUS_IN, b"\x1b[O": FOCUS_OUT,
     b"\x1b[A": UP, b"\x1bOA": UP, b"\x1b[B": DOWN, b"\x1bOB": DOWN,
+    b"\x1b[C": RIGHT, b"\x1bOC": RIGHT, b"\x1b[D": LEFT, b"\x1bOD": LEFT,
     b"\x1b[5~": PAGE_UP, b"\x1b[6~": PAGE_DOWN,
     b"\x1b[H": HOME, b"\x1bOH": HOME, b"\x1b[1~": HOME,
     b"\x1b[F": END, b"\x1bOF": END, b"\x1b[4~": END,
@@ -171,6 +176,18 @@ class Result:
     records: dict[str, dict]      # login -> record
     why: str | None = None         # the whole fetch failed (fleet refused)
     asker: object = None           # the view whose fetch this was
+    # Other records the same answer carried: {section: {key: record}}.
+    extra: dict[str, dict[str, dict]] = field(default_factory=dict)
+
+
+# The store's key for a record of the whole fleet rather than of one agent.
+FLEET = ""
+# Sections fleet.py answers once for the fleet, at the document's top level:
+# a plan's steps belong to many agents, and to some not placed here.
+FLEET_WIDE = frozenset({"plans"})
+# The pull requests whose owner is no placed agent: one record, which fleet.py
+# sends with any answer for `prs`.
+UNPLACED = "prs_unplaced"
 
 
 class Store:
@@ -212,10 +229,24 @@ class Fetcher:
         days = TOKENS_DAYS if section == "tokens" else None
         try:
             doc = self.fleet.fetch([section], self.agent, 0 if force else None, days=days)
-            records = {a["login"]: a["sections"][section] for a in doc["agents"]}
-            self.results.put(Result(section, records, asker=self.asker))
+            records, why, extra = answer_of(doc, section)
+            self.results.put(Result(section, records, why, self.asker, extra))
         except Exception as e:  # noqa: BLE001 — a refusal is shown as that section's failure, never a crash
             self.results.put(Result(section, {}, f"{type(e).__name__}: {e}", self.asker))
+
+
+def answer_of(doc: dict, section: str) -> tuple[dict[str, dict], str | None, dict[str, dict[str, dict]]]:
+    """(records, why, extra) of fleet.py's document for one section."""
+    if section in FLEET_WIDE:
+        rec = doc.get(section)
+        if not isinstance(rec, dict):
+            return {}, f"fleet.py's answer has no {section}", {}
+        return {FLEET: rec}, None, {}
+    records = {a["login"]: a["sections"][section] for a in doc["agents"]}
+    extra = {}
+    if section == "prs" and isinstance(doc.get(UNPLACED), dict):
+        extra[UNPLACED] = {FLEET: doc[UNPLACED]}
+    return records, None, extra
 
 
 # ── the views ───────────────────────────────────────────────────────
@@ -228,9 +259,12 @@ class View:
         self.sections = sections
         self.agent = agent
         self.store = store
-        self.refresher = Refresher({s: fleet.SECTIONS[s].ttl for s in sections})
+        self.refresher = Refresher({s: fleet.SECTIONS[s].ttl for s in sections if s in fleet.SECTIONS})
         self.fetcher = Fetcher(fleet, agent, results, self)
-        self.whys: dict[str, str] = {}
+        # A section this agent-fabric's fleet.py does not serve yet is said,
+        # never asked for: the view runs against whatever checkout is there.
+        self.whys: dict[str, str] = {s: f"agent-fabric's fleet.py here serves no {s} section yet"
+                                     for s in sections if s not in fleet.SECTIONS}
 
     def tick(self, focused: bool | None) -> None:
         for s in self.refresher.due(time.monotonic(), focused):
@@ -311,6 +345,65 @@ class Painter:
         self.screen.refresh()
 
 
+# The fleet tab's screens, and the PRs popup's one.
+BOARD, COMPARE, PLAN, PRS = "board", "compare", "plan", "prs"
+SCREEN_SECTIONS = {BOARD: vr.BOARD_SECTIONS, COMPARE: rr.COMPARE_SECTIONS, PLAN: ("plans",), PRS: ("prs",)}
+SCREEN_KEYS = {"b": BOARD, "c": COMPARE, "p": PLAN, "P": PRS}
+QUIT, OPEN_AGENT, REFETCH = "quit", "open-agent", "refetch"
+
+
+@dataclass
+class Nav:
+    """Where a person is in a fleet pane, moved by keys. Pure: the loop
+    draws what it says and does what `key` returns. `back` is the screen Esc
+    returns to from the PRs screen; None where PRs is the pane itself (the
+    popup), so Esc closes it as any overlay."""
+    screen: str
+    metric: int = 0
+    selected: int = 0
+    scroll: int = 0
+    back: str | None = None
+
+    def go(self, screen: str) -> None:
+        if screen == self.screen:
+            return
+        self.back = self.screen if screen == PRS else None
+        self.screen, self.scroll = screen, 0
+
+    def key(self, ev: str, rows: int, page: int) -> str | None:
+        if ev in ("q", "Q"):
+            return QUIT
+        if ev == "r":
+            return REFETCH
+        if self.screen == PRS and ev in (ESCAPE, BACK):
+            if self.back is None:
+                return QUIT
+            self.screen, self.scroll, self.back = self.back, 0, None
+            return None
+        # The popup is PRs alone; in the fleet tab every screen is a key away.
+        if ev in SCREEN_KEYS and (self.screen != PRS or self.back is not None):
+            self.go(SCREEN_KEYS[ev])
+            return None
+        if self.screen == BOARD:
+            if ev == ENTER and rows:
+                return OPEN_AGENT
+            self.selected = max(0, min(move(self.selected, ev, page, rows - 1), max(0, rows - 1)))
+            return None
+        if self.screen == COMPARE:
+            n = len(rr.METRICS)
+            if ev in (RIGHT, "l", "\t"):
+                self.metric = (self.metric + 1) % n
+            elif ev in (LEFT, "h"):
+                self.metric = (self.metric - 1) % n
+            elif len(ev) == 1 and ev.isdigit() and 1 <= int(ev) <= n:
+                self.metric = int(ev) - 1
+            else:
+                self.scroll = move(self.scroll, ev, page, 1 << 16)
+            return None
+        self.scroll = move(self.scroll, ev, page, 1 << 16)
+        return None
+
+
 def run(curses, screen, fleet, mode: str, login: str | None) -> int:
     curses.curs_set(0)
     curses.raw()
@@ -331,17 +424,25 @@ def run(curses, screen, fleet, mode: str, login: str | None) -> int:
                             "Open this view from an agent's tab, whose label is its login.")
 
     store = Store()
-    sections = vr.BOARD_SECTIONS if mode == "board" else vr.AGENT_SECTIONS
-    for s in set(vr.BOARD_SECTIONS) | set(vr.AGENT_SECTIONS):
+    for s in set(vr.BOARD_SECTIONS) | set(vr.AGENT_SECTIONS) | set(rr.COMPARE_SECTIONS):
         try:
             store.put(s, cached_records(fleet, s, env))
         except Exception:  # noqa: BLE001 — a cache that cannot be read is an empty one
             pass
     results: "queue.Queue[Result]" = queue.Queue()
-    board = View(fleet, vr.BOARD_SECTIONS, None, store, results) if mode == "board" else None
+    # One View per screen, made when first shown: a screen never looked at
+    # never fetches.
+    views: dict[str, View] = {}
+
+    def view_of(name: str) -> View:
+        if name not in views:
+            views[name] = View(fleet, SCREEN_SECTIONS[name], None, store, results)
+        return views[name]
+
+    nav = Nav(PRS if mode == "prs" else BOARD)
     agent_view = View(fleet, vr.AGENT_SECTIONS, login, store, results) if mode == "agent" else None
     samples = vr.Samples()
-    selected = scroll = 0
+    scroll = 0
     # Unknown until herdr reports a change or a key arrives, unless `open`
     # says the pane was opened focused. herdr reports focus changes only,
     # and a pane opened in the background never had focus to lose:
@@ -350,7 +451,7 @@ def run(curses, screen, fleet, mode: str, login: str | None) -> int:
     pending = b""
     size = None
     while True:
-        current = agent_view or board
+        current = agent_view or view_of(nav.screen)
         current.tick(focused)
         while True:
             try:
@@ -358,8 +459,10 @@ def run(curses, screen, fleet, mode: str, login: str | None) -> int:
             except queue.Empty:
                 break
             store.put(r.section, r.records)
+            for section, records in r.extra.items():
+                store.put(section, records)
             store.fetched = store.fetched or not r.why
-            for v in (board, agent_view):
+            for v in [*views.values(), agent_view]:
                 if v is not None and v.owns(r):
                     v.take(r)
             if agent_view and r.section == "proc":
@@ -375,9 +478,7 @@ def run(curses, screen, fleet, mode: str, login: str | None) -> int:
             lines, scroll = vr.agent_lines(a, samples, status(agent_view, [a], focused, store), scroll,
                                            width, height, keys, ascii_only)
         else:
-            agents = agents_of(placements, store, board.sections, board.whys)
-            hosts = host_records(agents)
-            lines = vr.board_lines(agents, hosts, status(board, agents, focused, store), selected, width, height)
+            lines = screen_lines(nav, current, placements, store, focused, width, height, ascii_only)
         painter.paint(lines)
 
         ready, _, _ = select.select([sys.stdin], [], [], TICK_S)
@@ -394,25 +495,62 @@ def run(curses, screen, fleet, mode: str, login: str | None) -> int:
                 focused = ev == FOCUS_IN
                 continue
             focused = True    # a key reached this pane, so it has focus
-            if ev == "r":
-                current.refetch()
-            elif ev in ("q", "Q"):
-                return 0
-            elif agent_view is not None:
-                if ev in (ESCAPE, BACK, "h") and board is not None:
-                    agent_view, samples, scroll = None, vr.Samples(), 0
-                elif ev in (ESCAPE,) and board is None:
+            if agent_view is not None:
+                if ev == "r":
+                    agent_view.refetch()
+                elif ev in ("q", "Q") or (ev == ESCAPE and mode == "agent"):
                     return 0
+                elif ev in (ESCAPE, BACK, "h") and mode != "agent":
+                    agent_view, samples, scroll = None, vr.Samples(), 0
                 else:
                     scroll = move(scroll, ev, page, 1 << 16)
-            else:
-                if ev == ENTER and placements:
-                    target = list(placements)[max(0, min(selected, len(placements) - 1))]
-                    agent_view = View(fleet, vr.AGENT_SECTIONS, target, store, results)
-                    samples, scroll = vr.Samples(), 0
-                    samples.add(store.get("proc", target))
-                else:
-                    selected = max(0, min(move(selected, ev, page, len(placements) - 1), len(placements) - 1))
+                continue
+            action = nav.key(ev, len(placements), page)
+            if action == QUIT:
+                return 0
+            if action == REFETCH:
+                view_of(nav.screen).refetch()
+            elif action == OPEN_AGENT:
+                target = list(placements)[max(0, min(nav.selected, len(placements) - 1))]
+                agent_view = View(fleet, vr.AGENT_SECTIONS, target, store, results)
+                samples, scroll = vr.Samples(), 0
+                samples.add(store.get("proc", target))
+
+
+def screen_lines(nav: Nav, view: View, placements, store: Store, focused: bool | None,
+                 width: int, height: int, ascii_only: bool) -> list[vr.Line]:
+    """The fleet pane's current screen. Each screen reads its own view's
+    sections, so its status line says how old what it shows is."""
+    agents = agents_of(placements, store, view.sections, view.whys)
+    if nav.screen == BOARD:
+        return vr.board_lines(agents, host_records(agents), status(view, agents, focused, store),
+                              nav.selected, width, height)
+    if nav.screen == COMPARE:
+        lines, nav.scroll = rr.compare_lines(agents, nav.metric, status(view, agents, focused, store),
+                                             nav.scroll, width, height, ascii_only)
+        return lines
+    if nav.screen == PLAN:
+        rec = fleet_record(store, "plans", view.whys)
+        st = fleet_status(view, [rec], focused, store)
+        lines, nav.scroll = rr.plan_lines(rec, st, nav.scroll, width, height, ascii_only)
+        return lines
+    keys = rr.PRS_KEYS if nav.back is None else rr.PRS_IN_TAB_KEYS
+    unplaced = store.get(UNPLACED, FLEET)
+    lines, nav.scroll = rr.prs_lines(agents, unplaced, status(view, agents, focused, store),
+                                     nav.scroll, width, height, keys)
+    return lines
+
+
+def fleet_record(store: Store, section: str, whys: dict[str, str]) -> dict | None:
+    if section in whys:
+        return {"status": "failed", "src": "fleet", "at": None, "why": whys[section]}
+    return store.get(section, FLEET)
+
+
+def fleet_status(view: View, records: list, focused: bool | None, store: Store) -> vr.Status:
+    return vr.Status(focused=focused, fetching=tuple(s for s in view.sections if s in view.refresher.running),
+                     now=datetime.datetime.now(datetime.timezone.utc), oldest=vr.oldest_at(records),
+                     from_cache=not store.fetched)
 
 
 def host_records(agents: list[vr.Agent]) -> dict[str, dict | None]:
@@ -459,7 +597,7 @@ def show_message(curses, screen, painter: Painter, title: str, text: str) -> int
 
 # ── the commands ────────────────────────────────────────────────────
 
-USAGE = "usage: fabric-view board | agent [--agent LOGIN] | open board|agent"
+USAGE = "usage: fabric-view board | agent [--agent LOGIN] | prs | open board|agent|prs"
 
 
 def open_pane(entrypoint: str, env: dict[str, str]) -> int:
@@ -473,9 +611,21 @@ def open_pane(entrypoint: str, env: dict[str, str]) -> int:
     # --focus: the person pressed a key to see this view. herdr focuses the
     # pane before the view turns focus reporting on, so no focus-in reaches
     # it; the view is told instead.
-    os.execv(herdr, [herdr, "plugin", "pane", "open", "--plugin", plugin, "--entrypoint", entrypoint,
-                     "--focus", "--env", f"{OPENED_FOCUSED}=1"])
+    os.execv(herdr, open_argv(herdr, plugin, entrypoint))
     return 0   # not reached
+
+
+# A popup's size: rows of PRs read best wide, and the tab stays visible
+# around it, so the person knows where Esc returns them.
+POPUP_SIZE = {"prs": ("80%", "80%")}
+
+
+def open_argv(herdr: str, plugin: str, entrypoint: str) -> list[str]:
+    argv = [herdr, "plugin", "pane", "open", "--plugin", plugin, "--entrypoint", entrypoint]
+    if entrypoint in POPUP_SIZE:
+        w, h = POPUP_SIZE[entrypoint]
+        argv += ["--width", w, "--height", h]
+    return argv + ["--focus", "--env", f"{OPENED_FOCUSED}=1"]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -485,11 +635,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if args else 2
     mode, rest = args[0], args[1:]
     if mode == "open":
-        if rest not in (["board"], ["agent"]):
+        if rest not in (["board"], ["agent"], ["prs"]):
             print(USAGE, file=sys.stderr)
             return 2
         return open_pane(rest[0], dict(os.environ))
-    if mode not in ("board", "agent"):
+    if mode not in ("board", "agent", "prs"):
         print(USAGE, file=sys.stderr)
         return 2
     login = None

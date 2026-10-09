@@ -4,7 +4,7 @@ id = "fabric.fleet"
 name = "Fleet views"
 version = "0.1.0"
 min_herdr_version = "0.9.3"
-description = "The fleet board and an agent's overlay, from agent-fabric's fleet.py"
+description = "The fleet tab (board, compare, plans), an agent's overlay and the PRs popup, from agent-fabric's fleet.py"
 platforms = ["linux"]
 
 [[actions]]
@@ -19,6 +19,12 @@ title = "This agent"
 contexts = ["tab", "pane"]
 command = ["./fabric-view", "open", "agent"]
 
+[[actions]]
+id = "prs"
+title = "Pull requests in flight"
+contexts = ["global"]
+command = ["./fabric-view", "open", "prs"]
+
 [[panes]]
 id = "board"
 title = "fleet"
@@ -30,3 +36,9 @@ id = "agent"
 title = "agent"
 placement = "overlay"
 command = ["./fabric-view", "agent"]
+
+[[panes]]
+id = "prs"
+title = "pull requests"
+placement = "popup"
+command = ["./fabric-view", "prs"]
