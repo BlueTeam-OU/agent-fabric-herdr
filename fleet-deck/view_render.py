@@ -37,7 +37,7 @@ NONE = "-"
 SPARK = "▁▂▃▄▅▆▇█"
 SPARK_ASCII = "_.-=+*#@"
 
-BOARD_KEYS = "↑↓ select  Enter agent  r refetch  q close"
+BOARD_KEYS = "↑↓ select  Enter agent  c compare  p plan  P PRs  r refetch  q close"
 AGENT_KEYS = "↑↓ scroll  r refetch  Esc back  q close"
 OVERLAY_KEYS = "↑↓ scroll  r refetch  q close"
 
@@ -45,9 +45,15 @@ OVERLAY_KEYS = "↑↓ scroll  r refetch  q close"
 # ── values ──────────────────────────────────────────────────────────
 
 def ok_data(record: dict | None) -> dict | None:
-    if isinstance(record, dict) and record.get("status") == "ok" and isinstance(record.get("data"), dict):
+    """The record's value: an answer, or the last good one fleet.py keeps
+    while a fresh read fails within the section's stale window."""
+    if isinstance(record, dict) and record.get("status") in ("ok", "stale") and isinstance(record.get("data"), dict):
         return record["data"]
     return None
+
+
+def stale(record: dict | None) -> bool:
+    return isinstance(record, dict) and record.get("status") == "stale" and ok_data(record) is not None
 
 
 def failed(record: dict | None) -> bool:
@@ -189,7 +195,8 @@ def cell(record: dict | None, value) -> tuple[str, str]:
         return NOT_READ, FAILED
     if ok_data(record) is None:
         return NOT_READ, FAILED
-    return value(ok_data(record)), NORMAL
+    # A stale value is drawn, in the warning style; the footer says why.
+    return value(ok_data(record)), WARN if stale(record) else NORMAL
 
 
 def state_word(data: dict) -> str:
@@ -409,7 +416,8 @@ def problem(name: str, record: dict | None) -> str | None:
     return None
 
 
-def failure_lines(agents: list[Agent], sections: tuple[str, ...], width: int, limit: int) -> list[Line]:
+def failure_lines(agents: list[Agent], sections: tuple[str, ...], width: int, limit: int,
+                  now: datetime.datetime | None = None) -> list[Line]:
     """One line per section that reads `?` for some agents: how many, and
     the first why. A why is often the same for all (a source down), so each
     is said once, not per agent. Past `limit`, the rest are named, and their
@@ -421,6 +429,13 @@ def failure_lines(agents: list[Agent], sections: tuple[str, ...], width: int, li
             continue
         who = "all agents" if len(whys) == len(agents) else f"{len(whys)} agent{'s' if len(whys) > 1 else ''}"
         out.append((name, [(fit(f"? {name} not read for {who}: {whys[0]}", width), FAILED)]))
+    for name in sections:
+        olds = [a.sections[name] for a in agents if stale(a.sections.get(name))]
+        if olds:
+            who = "all agents" if len(olds) == len(agents) else f"{len(olds)} agent{'s' if len(olds) > 1 else ''}"
+            when = f", read {age(olds[0].get('at'), now)}" if now is not None else ""
+            out.append((name, [(fit(f"! {name} stale for {who}{when}: "
+                                    f"{olds[0].get('why') or 'the last read failed'}", width), WARN)]))
     if len(out) > limit:
         rest = [name for name, _ in out[limit - 1:]]
         # Only a section the agent view shows has its why there; the host's
@@ -468,7 +483,7 @@ def board_lines(agents: list[Agent], hosts: dict[str, dict | None], st: Status,
     cols = board_columns(agents, width)
     top = [status_line(f"Fleet · {len(agents)} agents", st, width), board_header(cols)]
     footer = [host_line(h, r) for h, r in sorted(hosts.items())]
-    footer += failure_lines(agents, BOARD_SECTIONS, width, limit=3)
+    footer += failure_lines(agents, BOARD_SECTIONS, width, limit=3, now=st.now)
     footer.append([(fit(BOARD_KEYS, width), DIM)])
     room = max(1, height - len(top) - len(footer))
     first = 0

@@ -178,6 +178,20 @@ class Board(unittest.TestCase):
         self.assertTrue(all(t == vr.UNREAD for k, (t, _) in vr.board_cells(bare).items() if k not in ("login", "jobs")))
 
 
+class Stale(unittest.TestCase):
+    def test_a_stale_value_is_drawn_in_the_warning_style_and_the_footer_says_since_when_and_why(self):
+        rec = dict(PROC, status="stale", at="2026-10-09T11:00:00Z", age_s=900, why="proc-local: timeout")
+        a = vr.Agent("arch", "h", "agent", {"proc": rec})
+        self.assertEqual(vr.board_cells(a)["rss"], (vr.size_kb(531684), vr.WARN))
+        lines = vr.board_lines([a], {"h": None}, status(), 0, 120, 20)
+        footer = [vr.line_text(l) for l in lines if vr.line_text(l).startswith("! proc")]
+        self.assertEqual(footer, ["! proc stale for all agents, read 5 min ago: proc-local: timeout"])
+
+    def test_stale_without_data_is_not_a_value(self):
+        self.assertIsNone(vr.ok_data({"status": "stale", "why": "x"}))
+        self.assertFalse(vr.stale({"status": "stale", "why": "x"}))
+
+
 class AgentView(unittest.TestCase):
     def body(self, agent, samples=None, width=100):
         return texts(vr.agent_body(agent, samples or vr.Samples(), NOW, width))
