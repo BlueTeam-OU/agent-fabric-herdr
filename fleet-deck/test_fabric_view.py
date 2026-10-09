@@ -167,6 +167,17 @@ class FleetWide(unittest.TestCase):
         doc = {"agents": [{"login": "a", "sections": {"prs": rec}}], "prs_unplaced": unplaced}
         self.assertEqual(fv.answer_of(doc, "prs"), ({"a": rec}, None, {fv.UNPLACED: {fv.FLEET: unplaced}}))
 
+    def test_a_fleet_py_without_prs_unplaced_is_said_not_shown_as_none(self):
+        import report_render as rr
+        import view_render as vr
+        rec = {"status": "ok", "src": "pr-gate", "at": "t", "data": {"prs": []}}
+        _, _, extra = fv.answer_of({"agents": [{"login": "a", "sections": {"prs": rec}}]}, "prs")
+        unplaced = extra[fv.UNPLACED][fv.FLEET]
+        self.assertEqual(unplaced["status"], "failed")
+        st = vr.Status(focused=True, fetching=(), now=__import__("datetime").datetime.now(), oldest=None, from_cache=False)
+        rows = [vr.line_text(l) for l in rr.prs_lines([vr.Agent("a", "h", "agent", {"prs": rec})], unplaced, st, 0, 120, 10)[0]]
+        self.assertTrue(any("not a placed agent's: not read: agent-fabric's fleet.py here does not list them" in r for r in rows))
+
     def test_a_section_fleet_does_not_serve_is_said_and_never_asked(self):
         from types import SimpleNamespace
         import queue

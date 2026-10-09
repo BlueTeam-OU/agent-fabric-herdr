@@ -244,8 +244,12 @@ def answer_of(doc: dict, section: str) -> tuple[dict[str, dict], str | None, dic
         return {FLEET: rec}, None, {}
     records = {a["login"]: a["sections"][section] for a in doc["agents"]}
     extra = {}
-    if section == "prs" and isinstance(doc.get(UNPLACED), dict):
-        extra[UNPLACED] = {FLEET: doc[UNPLACED]}
+    if section == "prs":
+        # An answer without it comes from a fleet.py that does not list
+        # them: said, so their absence never reads as none in flight.
+        extra[UNPLACED] = {FLEET: doc[UNPLACED] if isinstance(doc.get(UNPLACED), dict) else {
+            "status": "failed", "src": "fleet", "at": doc.get("at"),
+            "why": "agent-fabric's fleet.py here does not list them (no prs_unplaced)"}}
     return records, None, extra
 
 
