@@ -63,6 +63,12 @@ from deck_tabs import (
 # The workspace an account goes to when the catalogue names no group for it,
 # or when its group's workspace no longer exists (the operator removed it).
 NEW_WORKSPACE = "New"
+# The fleet board's own tab: the views' plugin (herdr-plugin.toml), its
+# board entrypoint, under this label. No login is this word: a login with
+# a hyphenated suffix or a digit is what the registry places.
+FLEET_TAB = "fleet"
+FLEET_PLUGIN = "fabric.fleet"
+FLEET_ENTRYPOINT = "board"
 
 # A login is typed into the operator's shell as part of a moveto command, so
 # only a plain Linux login is ever used; anything else is skipped, said.
@@ -450,6 +456,7 @@ class Deck:
     said: set[str] = field(default_factory=set)
     mapped_at: float | None = None
     lost: bool = False
+    fleet_tab: bool = True
 
     # ------------------------------------------------------------ restore
 
@@ -500,7 +507,31 @@ class Deck:
                     self.herdr.call("tab", "close", tab_id)
                 except Exception as error:
                     self.log(f"cannot close the spare tab {tab_id}: {printable(str(error))}")
+        if only is None and self.fleet_tab:
+            self._restore_fleet_tab()
         self.mapped_at = now
+
+    def _restore_fleet_tab(self) -> None:
+        """The fleet board as a tab of its own, labelled `fleet`, in the first
+        workspace, made only when no tab has that label: like an account's
+        pane, one a person closes stays closed until the next restore. The
+        board is opened unfocused, so it reads once and waits for a look."""
+        try:
+            workspaces = self.herdr.workspaces()
+            for workspace in workspaces:
+                listing = self.herdr.call("tab", "list", "--workspace", workspace["workspace_id"])
+                if any(tab.get("label") == FLEET_TAB for tab in listing.get("tabs", [])):
+                    return
+            if not workspaces:
+                return
+            made = self.herdr.call("plugin", "pane", "open", "--plugin", FLEET_PLUGIN,
+                                   "--entrypoint", FLEET_ENTRYPOINT,
+                                   "--workspace", workspaces[0]["workspace_id"], "--no-focus")
+            self.herdr.call("tab", "rename", made["plugin_pane"]["pane"]["tab_id"], FLEET_TAB)
+            self.log(f"opened the {FLEET_TAB} tab")
+        except Exception as error:  # the board is a view: no account's tab waits on it
+            self._say("fleet-tab", f"no {FLEET_TAB} tab: {printable(str(error))} "
+                      f"(is {FLEET_PLUGIN} linked? herdr plugin link <checkout>/fleet-deck)")
 
     def _restore_account(self, account, tab, workspace_labels, first_setup, spare, now) -> None:
         login = account.login
@@ -1157,6 +1188,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--catalog", help="the role catalogue (identities/roles/catalog.json)")
     parser.add_argument("--exclude", action="append", default=[], help="a login to leave out")
     parser.add_argument("--cwd", default=os.path.expanduser("~/projects"))
+    parser.add_argument("--no-fleet-tab", action="store_true",
+                        help="do not open the fleet board as a tab of its own")
     args = parser.parse_args(argv)
 
     def log(line: str) -> None:
@@ -1204,6 +1237,7 @@ def main(argv: list[str] | None = None) -> int:
         save=lambda befores: save_befores(path, befores),
         server=lambda: server_instance(socket_path),
         log=log,
+        fleet_tab=not args.no_fleet_tab,
     )
     return run(deck, Stream(on_line=take, log=log), woken)
 

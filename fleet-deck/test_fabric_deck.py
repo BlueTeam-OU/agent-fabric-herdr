@@ -153,6 +153,7 @@ class FakeHerdr(Herdr):
         self.new_pane = BARE
         self.workspace_lists_ok = None  # after this many, `workspace list` fails
         self.fail_once = set()  # (subcommand, pane) pairs whose next call fails
+        self.plugin_linked = True
 
     def _id(self, kind):
         self.n += 1
@@ -216,6 +217,19 @@ class FakeHerdr(Herdr):
             return {"process_info": self.proc[args[3]]}
         if head[0] == "pane" and head[1] in ("run", "report-agent", "report-metadata", "release-agent"):
             return {}
+        if args[:3] == ("plugin", "pane", "open"):
+            if not self.plugin_linked:
+                raise RuntimeError("herdr plugin pane open: exit 1: plugin_not_found")
+            pane = self._id("p")
+            tab = self.add_tab(None, [(pane, None, BARE)], args[args.index("--workspace") + 1])
+            return {"plugin_pane": {"plugin_id": args[4], "entrypoint": args[6],
+                                    "pane": {"pane_id": pane, "tab_id": tab}}}
+        if head == ("tab", "rename"):
+            for tabs in self.tabs.values():
+                for tab in tabs:
+                    if tab["tab_id"] == args[2]:
+                        tab["label"] = args[3]
+            return {}
         raise AssertionError(f"unexpected herdr call {args}")
 
 
@@ -226,7 +240,7 @@ class Harness:
     """A deck over a FakeHerdr, with the stream's records, a /proc tree and
     the record of what was shown as plain values a test sets."""
 
-    def __init__(self, herdr=None, logins=("ui",), modes=ALL_MODES, befores=None):
+    def __init__(self, herdr=None, logins=("ui",), modes=ALL_MODES, befores=None, fleet_tab=False):
         self.herdr = herdr or FakeHerdr()
         self.records = {}
         self.tree, self.argvs = {}, {}
@@ -253,6 +267,9 @@ class Harness:
             server=lambda: None if self.herdr.down else self.instance,
             log=self.logs.append,
             utc=lambda: self.wall,
+            # The account tabs' tests count herdr calls: the fleet tab is
+            # tested on its own (FleetTab).
+            fleet_tab=fleet_tab,
         )
 
     def at(self, deck_s):
@@ -269,6 +286,46 @@ class Harness:
 
 def harness_of(h, login="ui"):
     return h.deck.harness_pane[login]
+
+
+class FleetTab(unittest.TestCase):
+    def tabs(self, h):
+        return [(w, t["label"]) for w, ts in h.herdr.tabs.items() for t in ts]
+
+    def test_a_restore_opens_the_board_as_a_tab_labelled_fleet_once(self):
+        h = Harness(fleet_tab=True)
+        h.deck.restore(0)
+        opened = [c for c in h.herdr.calls if c[:3] == ("plugin", "pane", "open")]
+        self.assertEqual(len(opened), 1)
+        self.assertIn("--no-focus", opened[0])
+        self.assertEqual(opened[0][opened[0].index("--entrypoint") + 1], "board")
+        self.assertIn(("w1", "fleet"), self.tabs(h))
+        h.deck.restore(10)
+        self.assertEqual(len([c for c in h.herdr.calls if c[:3] == ("plugin", "pane", "open")]), 1)
+
+    def test_a_fleet_tab_anywhere_is_kept_and_none_is_added(self):
+        h = Harness(fleet_tab=True)
+        h.herdr.workspace_list.append({"workspace_id": "w9", "label": "Ops"})
+        h.herdr.tabs["w9"] = []
+        h.herdr.add_tab("fleet", [("p90", None, BARE)], "w9")
+        h.deck.restore(0)
+        self.assertFalse([c for c in h.herdr.calls if c[:3] == ("plugin", "pane", "open")])
+
+    def test_an_account_only_restore_leaves_the_fleet_tab_alone(self):
+        h = Harness(fleet_tab=True)
+        h.deck.restore(0, only={"ui"})
+        self.assertFalse([c for c in h.herdr.calls if c[0] == "plugin"])
+
+    def test_a_plugin_not_linked_is_said_once_and_the_accounts_are_restored(self):
+        h = Harness(fleet_tab=True)
+        h.herdr.plugin_linked = False
+        h.deck.restore(0)
+        h.deck.restore(10)
+        said = [l for l in h.logs if "no fleet tab" in l]
+        self.assertEqual(len(said), 1)
+        self.assertIn("herdr plugin link", said[0])
+        self.assertIn(("w1", "ui"), self.tabs(h))
+        self.assertNotIn(("w1", "fleet"), self.tabs(h))
 
 
 class Restore(unittest.TestCase):
