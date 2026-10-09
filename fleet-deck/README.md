@@ -188,8 +188,8 @@ description = "this agent"
   since fleet.py bounds every source.
 - **Focus starts unknown.** herdr reports focus changes only. So a view
   counts as focused from the first focus-in or key, and until then it
-  stays at its open-time fetch, saying `press a key to go live`. Opening a
-  view from its action gives it focus.
+  stays at its open-time fetch, saying `press a key to go live`. A view
+  opened by its action (the keys above) is opened focused and starts live.
 - **What a cell says.** `…` means not read yet. `?` means its section failed,
   and the board's footer says why, once per section. `-` means there is
   none. The selected row is marked `>`, and every state is a word, never

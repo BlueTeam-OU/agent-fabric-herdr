@@ -42,6 +42,8 @@ FOCUS_OFF = "\x1b[?1004l"
 TICK_S = 0.25
 TOKENS_DAYS = 7
 PLUGIN_ID = "fabric.fleet"
+# Set by `open`: the pane was opened focused, at the person's key.
+OPENED_FOCUSED = "FABRIC_VIEW_OPENED_FOCUSED"
 
 
 # ── where agent-fabric is ───────────────────────────────────────────
@@ -337,10 +339,11 @@ def run(curses, screen, fleet, mode: str, login: str | None) -> int:
     agent_view = View(fleet, vr.AGENT_SECTIONS, login, store, results) if mode == "agent" else None
     samples = vr.Samples()
     selected = scroll = 0
-    # Unknown until herdr reports a change or a key arrives. herdr reports
-    # focus changes only, and a pane opened in the background never had
-    # focus to lose: assuming focus at open would fetch in the background.
-    focused: bool | None = None
+    # Unknown until herdr reports a change or a key arrives, unless `open`
+    # says the pane was opened focused. herdr reports focus changes only,
+    # and a pane opened in the background never had focus to lose:
+    # assuming focus at open would fetch in the background.
+    focused: bool | None = True if env.get(OPENED_FOCUSED) == "1" else None
     pending = b""
     size = None
     while True:
@@ -464,8 +467,11 @@ def open_pane(entrypoint: str, env: dict[str, str]) -> int:
         print("fabric-view: no herdr to ask (HERDR_BIN_PATH is not set)", file=sys.stderr)
         return 2
     plugin = env.get("HERDR_PLUGIN_ID") or PLUGIN_ID
-    # --focus: the person pressed a key to see this view.
-    os.execv(herdr, [herdr, "plugin", "pane", "open", "--plugin", plugin, "--entrypoint", entrypoint, "--focus"])
+    # --focus: the person pressed a key to see this view. herdr focuses the
+    # pane before the view turns focus reporting on, so no focus-in reaches
+    # it; the view is told instead.
+    os.execv(herdr, [herdr, "plugin", "pane", "open", "--plugin", plugin, "--entrypoint", entrypoint,
+                     "--focus", "--env", f"{OPENED_FOCUSED}=1"])
     return 0   # not reached
 
 
