@@ -14,9 +14,9 @@ import datetime
 from dataclasses import dataclass
 from typing import Callable
 
-from view_render import (BOLD, DIM, FAILED, NONE, NORMAL, NOT_READ, UNREAD, WARN, Agent, Line, failed,
+from view_render import (BOLD, DIM, FAILED, NONE, NORMAL, NOT_READ, STALE, UNREAD, WARN, Agent, Line, failed,
                          Status, cells, clean, clip, clock, count, fit, ok_data, open_jobs, pad, parse_utc,
-                         pr_number, size_kb, status_line, stale, tokens_total, wrap_cells)
+                         age, pr_number, size_kb, stale, stale_text, status_line, tokens_total, wrap_cells)
 
 COMPARE_KEYS = "←→ metric  1-6 metric  b board  p plan  P PRs  r refetch  q close"
 PLAN_KEYS = "↑↓ scroll  b board  c compare  P PRs  r refetch  q close"
@@ -83,7 +83,9 @@ def metric_value(a: Agent, m: Metric) -> tuple[float | None, str, str]:
     v = m.value(data)
     if v is None:
         return None, NOT_READ, FAILED
-    return v, m.show(v), WARN if stale(rec) else NORMAL
+    if stale(rec):
+        return v, m.show(v) + STALE, WARN
+    return v, m.show(v), NORMAL
 
 
 def compare_lines(agents: list[Agent], metric: int, st: Status, scroll: int, width: int, height: int,
@@ -117,16 +119,16 @@ def compare_lines(agents: list[Agent], metric: int, st: Status, scroll: int, wid
                      (bar, NORMAL if style != FAILED else FAILED)])
     if not agents:
         body = [[("  no placed agents in the hosts registry", DIM)]]
-    why = section_problem(agents, m.section)
-    if why is None:
-        unknown = [a for a, v, text, _ in rows if v is None and text == NOT_READ]
-        if unknown:
-            # The section answered, but without this metric's number: say
-            # whose and why, rather than a bare `?`.
-            why = f"? {m.title} not in the answer for {len(unknown)} agent(s): {MISSING.get(m.key, 'no value')}"
+    whys = section_problems(agents, m.section, st.now)
+    unknown = [a for a, v, text, _ in rows
+               if v is None and text == NOT_READ and ok_data(a.sections.get(m.section)) is not None]
+    if unknown:
+        # The section answered, but without this metric's number: say
+        # whose and why, rather than a bare `?`.
+        whys.insert(0, f"? {m.title} not in the answer for {len(unknown)} agent(s): {MISSING.get(m.key, 'no value')}")
     # A why is wrapped, never cut: its point is often at its end.
     footer = [[(part, FAILED if why.startswith("?") else WARN)]
-              for part in wrap_cells(clean(why), width, indent="  ")][:3] if why else []
+              for why in whys for part in wrap_cells(clean(why), width, indent="  ")[:3]]
     footer += [[(fit(metric_tabs(metric, width), width), DIM)], [(fit(COMPARE_KEYS, width), DIM)]]
     return framed(top, body, footer, scroll, width, height)
 
@@ -145,16 +147,19 @@ def metric_list(metric: int) -> str:
                      for i, m in enumerate(METRICS))
 
 
-def section_problem(agents: list[Agent], section: str) -> str | None:
+def section_problems(agents: list[Agent], section: str, now: datetime.datetime) -> list[str]:
+    """Why some bars are missing (`?`) and why some are marked stale (`~`),
+    each said once: both can hold at once, for different agents."""
+    out = []
     whys = [r.get("why") or "no answer" for a in agents
             if isinstance(r := a.sections.get(section), dict) and ok_data(r) is None]
-    if not whys:
-        stales = [a for a in agents if stale(a.sections.get(section))]
-        if stales:
-            return f"! {section} stale for {len(stales)} agent(s): {stales[0].sections[section].get('why') or 'the last read failed'}"
-        return None
-    who = "all agents" if len(whys) == len(agents) else f"{len(whys)} agent(s)"
-    return f"? {section} not read for {who}: {whys[0]}"
+    if whys:
+        who = "all agents" if len(whys) == len(agents) else f"{len(whys)} agent(s)"
+        out.append(f"? {section} not read for {who}: {whys[0]}")
+    olds = [a for a in agents if stale(a.sections.get(section))]
+    if olds:
+        out.append(stale_text(section, olds, agents, now))
+    return out
 
 
 def framed(top: list[Line], body: list[Line], footer: list[Line], scroll: int, width: int,
@@ -418,6 +423,12 @@ def bare_line(bare: list[dict], width: int) -> list[Line]:
     return [[(fit(f"    + {n} pushed branch{'es' if n > 1 else ''} without a PR", width), DIM)]]
 
 
+def stale_caveat(rec: dict | None, now: datetime.datetime) -> str:
+    if not stale(rec):
+        return ""
+    return f"  {STALE} stale, read {age(rec.get('at'), now)}: {rec.get('why') or 'the last read failed'}"
+
+
 def pr_caveat(data: dict) -> str:
     if data.get("prs_ok") is False or data.get("fetch_ok") is False:
         return "  (as of the last fetch: GitHub or origin did not answer)"
@@ -445,7 +456,7 @@ def prs_lines(agents: list[Agent], unplaced: dict | None, st: Status, scroll: in
         if not prs and not bare:
             continue
         shown += len(prs)
-        mark = pr_caveat(data)
+        mark = stale_caveat(rec, st.now) or pr_caveat(data)
         body.append([(a.login, BOLD), (f" · {pr_count(len(prs))}{mark}", WARN if mark else DIM)])
         for p in prs:
             body += pr_entry(p, width)
@@ -455,7 +466,7 @@ def prs_lines(agents: list[Agent], unplaced: dict | None, st: Status, scroll: in
         body.append([(fit(f"  not a placed agent's: not read: {unplaced.get('why') or 'no answer'}", width), FAILED)])
     elif others or others_bare:
         shown += len(others)
-        mark = pr_caveat(ok_data(unplaced) or {})
+        mark = stale_caveat(unplaced, st.now) or pr_caveat(ok_data(unplaced) or {})
         body.append([("not a placed agent's", BOLD), (f" · {pr_count(len(others))}{mark}", WARN if mark else DIM)])
         for p in others:
             body += [[(fit(f"    {text_of(p.get('owner'), '?')}", width), DIM)]] + pr_entry(p, width)

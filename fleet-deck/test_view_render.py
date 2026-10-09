@@ -179,13 +179,46 @@ class Board(unittest.TestCase):
 
 
 class Stale(unittest.TestCase):
-    def test_a_stale_value_is_drawn_in_the_warning_style_and_the_footer_says_since_when_and_why(self):
-        rec = dict(PROC, status="stale", at="2026-10-09T11:00:00Z", age_s=900, why="proc-local: timeout")
-        a = vr.Agent("arch", "h", "agent", {"proc": rec})
-        self.assertEqual(vr.board_cells(a)["rss"], (vr.size_kb(531684), vr.WARN))
-        lines = vr.board_lines([a], {"h": None}, status(), 0, 120, 20)
-        footer = [vr.line_text(l) for l in lines if vr.line_text(l).startswith("! proc")]
-        self.assertEqual(footer, ["! proc stale for all agents, read 5 min ago: proc-local: timeout"])
+    """A stale value is fleet.py's last good one: drawn, marked `~` in its
+    text (so without colour, and on the selected row), with since when and
+    why where the screen says why."""
+
+    def stale(self, rec, why="proc-local: timeout"):
+        return dict(rec, status="stale", at="2026-10-09T11:00:00Z", age_s=900, why=why)
+
+    def test_a_stale_value_is_marked_in_words_on_the_board_and_the_footer_says_whose_since_when_and_why(self):
+        a = vr.Agent("arch", "h", "agent", {"proc": self.stale(PROC)})
+        self.assertEqual(vr.board_cells(a)["rss"], (vr.size_kb(531684) + vr.STALE, vr.WARN))
+        lines = vr.board_lines([a, vr.Agent("b", "h", "agent", {"proc": PROC})], {"h": None}, status(), 0, 140, 20)
+        rows = texts(lines)
+        self.assertIn(vr.size_kb(531684) + vr.STALE, next(r for r in rows if r.startswith("> arch")))  # selected
+        self.assertIn("~ proc stale for arch, read 5 min ago: proc-local: timeout", rows)
+
+    def test_stale_jobs_mark_the_closed_open_cell(self):
+        a = vr.Agent("arch", "h", "agent", {"jobs": self.stale(JOBS), "closed_jobs": CLOSED})
+        self.assertEqual(vr.board_cells(a)["jobs"], ("23/3" + vr.STALE, vr.WARN))
+
+    def test_past_the_footers_room_stales_and_failures_are_named_apart_once_each(self):
+        down = bad("op:x", "down")
+        a = vr.Agent("a", "h", "agent", {"states": down, "proc": down, "jobs": down, "usage": self.stale(USAGE),
+                                         "tokens": self.stale(TOKENS)})
+        b = vr.Agent("b", "h", "agent", {"states": self.stale(STATES)})
+        foot = vr.failure_lines([a, b], vr.BOARD_SECTIONS, 120, limit=3, now=NOW)
+        rows = texts(foot)
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(rows[0].startswith("? states not read"))
+        self.assertTrue(rows[1].startswith("? also not read: proc, jobs;"))
+        self.assertTrue(rows[2].startswith("~ also stale: states, usage, tokens;"))
+        # A section is named once per kind: states failed for a and is stale for b.
+        self.assertNotIn("states", rows[1])
+
+    def test_the_agent_view_says_a_sections_value_is_stale_and_why(self):
+        a = vr.Agent("arch", "h", "agent", {"prs": self.stale(PRS, why="pr-gate: GitHub did not answer")})
+        lines, _ = vr.agent_lines(a, vr.Samples(), status(), 0, 100, 60)
+        rows = texts(lines)
+        self.assertTrue(any(r.startswith("Pull requests") and "stale ~" in r for r in rows))
+        self.assertTrue(any("~ stale: the last good value; the fresh read failed: pr-gate: GitHub did not answer" in r
+                            for r in rows))
 
     def test_stale_without_data_is_not_a_value(self):
         self.assertIsNone(vr.ok_data({"status": "stale", "why": "x"}))

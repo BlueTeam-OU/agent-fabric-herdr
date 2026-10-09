@@ -73,6 +73,14 @@ class Compare(unittest.TestCase):
         self.assertEqual(style_of(lines, vr.size_kb(2_000_000)), vr.WARN)
         self.assertTrue(any("stale" in r and "timeout after 20 s" in r for r in text(lines)))
 
+    def test_a_failed_and_a_stale_agent_of_one_section_are_both_said(self):
+        agents = [vr.Agent("a", "h", "agent", {"proc": bad("proc-local", "down")}),
+                  vr.Agent("b", "h", "agent", {"proc": proc(5000, status="stale")})]
+        rows = text(rr.compare_lines(agents, 0, status(), 0, 100, 12)[0])
+        self.assertTrue(any(r.startswith("? proc not read for 1 agent(s): down") for r in rows))
+        self.assertTrue(any(r.startswith("~ proc stale for b") for r in rows))
+        self.assertTrue(any(r.startswith("b ") and "5M~" in r for r in rows))
+
     def test_every_metric_reads_its_section(self):
         recs = {"proc": proc(2048, cpu=12.5, swap=4096), "tokens": TOKENS, "jobs": JOBS,
                 "closed_jobs": ok("hostexec", "2026-10-09T11:00:40Z", dict(CLOSED["data"], done_total=17))}
@@ -246,6 +254,12 @@ class Prs(unittest.TestCase):
         self.assertTrue(any("not read yet for 1 agent(s)" in r for r in rows))
         rows = text(rr.prs_lines([], bad("pr-gate", "down"), status(), 0, 100, 20)[0])
         self.assertTrue(any("not a placed agent's: not read: down" in r for r in rows))
+
+    def test_a_stale_owner_or_unplaced_list_says_since_when_and_why(self):
+        old = dict(prs_rec([gate_row(12)]), status="stale", at="2026-10-09T08:05:00Z", age_s=10800, why="pr-gate: timeout")
+        rows = text(rr.prs_lines([vr.Agent("a", "h", "agent", {"prs": old})], old, status(), 0, 120, 20)[0])
+        self.assertTrue(any(r.startswith("a · 1 PR  ~ stale, read 3 h ago: pr-gate: timeout") for r in rows))
+        self.assertTrue(any(r.startswith("not a placed agent's · 1 PR  ~ stale") for r in rows))
 
     def test_nothing_in_flight(self):
         rows = text(rr.prs_lines([vr.Agent("a", "h", "agent", {"prs": prs_rec([])})], None, status(), 0, 60, 8)[0])
