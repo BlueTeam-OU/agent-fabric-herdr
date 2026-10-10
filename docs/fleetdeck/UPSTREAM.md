@@ -92,9 +92,25 @@ inherited tag can never be taken for FleetDeck's.
 
 - `scripts/release.py` publishes, previews and names as `Previous-Stable`
   only commits whose `Cargo.toml` package is `agent-fabric-fleetdeck`
-  (`require_fleetdeck`). A Herdr tag (package `herdr`) is refused even when
-  it is pushed to this repository, so fetching or pushing upstream tags
-  publishes nothing.
+  (`require_fleetdeck`), and no version at or below the inherited 0.9.3.
+- **That guard runs only from FleetDeck's own workflows.** GitHub runs a
+  tag push with the workflow file at the tagged commit. Herdr's tags as
+  they stand here:
+  - v0.9.0–v0.9.3 and the tag-triggered `preview-*` tags carry workflows
+    gated to `herdrdev/herdr`, so they run nothing here. The older
+    `preview-*` tags carry no tag-triggered workflow.
+  - **v0.1.0–v0.8.2 carry an ungated `release.yml`.** Re-creating one of
+    them on the hosted repository (deleted and pushed again, or a `push
+    --tags` from a clone to a repository that lacks it) would run Herdr's
+    own release job: a GitHub release of Herdr binaries here, and, once
+    `RELEASE_DEPLOY_KEY` exists, a push of `distribution/latest.json` to
+    `master`.
+
+  All of them exist on origin today, so nothing fires unless one is
+  re-created. What keeps them from being re-created is the tag ruleset
+  (IDENTITY.md, "Setup"): it lets only admins create `v*` and `preview-*`
+  tags. Never push inherited tags with `git push --tags`; fetch upstream
+  tags only into `refs/tags/upstream/*` (the procedure below).
 - `scripts/preview.py latest_stable_tag` counts only FleetDeck tags.
 - Until the first stable release, `distribution/latest.json` says version
   `0.0.0` and offers no binaries. The first release names

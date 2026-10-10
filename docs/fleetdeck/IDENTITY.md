@@ -18,7 +18,7 @@ versioning policy and the fork's provenance are in
 | Agent-detection catalog | `herdr.dev/agent-detection/` | `distribution/agent-detection/` on this repository's `master` |
 | Release assets | `herdr-<os>-<arch>`, `herdr-windows-x86_64.zip` (holding `herdr.exe`) | `agent-fabric-fleetdeck-<os>-<arch>`, `agent-fabric-fleetdeck-windows-x86_64.zip` (holding `agent-fabric-fleetdeck.exe`) |
 | Release tags | Herdr's `v*`, `preview-*` (kept, never released here) | `v<version>` and `preview-<date>-<sha>` whose source is the `agent-fabric-fleetdeck` package |
-| Installer variables | `HERDR_INSTALL_DIR`, `HERDR_HOME`, `HERDR_CHANNEL`, `HERDR_MANIFEST_URL`, `HERDR_EXPECTED_BUILD_ID` | `AGENT_FABRIC_FLEETDECK_INSTALL_DIR`, `…_HOME`, `…_CHANNEL`, `…_MANIFEST_URL`, `…_EXPECTED_BUILD_ID` |
+| Installer variables | `HERDR_INSTALL_DIR`, `HERDR_HOME`, `HERDR_CHANNEL`, `HERDR_MANIFEST_URL`, `HERDR_EXPECTED_BUILD_ID`, `HERDR_INSTALLER_URL` (install.cmd) | `AGENT_FABRIC_FLEETDECK_INSTALL_DIR`, `…_HOME`, `…_CHANNEL`, `…_MANIFEST_URL`, `…_EXPECTED_BUILD_ID`, `…_INSTALLER_URL` |
 | Windows install | `%LOCALAPPDATA%\Programs\Herdr`, `~\.herdr` | `%LOCALAPPDATA%\Programs\FleetDeck`, `~\.agent-fabric-fleetdeck` |
 | Remote (`--remote`) binary | `herdr`, installed to `~/.local/bin/herdr` | `agent-fabric-fleetdeck`, installed to `~/.local/bin/agent-fabric-fleetdeck` |
 | Nix flake output | `herdr` | `agent-fabric-fleetdeck` |
@@ -58,13 +58,14 @@ with every command spelled `agent-fabric-fleetdeck`.
 |---|---|
 | `HERDR_*` variables in panes, popups, plugins and hooks (`HERDR_ENV`, `HERDR_SOCKET_PATH`, `HERDR_PANE_ID`, `HERDR_BIN_PATH`, `HERDR_PLUGIN_*`, …) and the user-set overrides (`HERDR_CONFIG_PATH`, `HERDR_SESSION`, `HERDR_LOG`, …) | They are the interface that integration hooks, plugins and scripts written for Herdr read. FleetDeck tells its own panes apart with `AGENT_FABRIC_FLEETDECK`, and does not rename the 90-odd variables. |
 | Plugin manifests `herdr-plugin.toml`, `min_herdr_version` | The plugin format. A plugin written for Herdr installs unchanged. `min_herdr_version` is compared with FleetDeck's version, so it is only a rough guide (known limit below). |
-| Integration hook files (`herdr-agent-state.*`), `HERDR_INTEGRATION_VERSION`, report sources like `herdr:devin` | The hook protocol. Each hook calls back through `HERDR_BIN_PATH` and `HERDR_SOCKET_PATH`, so it reaches the server that started the pane, whichever product that is. `agent-fabric-fleetdeck integration install <agent>` writes to the same file names Herdr uses. It is an explicit command, and it replaces a Herdr-installed hook with an equivalent one. |
+| Integration hook files (`herdr-agent-state.*`), `HERDR_INTEGRATION_VERSION`, report sources like `herdr:devin`, and what install writes into an agent's own config (Kimi's `# >>> herdr kimi integration` block, MastraCode's hook description) | The hook protocol. Each hook calls back through `HERDR_BIN_PATH` and `HERDR_SOCKET_PATH`, so it reaches the server that started the pane, whichever product that is. `agent-fabric-fleetdeck integration install <agent>` writes to the same file names Herdr uses. It is an explicit command, and it replaces a Herdr-installed hook with an equivalent one. |
 | File names inside FleetDeck's own directories: `herdr.sock`, `herdr-client.sock`, `herdr-server.log`, `herdr-client.log` | They are already separated by the directory. Renaming them would break nothing and would gain nothing. |
 | Config keys and values (`[ui.toast.herdr]`, right-click target `herdr`) | Config compatibility. A Herdr `config.toml` is valid FleetDeck config. |
 | Build-time `HERDR_BUILD_CHANNEL`, `HERDR_BUILD_ID`, `HERDR_BUILD_COMMIT`; test and debug variables | Internal to the build and the tests. No person sets them. |
 | `skills/herdr/SKILL.md`, `docs/next/`, `docs/preview/`, `docs/versions/`, `CHANGELOG.md`, `README.zh-CN.md`, `AGENTS.md`, `CONTRIBUTING.md` | Herdr's documentation and history. They describe Herdr, which is why the command is rewritten at print time and this file exists. Keeping them verbatim keeps upstream imports small. |
 | The Homebrew and mise detection in `src/update.rs` | It only matches a binary named `herdr` in a Homebrew Cellar or a mise install. FleetDeck has no formula or mise backend, so a FleetDeck binary never matches and the code is inert. No FleetDeck formula is implied. |
 | `vendor/`, `crates/ghostty-vt`, copyright and licence notices | Third-party and upstream attribution. |
+| `distribution/agent-guide.md` | Herdr's setup guide for agents, which Herdr publishes. It is no longer linked from FleetDeck's help. |
 | `.github/workflows/pr-gate.yml`, `label-next-release-issues.yml`, `website-deploy.yml` | Herdr's contributor gate, issue bot and website deploy. They run only in `herdrdev/herdr` and are inert here; FleetDeck has none of the three. |
 
 ## Moving an existing installation
@@ -128,7 +129,11 @@ no server runs, but the fleet deck rebuilds its tabs anyway.
     release workflow push `distribution/latest.json`.
 - **Repository settings**:
   - a tag ruleset that lets only admins create, move or delete `v*` and
-    `preview-*` tags;
+    `preview-*` tags. It is also what stops Herdr's inherited v0.1.0–v0.8.2
+    tags being re-created: those tags carry an ungated release workflow of
+    their own (UPSTREAM.md). Set the ruleset before adding
+    `RELEASE_DEPLOY_KEY`, or move the inherited tags to
+    `refs/tags/upstream/*` on the hosted repository;
   - immutable releases (`scripts/release.py` refuses a preview release
     that is not immutable);
   - admin permission for whoever pushes a release tag.

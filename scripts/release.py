@@ -28,6 +28,10 @@ ASSETS = {
 # distribution/latest.json names this version until FleetDeck's first stable
 # release; the version inherited from Herdr (0.9.3) is no FleetDeck release.
 NO_STABLE_RELEASE = "0.0.0"
+# Herdr's version at the fork point (docs/fleetdeck/UPSTREAM.md). FleetDeck's
+# line continues above it, so no FleetDeck release may take a number at or
+# below it, including the first, which has no Previous-Stable to compare with.
+INHERITED_BASELINE = "0.9.3"
 
 
 def git(*args: str) -> str:
@@ -147,6 +151,8 @@ def validate_release(preview_tag: str, candidate: str, version: str, previous: s
     require_fleetdeck(preview)
     require_fleetdeck(candidate)
     validate_diff(preview, candidate, version)
+    if version_tuple(version) <= version_tuple(INHERITED_BASELINE):
+        raise ValueError(f"FleetDeck versions continue above the inherited {INHERITED_BASELINE}")
     current = json.loads(git("show", "origin/master:distribution/latest.json"))["version"]
     if previous == "none":
         if current == version:
@@ -168,6 +174,12 @@ def validate_release(preview_tag: str, candidate: str, version: str, previous: s
         raise ValueError("Previous-Stable must name the currently published stable release")
     require_fleetdeck(f"refs/tags/{previous}")
     return preview
+
+
+def previous_stable() -> str:
+    """The Previous-Stable trailer the next release tag carries."""
+    current = json.loads(git("show", "origin/master:distribution/latest.json"))["version"]
+    return "none" if current == NO_STABLE_RELEASE else f"v{current}"
 
 
 def select_hotfix(branch: str, base: str) -> str:
@@ -220,10 +232,13 @@ def main() -> None:
     tag.add_argument("--tag", required=True)
     tag.add_argument("--repo", default=REPOSITORY)
     tag.add_argument("--github-output", type=Path)
+    commands.add_parser("previous-stable")
     preview = commands.add_parser("preview-source")
     preview.add_argument("--commit", default="HEAD")
     args = parser.parse_args()
-    if args.command == "preview-source":
+    if args.command == "previous-stable":
+        print(previous_stable())
+    elif args.command == "preview-source":
         print(select_preview(args.commit))
     elif args.command == "check-source":
         validate_diff(published_preview(args.preview, args.repo), args.commit)

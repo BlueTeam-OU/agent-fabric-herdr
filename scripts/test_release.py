@@ -241,16 +241,26 @@ class ReleaseTests(unittest.TestCase):
                 release.validate_release("preview-test", candidate, "1.0.1", "v1.0.0", "test/repo")
         with self.assertRaisesRegex(ValueError, "no stable release to hotfix"):
             release.select_preview(candidate)
+        self.assertEqual(release.previous_stable(), "none")
         self.put("distribution/latest.json", json.dumps({"version": "1.0.1"}))
         self.git("update-ref", "refs/remotes/origin/master", self.commit("first release published"))
         with mock.patch.object(release, "published_preview", return_value=self.preview):
             self.assertEqual(release.validate_release("preview-test", "v1.0.1", "1.0.1", "none", "test/repo"), self.preview)
 
     def test_a_later_release_must_name_its_previous_stable(self):
+        self.assertEqual(release.previous_stable(), "v1.0.0")
         candidate = self.prepare()
         with mock.patch.object(release, "published_preview", return_value=self.preview):
             with self.assertRaisesRegex(ValueError, "currently published stable release v1.0.0"):
                 release.validate_release("preview-test", candidate, "1.0.1", "none", "test/repo")
+    def test_no_release_takes_a_number_at_or_below_the_inherited_baseline(self):
+        for path in ("Cargo.toml", "Cargo.lock"):
+            self.put(path, Path(path).read_text().replace('version = "1.0.0"', 'version = "0.9.3"', 1))
+        candidate = self.commit("a version at the inherited baseline")
+        with mock.patch.object(release, "published_preview", return_value=self.preview):
+            with self.assertRaisesRegex(ValueError, "above the inherited 0.9.3"):
+                release.validate_release("preview-test", candidate, "0.9.3", "none", "test/repo")
+
 
 if __name__ == "__main__":
     unittest.main()

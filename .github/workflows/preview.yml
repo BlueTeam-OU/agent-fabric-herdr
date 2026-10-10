@@ -17,9 +17,11 @@ concurrency:
   cancel-in-progress: false
 
 # FleetDeck previews publish from its own repository only; scripts/release.py
-# preview-source refuses a commit whose package is not agent-fabric-fleetdeck,
-# so an inherited Herdr preview-* tag publishes nothing. Herdr's issue
-# labelling step was removed with its bot token.
+# preview-source refuses a commit whose package is not agent-fabric-fleetdeck.
+# Herdr's tag-triggered preview-* tags carry a preview.yml gated to
+# herdrdev/herdr, which runs nothing here; the older ones carry no
+# tag-triggered workflow.
+# Herdr's issue labelling step was removed with its bot token.
 jobs:
   preflight:
     if: github.repository == 'BlueTeam-OU/agent-fabric-fleetdeck' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/preview-')
