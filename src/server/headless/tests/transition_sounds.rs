@@ -198,7 +198,11 @@ fn an_unknown_pane_reported_idle_plays_its_configured_sound() {
 
 #[test]
 fn a_pane_passing_several_transitions_at_once_sounds_once() {
-    let mut deck = Deck::new("[ui.sound.transitions]\n\"* -> *\" = \"any.mp3\"\n");
+    // No fleet limit: the per-pane limit alone is what holds it to one
+    // (review F3).
+    let mut deck = Deck::new(
+        "[ui.sound]\nfleet_min_interval_ms = 0\n[ui.sound.transitions]\n\"* -> *\" = \"any.mp3\"\n",
+    );
     deck.report(PaneAgentState::Idle);
     deck.report(PaneAgentState::Working);
     deck.report(PaneAgentState::Blocked);
