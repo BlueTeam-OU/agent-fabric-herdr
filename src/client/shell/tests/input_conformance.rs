@@ -136,7 +136,7 @@ const PANE_MODES: &[(&str, &[u8])] = &[
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum HostProfile {
+pub(super) enum HostProfile {
     /// Kitty keyboard host (Ghostty, kitty, WezTerm, foot...). Herdr pushes 7,
     /// or 31 while the pane wants all keys reported.
     Kitty,
@@ -145,7 +145,7 @@ enum HostProfile {
 }
 
 impl HostProfile {
-    fn name(self) -> &'static str {
+    pub(super) fn name(self) -> &'static str {
         match self {
             Self::Kitty => "kitty-host",
             Self::Legacy => "legacy-host",
@@ -274,8 +274,8 @@ fn legacy_shell_exception(pane_mode: &[u8], key: &str, mods: u16) -> Option<Vec<
     })
 }
 
-struct HerdrPath {
-    state: ClientShellState,
+pub(super) struct HerdrPath {
+    pub(super) state: ClientShellState,
     framer: crate::raw_input::RawInputByteFramer,
     runtime: crate::terminal::TerminalRuntime,
     rx: tokio::sync::mpsc::Receiver<bytes::Bytes>,
@@ -284,7 +284,7 @@ struct HerdrPath {
 }
 
 impl HerdrPath {
-    fn new(host: HostProfile, app_output: &[u8]) -> Self {
+    pub(super) fn new(host: HostProfile, app_output: &[u8]) -> Self {
         // Mirrors the client: report-all is pushed to the host while the pane
         // asks for it (`HostProfile::setup` picks 31 for those panes).
         let host_reports_all = matches!(app_output, b"\x1b[>11u" | b"\x1b[>15u" | b"\x1b[>31u");
@@ -383,7 +383,7 @@ impl HerdrPath {
 
     /// Feed one host write, then let idle flushes run. Returns None when Herdr
     /// itself consumed the key (prefix, binding, mode change).
-    fn feed(&mut self, host_bytes: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn feed(&mut self, host_bytes: &[u8]) -> Option<Vec<u8>> {
         let mut chunks = self.framer.push(host_bytes);
         for _ in 0..3 {
             if !self.framer.has_pending_input() {
