@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -20,6 +20,14 @@ pub struct SoundConfig {
     /// Relative paths are resolved from the config file's directory.
     pub request_path: Option<PathBuf>,
     pub agents: AgentSoundOverrides,
+    /// Fork: across all panes, at most one transition sound per this many
+    /// milliseconds; a sound inside it is dropped, its notification still
+    /// shown. 0 turns the limit off.
+    pub fleet_min_interval_ms: u64,
+    /// Fork: a sound per agent state transition (`crate::transition_sound`).
+    pub transitions: crate::transition_sound::TransitionTable,
+    /// Fork: the same table per account, by the pane's `account` token.
+    pub accounts: std::collections::BTreeMap<String, crate::transition_sound::TransitionTable>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -115,8 +123,14 @@ impl SoundConfig {
                 ));
             }
         }
+        diagnostics.extend(crate::transition_sound::diagnostics(self));
         diagnostics
     }
+}
+
+/// Fork: a sound file named in the config, resolved as upstream's are.
+pub(crate) fn resolve_sound_path(path: &Path) -> PathBuf {
+    resolve_config_relative_path(path)
 }
 
 impl AgentSoundOverrides {
@@ -159,6 +173,9 @@ impl Default for SoundConfig {
             done_path: None,
             request_path: None,
             agents: AgentSoundOverrides::default(),
+            fleet_min_interval_ms: crate::transition_sound::DEFAULT_FLEET_MIN_INTERVAL_MS,
+            transitions: Default::default(),
+            accounts: Default::default(),
         }
     }
 }

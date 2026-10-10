@@ -65,6 +65,21 @@ pub fn play(sound: Sound, config: &crate::config::SoundConfig) {
     });
 }
 
+/// Fork: play `path`, or the built-in `fallback` when it cannot be played
+/// (`crate::transition_sound`).
+pub fn play_file_or(path: PathBuf, fallback: Sound, config: &crate::config::SoundConfig) {
+    if sound_playback_disabled_by_env() {
+        return;
+    }
+    let config = config.clone();
+    std::thread::spawn(move || {
+        if let Err(err) = play_file(&path) {
+            warn!(path = %path.display(), err = %err, "transition sound playback failed, falling back to built-in sound");
+            play(fallback, &config);
+        }
+    });
+}
+
 fn sound_playback_disabled_by_env() -> bool {
     std::env::var_os(DISABLE_SOUND_ENV).is_some() || std::env::var_os("NEXTEST").is_some()
 }

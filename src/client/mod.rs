@@ -1756,6 +1756,10 @@ async fn run_client_loop(
                     } => {
                         if state.shell.is_none() {
                             handle_notify(kind, &message, body.as_deref(), &state.sound_config);
+                        } else if kind == crate::protocol::NotifyKind::Sound {
+                            // Fork: shell clients take upstream's sounds from semantic
+                            // notifications; only a transition sound comes as Notify.
+                            crate::transition_sound::play_label(&message, &state.sound_config);
                         }
                     }
                     ServerMessage::SemanticNotification(event) => {

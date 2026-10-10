@@ -444,6 +444,8 @@ def start_ticks(pid: int, proc_root: str = "/proc") -> int | None:
 
 AGENT_SOURCE = "fabric"
 AGENT_LABEL = "claude"
+# herdr's pane metadata token naming the account (src/transition_sound.rs).
+ACCOUNT_TOKEN = "account"
 # How often the deck looks at every harness pane.
 POLL_S = 2
 # How long a restore waits for the changes the restart caused to reach the
@@ -884,7 +886,8 @@ class Deck:
     def _show(self, login: str, pane: str, shown: Shown, now: float) -> None:
         last = self.sent.get(login)
         if last is None or last[0] != shown or now - last[1] >= RESEND_AFTER_S:
-            for command in (report_command(pane, shown), *label_commands(pane, shown)):
+            for command in (account_command(pane, login), report_command(pane, shown),
+                            *label_commands(pane, shown)):
                 self.herdr.call(*command)
             self.sent[login] = (shown, now)
             if last is None or last[0] != shown:
@@ -977,6 +980,14 @@ def report_command(pane: str, shown: Shown) -> tuple[str, ...]:
             "--state", shown.status)
 
 
+def account_command(pane: str, login: str) -> tuple[str, ...]:
+    """The account the pane runs as, which herdr's per-account transition
+    sounds (`[ui.sound.accounts."<login>"]`) are chosen by. Sent before the
+    state, so the first transition herdr sees already has its account."""
+    return ("pane", "report-metadata", pane, "--source", AGENT_SOURCE, "--agent", AGENT_LABEL,
+            "--token", f"{ACCOUNT_TOKEN}={login}")
+
+
 def release_commands(pane: str) -> list[tuple[str, ...]]:
     """What the deck gives back of a pane it stops following."""
     base = ("pane", "report-metadata", pane, "--source", AGENT_SOURCE, "--agent", AGENT_LABEL)
@@ -984,6 +995,7 @@ def release_commands(pane: str) -> list[tuple[str, ...]]:
         ("pane", "release-agent", pane, "--source", AGENT_SOURCE, "--agent", AGENT_LABEL),
         base + ("--clear-state-labels",),
         base + ("--clear-display-agent",),
+        base + ("--clear-token", ACCOUNT_TOKEN),
     ]
 
 

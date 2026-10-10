@@ -20,6 +20,7 @@ from fabric_deck import (
     for_this_host,
     harness_under,
     herdr_socket_path,
+    account_command,
     label_commands,
     load_befores,
     modes_in,
@@ -28,6 +29,7 @@ from fabric_deck import (
     parse_state_line,
     proc_argv,
     proc_parents,
+    release_commands,
     report_command,
     save_befores,
     server_instance,
@@ -623,7 +625,7 @@ class Restore(unittest.TestCase):
         h.deck.restore(0)
         h.deck.follow(RESTORE_SETTLE_S)
         self.assertEqual(h.herdr.runs(), [], "nothing is typed while moveto runs")
-        self.assertEqual(h.herdr.reports("p0")[0][-1], "working")
+        self.assertEqual(h.herdr.reports("p0")[1][-1], "working", "after the account")
 
     def test_a_tab_entered_over_ssh_is_classified_like_a_sudo_one_from_the_stream(self):
         herdr = FakeHerdr()
@@ -634,7 +636,7 @@ class Restore(unittest.TestCase):
         h.deck.restore(0)
         h.deck.follow(RESTORE_SETTLE_S)
         self.assertEqual(h.herdr.runs(), [], "nothing is typed while ssh runs the account")
-        self.assertEqual(h.herdr.reports("p0")[0][-1], "working")
+        self.assertEqual(h.herdr.reports("p0")[1][-1], "working", "after the account")
         h.records["ui"] = record("ui", "none")
         h.deck.follow(RESTORE_SETTLE_S + 30)
         self.assertEqual(h.herdr.runs(), [])
@@ -743,15 +745,18 @@ class Follow(unittest.TestCase):
         h.deck.follow(20)
         self.assertEqual(len(h.herdr.reports(harness)), sent)
         h.deck.follow(RESTORE_SETTLE_S + 1 + RESEND_AFTER_S)
-        self.assertEqual(len(h.herdr.reports(harness)), sent + 3, "the state, the clear and the label")
+        self.assertEqual(len(h.herdr.reports(harness)), sent + 4,
+                         "the account, the state, the clear and the label")
 
     def test_a_pane_left_by_its_account_gives_back_what_the_deck_set(self):
         h, harness = self.ready()
         h.logins = []
         h.deck.follow(RESTORE_SETTLE_S + 1 + PANE_MAP_REFRESH_S)
-        given = [c for c in h.herdr.calls if harness in c][-3:]
-        self.assertEqual([c[1] for c in given], ["release-agent", "report-metadata", "report-metadata"])
-        self.assertEqual((given[1][-1], given[2][-1]), ("--clear-state-labels", "--clear-display-agent"))
+        given = [c for c in h.herdr.calls if harness in c][-4:]
+        self.assertEqual([c[1] for c in given],
+                         ["release-agent", "report-metadata", "report-metadata", "report-metadata"])
+        self.assertEqual([c[-1] for c in given[1:]],
+                         ["--clear-state-labels", "--clear-display-agent", "account"])
 
     def test_a_harness_held_by_another_command_reads_unknown_not_dormant(self):
         h, harness = self.ready()
@@ -875,6 +880,11 @@ class Panel(unittest.TestCase):
                                       "--state-label", "done=dormant"))
         self.assertEqual(label_commands("p1", Shown("blocked", "failed"))[1][-4:],
                          ("--display-agent", "failed", "--state-label", "blocked=failed"))
+
+    def test_the_account_token_is_set_with_the_state_and_given_back_on_release(self):
+        self.assertEqual(account_command("p1", "rust-ui-dev-01")[:3], ("pane", "report-metadata", "p1"))
+        self.assertEqual(account_command("p1", "rust-ui-dev-01")[-2:], ("--token", "account=rust-ui-dev-01"))
+        self.assertIn(("--clear-token", "account"), [c[-2:] for c in release_commands("p1")])
 
     def test_a_running_harness_reads_as_herdrs_own_agent_name_and_state(self):
         clear, name = label_commands("p1", Shown("working", ""))
