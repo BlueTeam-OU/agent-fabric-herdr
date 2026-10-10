@@ -71,7 +71,7 @@ something is selected or on the clipboard. herdr keeps only these:
 | **ctrl+6** | the prefix: herdr's commands are ctrl+6 then a key (`ctrl+6 q` detaches; the `prefix+f/a/p` keys below); ctrl+6 twice sends ctrl+6 to the pane. A legacy terminal sends it as ctrl+^ (0x1e), which works too. |
 | **ctrl+alt+c** | copies the selection |
 | **ctrl+alt+p** | pastes the clipboard's text into the pane |
-| **cmd+c / cmd+v** | copy and paste, where a macOS terminal forwards cmd |
+| **cmd+c / cmd+v** | copy (any system) and paste (macOS), where the terminal forwards cmd |
 | **alt+PageUp / alt+PageDown** | scroll herdr's scrollback, when the pane is on its main screen with no mouse reporting (otherwise they reach the pane) |
 | the **mouse** | selection, menus and scrolling |
 

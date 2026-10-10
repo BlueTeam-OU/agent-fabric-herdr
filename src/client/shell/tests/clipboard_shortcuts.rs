@@ -380,15 +380,30 @@ fn a_configured_ctrl_alt_c_binding_wins_over_the_copy_key() {
 #[test]
 fn ctrl_alt_c_after_the_prefix_is_the_prefix_commands_key() {
     let mut state = shortcuts_state(true);
-    select_in_pane_1(&mut state);
     state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
         KeyCode::Char('6'),
         KeyModifiers::CONTROL,
     ))]);
     assert_eq!(state.mode, ClientShellMode::Prefix);
+    // Pressing the prefix clears a selection; make one visible after it.
+    select_in_pane_1(&mut state);
 
     let outcome = state.handle_raw_events(vec![RawInputEvent::Key(ctrl_alt('c'))]);
 
     assert!(!requests_selection_read(&outcome));
     assert_ne!(state.mode, ClientShellMode::Prefix, "prefix mode ended");
+}
+
+#[test]
+fn a_prefix_on_ctrl_alt_c_enters_prefix_mode() {
+    let config: Config = toml::from_str("[keys]\nprefix = \"ctrl+alt+c\"\n").expect("parses");
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    select_in_pane_1(&mut state);
+
+    let outcome = state.handle_raw_events(vec![RawInputEvent::Key(ctrl_alt('c'))]);
+
+    assert!(!requests_selection_read(&outcome));
+    assert_eq!(state.mode, ClientShellMode::Prefix);
 }
