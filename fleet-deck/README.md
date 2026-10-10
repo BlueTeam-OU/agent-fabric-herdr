@@ -175,7 +175,7 @@ agent's name, so the deck's word goes in its place, and herdr's own
 | moveto has no `--wait` yet, so the harness pane is left at the operator's shell | `unknown` | `unknown` |
 | something other than this account's moveto holds the harness pane | `unknown` | `unknown` |
 | a session runs on the account, not in this pane | `unknown` | `running elsewhere` |
-| the account's record is older than two heartbeats | `unknown` | `stale` |
+| the account's record is older than two heartbeats, or says the account cannot read its session state (`state: unknown`) | `unknown` | `stale` |
 
 The same words are set as herdr state labels, for a sidebar layout that
 shows `state_text`. herdr shows an `idle` the person has not looked at as

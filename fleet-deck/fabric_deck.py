@@ -220,7 +220,11 @@ def for_this_host(record: StateRecord | None, host: str | None) -> bool:
 
 
 def live_of(record: StateRecord | None, now_utc: datetime.datetime) -> Live | None:
-    if record is None:
+    # A record whose state is "unknown" (the account cannot read its session
+    # state: sessions [] and a fresh ts, agent-fabric #179) says nothing about
+    # sessions. Read as live = 0 it would note a fall, and a session that died
+    # with herdr would not be resumed; it is no record instead.
+    if record is None or record.state == "unknown":
         return None
     posted = parse_utc(record.ts)
     if posted is None:
