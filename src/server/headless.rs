@@ -3146,10 +3146,18 @@ impl HeadlessServer {
             };
 
             let new_state = terminal_after.state;
-            if new_state == *prev_state
-                || (new_state == crate::detect::AgentState::Idle
-                    && terminal_after.last_agent_completion_seq.is_none())
+            if new_state == *prev_state {
+                continue;
+            }
+            if new_state == crate::detect::AgentState::Idle
+                && terminal_after.last_agent_completion_seq.is_none()
             {
+                // Fork: upstream notifies nothing for an idle the agent did
+                // not complete into, but a configured transition sound still
+                // plays for it -- `unknown -> idle` from the socket API, as
+                // Fleet Deck reports a pane it gets back (review F1).
+                let agent = terminal_after.effective_known_agent();
+                self.play_transition_sound(*pane_id, *prev_state, new_state, agent);
                 continue;
             }
 

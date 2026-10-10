@@ -182,6 +182,21 @@ fn with_empty_tables_the_server_sends_what_upstream_sends() {
 }
 
 #[test]
+fn an_unknown_pane_reported_idle_plays_its_configured_sound() {
+    // A pane the deck held as unknown goes back to idle over the socket
+    // API: no completion, so upstream notifies nothing, and the
+    // configured transition still sounds (review F1).
+    let mut deck = Deck::new("[ui.sound.transitions]\n\"unknown -> idle\" = \"back.mp3\"\n");
+    deck.report(PaneAgentState::Unknown);
+    let _ = deck.sent();
+    deck.report(PaneAgentState::Idle);
+    assert_eq!(
+        deck.sent().0,
+        ["transition unknown->idle fallback=none account=rust-ui-dev-01"]
+    );
+}
+
+#[test]
 fn a_pane_passing_several_transitions_at_once_sounds_once() {
     let mut deck = Deck::new("[ui.sound.transitions]\n\"* -> *\" = \"any.mp3\"\n");
     deck.report(PaneAgentState::Idle);
