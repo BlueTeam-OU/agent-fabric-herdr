@@ -104,5 +104,88 @@ class Records(unittest.TestCase):
         self.assertIs(fv.agents_of(placements, store, ("jobs",), {})[0].sections["jobs"], old)
 
 
+class Navigation(unittest.TestCase):
+    def test_the_fleet_tabs_screens_are_a_key_away_and_esc_leaves_prs_for_where_it_was(self):
+        nav = fv.Nav(fv.BOARD)
+        self.assertIsNone(nav.key("c", rows=3, page=10))
+        self.assertEqual(nav.screen, fv.COMPARE)
+        nav.key("P", 3, 10)
+        self.assertEqual((nav.screen, nav.back), (fv.PRS, fv.COMPARE))
+        nav.key(fv.ESCAPE, 3, 10)
+        self.assertEqual((nav.screen, nav.back), (fv.COMPARE, None))
+        nav.key("p", 3, 10)
+        nav.key("b", 3, 10)
+        self.assertEqual(nav.screen, fv.BOARD)
+        self.assertEqual(nav.key(fv.ESCAPE, 3, 10), None)   # Esc on the board closes nothing
+
+    def test_the_popup_is_prs_alone_and_esc_closes_it(self):
+        nav = fv.Nav(fv.PRS)
+        nav.key("c", 3, 10)
+        self.assertEqual(nav.screen, fv.PRS)
+        self.assertEqual(nav.key(fv.ESCAPE, 3, 10), fv.QUIT)
+
+    def test_metrics_cycle_both_ways_and_by_number(self):
+        nav = fv.Nav(fv.COMPARE)
+        nav.key(fv.LEFT, 3, 10)
+        self.assertEqual(nav.metric, len(fv.rr.METRICS) - 1)
+        nav.key(fv.RIGHT, 3, 10)
+        self.assertEqual(nav.metric, 0)
+        nav.key("5", 3, 10)
+        self.assertEqual(nav.metric, 4)
+        nav.key("9", 3, 10)
+        self.assertEqual(nav.metric, 4)
+
+    def test_enter_opens_the_selected_agent_and_selection_is_clamped(self):
+        nav = fv.Nav(fv.BOARD)
+        for _ in range(5):
+            nav.key(fv.DOWN, rows=3, page=10)
+        self.assertEqual(nav.selected, 2)
+        self.assertEqual(nav.key(fv.ENTER, 3, 10), fv.OPEN_AGENT)
+        self.assertIsNone(fv.Nav(fv.BOARD).key(fv.ENTER, rows=0, page=10))
+
+    def test_arrows_are_parsed(self):
+        self.assertEqual(fv.parse_input(b"\x1b[C\x1b[D\x1bOC", final=False)[0], [fv.RIGHT, fv.LEFT, fv.RIGHT])
+
+    def test_a_popup_is_opened_sized_and_focused(self):
+        argv = fv.open_argv("/bin/herdr", "fabric.fleet", "prs")
+        self.assertEqual(argv[argv.index("--width") + 1], "80%")
+        self.assertIn("--focus", argv)
+        self.assertNotIn("--width", fv.open_argv("/bin/herdr", "fabric.fleet", "board"))
+
+
+class FleetWide(unittest.TestCase):
+    def test_plans_come_from_the_documents_top_level(self):
+        rec = {"status": "ok", "src": "fabric-plan", "at": "t", "data": {"login": "user", "plans": []}}
+        self.assertEqual(fv.answer_of({"agents": [], "plans": rec}, "plans"), ({fv.FLEET: rec}, None, {}))
+        records, why, _ = fv.answer_of({"agents": []}, "plans")
+        self.assertEqual(records, {})
+        self.assertIn("no plans", why)
+
+    def test_prs_carry_the_unplaced_record_beside_them(self):
+        rec = {"status": "ok", "src": "pr-gate", "at": "t", "data": {"prs": []}}
+        unplaced = {"status": "ok", "src": "pr-gate", "at": "t", "data": {"prs": [{"pr": 1}]}}
+        doc = {"agents": [{"login": "a", "sections": {"prs": rec}}], "prs_unplaced": unplaced}
+        self.assertEqual(fv.answer_of(doc, "prs"), ({"a": rec}, None, {fv.UNPLACED: {fv.FLEET: unplaced}}))
+
+    def test_a_fleet_py_without_prs_unplaced_is_said_not_shown_as_none(self):
+        import report_render as rr
+        import view_render as vr
+        rec = {"status": "ok", "src": "pr-gate", "at": "t", "data": {"prs": []}}
+        _, _, extra = fv.answer_of({"agents": [{"login": "a", "sections": {"prs": rec}}]}, "prs")
+        unplaced = extra[fv.UNPLACED][fv.FLEET]
+        self.assertEqual(unplaced["status"], "failed")
+        st = vr.Status(focused=True, fetching=(), now=__import__("datetime").datetime.now(), oldest=None, from_cache=False)
+        rows = [vr.line_text(l) for l in rr.prs_lines([vr.Agent("a", "h", "agent", {"prs": rec})], unplaced, st, 0, 120, 10)[0]]
+        self.assertTrue(any("not a placed agent's: not read: agent-fabric's fleet.py here does not list them" in r for r in rows))
+
+    def test_a_section_fleet_does_not_serve_is_said_and_never_asked(self):
+        from types import SimpleNamespace
+        import queue
+        fleet = SimpleNamespace(SECTIONS={"prs": SimpleNamespace(ttl=120)})
+        view = fv.View(fleet, ("plans",), None, fv.Store(), queue.Queue())
+        self.assertEqual(view.refresher.due(0, True), [])
+        self.assertIn("serves no plans section", fv.fleet_record(view.store, "plans", view.whys)["why"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -33,11 +33,15 @@ UNREAD = "…"
 # (board) or beside the section (agent view).
 NOT_READ = "?"
 NONE = "-"
+# After a value that is fleet.py's last good one, kept while a fresh read
+# fails: a mark in the text, so it reads without colour and on the
+# selected row, explained where the screen says why.
+STALE = "~"
 
 SPARK = "▁▂▃▄▅▆▇█"
 SPARK_ASCII = "_.-=+*#@"
 
-BOARD_KEYS = "↑↓ select  Enter agent  r refetch  q close"
+BOARD_KEYS = "↑↓ select  Enter agent  c compare  p plan  P PRs  r refetch  q close"
 AGENT_KEYS = "↑↓ scroll  r refetch  Esc back  q close"
 OVERLAY_KEYS = "↑↓ scroll  r refetch  q close"
 
@@ -45,9 +49,15 @@ OVERLAY_KEYS = "↑↓ scroll  r refetch  q close"
 # ── values ──────────────────────────────────────────────────────────
 
 def ok_data(record: dict | None) -> dict | None:
-    if isinstance(record, dict) and record.get("status") == "ok" and isinstance(record.get("data"), dict):
+    """The record's value: an answer, or the last good one fleet.py keeps
+    while a fresh read fails within the section's stale window."""
+    if isinstance(record, dict) and record.get("status") in ("ok", "stale") and isinstance(record.get("data"), dict):
         return record["data"]
     return None
+
+
+def stale(record: dict | None) -> bool:
+    return isinstance(record, dict) and record.get("status") == "stale" and ok_data(record) is not None
 
 
 def failed(record: dict | None) -> bool:
@@ -189,7 +199,10 @@ def cell(record: dict | None, value) -> tuple[str, str]:
         return NOT_READ, FAILED
     if ok_data(record) is None:
         return NOT_READ, FAILED
-    return value(ok_data(record)), NORMAL
+    # A stale value is drawn in WARN, which on the board means stale and
+    # nothing else: board_row adds the `~` after fitting the value, so a
+    # value cut to its column keeps its mark.
+    return value(ok_data(record)), WARN if stale(record) else NORMAL
 
 
 def state_word(data: dict) -> str:
@@ -311,7 +324,8 @@ def board_cells(a: Agent) -> dict[str, tuple[str, str]]:
         closed_n = (ok_data(closed) or {}).get("closed_total") if ok_data(closed) is not None else None
         left = str(closed_n) if closed_n is not None else (UNREAD if closed is None else NOT_READ)
         right = str(open_n) if open_n is not None else (UNREAD if jobs is None else NOT_READ)
-        jobs_cell = (f"{left}/{right}", FAILED if NOT_READ in (left, right) else NORMAL)
+        old = stale(jobs) or stale(closed)
+        jobs_cell = (f"{left}/{right}", FAILED if NOT_READ in (left, right) else WARN if old else NORMAL)
     return {
         "login": (a.login, BOLD),
         "state": cell(s.get("states"), state_word),
@@ -354,8 +368,11 @@ def board_row(a: Agent, cols: list[tuple[Column, int]], selected: bool) -> Line:
     line: Line = [("> " if selected else "  ", SELECTED if selected else NORMAL)]
     for i, (c, w) in enumerate(cols):
         text, style = cells[c.key]
+        # A stale value keeps its `~` whatever the cut: it is the mark that
+        # survives the selected row's reverse video and NO_COLOR.
+        shown = pad(text, w - 1, c.right) + STALE if style == WARN and w > 1 else pad(text, w, c.right)
         # The whole selected row is reversed; a failed cell keeps its `?`.
-        line.append((("" if i == 0 else " ") + pad(text, w, c.right), SELECTED if selected else style))
+        line.append((("" if i == 0 else " ") + shown, SELECTED if selected else style))
     return line
 
 
@@ -371,7 +388,7 @@ def host_line(host: str, record: dict | None) -> Line:
         return [(f"{host}: memory not read: {record.get('why') or 'no answer'}", FAILED)]
     machine = data.get("machine") if isinstance(data.get("machine"), dict) else {}
     mem = machine.get("mem_mb") if isinstance(machine.get("mem_mb"), dict) else {}
-    parts = [host + ":"]
+    parts = [host + ":" + (f" {STALE}" if stale(record) else "")]
     total, avail = mem.get("total"), mem.get("available")
     if isinstance(total, (int, float)) and isinstance(avail, (int, float)):
         parts.append(f"memory {(total - avail) / 1024:.1f} of {total / 1024:.1f} GB used")
@@ -409,28 +426,60 @@ def problem(name: str, record: dict | None) -> str | None:
     return None
 
 
-def failure_lines(agents: list[Agent], sections: tuple[str, ...], width: int, limit: int) -> list[Line]:
-    """One line per section that reads `?` for some agents: how many, and
-    the first why. A why is often the same for all (a source down), so each
-    is said once, not per agent. Past `limit`, the rest are named, and their
-    whys are in each agent's view."""
-    out: list[tuple[str, Line]] = []
+def failure_lines(agents: list[Agent], sections: tuple[str, ...], width: int, limit: int,
+                  now: datetime.datetime | None = None) -> list[Line]:
+    """One line per section that reads `?` for some agents, and one per
+    section drawn stale (`~`) for some: who, and the first why. A why is
+    often the same for all (a source down), so each is said once, not per
+    agent. Past `limit`, the rest are named, failures and stales apart, and
+    their whys are in each agent's view."""
+    fails: list[tuple[str, Line]] = []
     for name in sections:
         whys = [w for a in agents if (w := problem(name, a.sections.get(name))) is not None]
         if not whys:
             continue
         who = "all agents" if len(whys) == len(agents) else f"{len(whys)} agent{'s' if len(whys) > 1 else ''}"
-        out.append((name, [(fit(f"? {name} not read for {who}: {whys[0]}", width), FAILED)]))
-    if len(out) > limit:
-        rest = [name for name, _ in out[limit - 1:]]
-        # Only a section the agent view shows has its why there; the host's
-        # is in the host line above.
-        where = [n for n in rest if n in AGENT_SECTIONS]
-        tail = f"? also not read: {', '.join(rest)}"
-        if where:
-            tail += f"; why for {', '.join(where)} in each agent's view (Enter)"
-        return [line for _, line in out[: limit - 1]] + [[(fit(tail, width), FAILED)]]
-    return [line for _, line in out]
+        fails.append((name, [(fit(f"? {name} not read for {who}: {whys[0]}", width), FAILED)]))
+    stales: list[tuple[str, Line]] = []
+    for name in sections:
+        olds = [a for a in agents if stale(a.sections.get(name))]
+        if olds:
+            stales.append((name, [(fit(stale_text(name, olds, agents, now), width), WARN)]))
+    items = [(FAILED, n, l) for n, l in fails] + [(WARN, n, l) for n, l in stales]
+    if len(items) <= limit:
+        return [l for _, _, l in items]
+    # Keep as many lines whole as leave room for the tails that name the rest.
+    for room in (limit - 1, limit - 2):
+        rest = items[room:]
+        tails = []
+        for kind, word in ((FAILED, "? also not read"), (WARN, f"{STALE} also stale")):
+            names = [n for k, n, _ in rest if k == kind]
+            if names:
+                tails.append([(fit(f"{word}: {', '.join(names)}" + why_where(names), width), kind)])
+        if room + len(tails) <= limit:
+            return [l for _, _, l in items[:room]] + tails
+    return [l for _, _, l in items[:max(0, limit)]]
+
+
+def why_where(names: list[str]) -> str:
+    """Where the whys of the sections a footer could only name are: each
+    agent's view shows its own sections; the host's is in the host line."""
+    where = [n for n in names if n in AGENT_SECTIONS]
+    return f"; why for {', '.join(where)} in each agent's view (Enter)" if where else ""
+
+
+def stale_text(name: str, olds: list[Agent], agents: list[Agent], now: datetime.datetime | None) -> str:
+    """`~ proc stale for a, b, read 5 min ago: why`: whose values are the
+    marked ones, by name while that fits a line's worth."""
+    if len(olds) == len(agents):
+        who = "all agents"
+    elif len(olds) <= 3:
+        who = ", ".join(a.login for a in olds)
+    else:
+        who = f"{len(olds)} agents"
+    rec = olds[0].sections[name]
+    when = f", read {age(rec.get('at'), now)}" if now is not None else ""
+    return f"{STALE} {name} stale for {who}{when}: {rec.get('why') or 'the last read failed'}"
 
 
 @dataclass
@@ -468,7 +517,7 @@ def board_lines(agents: list[Agent], hosts: dict[str, dict | None], st: Status,
     cols = board_columns(agents, width)
     top = [status_line(f"Fleet · {len(agents)} agents", st, width), board_header(cols)]
     footer = [host_line(h, r) for h, r in sorted(hosts.items())]
-    footer += failure_lines(agents, BOARD_SECTIONS, width, limit=3)
+    footer += failure_lines(agents, BOARD_SECTIONS, width, limit=3, now=st.now)
     footer.append([(fit(BOARD_KEYS, width), DIM)])
     room = max(1, height - len(top) - len(footer))
     first = 0
@@ -524,6 +573,8 @@ def heading(title: str, record: dict | None, now: datetime.datetime) -> Line:
     if record is None:
         return [(title, BOLD), (f"  {UNREAD} not read yet", DIM)]
     src = record.get("src") or "?"
+    if stale(record):
+        return [(title, BOLD), (f"  {src}, {age(record.get('at'), now)}, stale {STALE}", WARN)]
     return [(title, BOLD), (f"  {src}, {age(record.get('at'), now)}", DIM)]
 
 
@@ -573,6 +624,9 @@ def not_read(record: dict | None, width: int) -> list[Line]:
         return [[("  " + part, FAILED)] for part in wrap_cells(text, max(10, width - 4), indent="  ")]
     if record is not None and ok_data(record) is None:
         return [[("  not read: the answer had no data", FAILED)]]
+    if stale(record):
+        text = clean(f"{STALE} stale: the last good value; the fresh read failed: {record.get('why') or 'no answer'}")
+        return [[("  " + part, WARN)] for part in wrap_cells(text, max(10, width - 4), indent="  ")]
     return []
 
 
