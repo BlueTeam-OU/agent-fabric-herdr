@@ -67,23 +67,16 @@ impl HeadlessServer {
         choice.claims()
     }
 
-    /// Every shell client plays it, as each plays upstream's semantic sounds;
-    /// a foreground terminal-attach client gets it as upstream's sound
-    /// notifications reach it. A shell client without the fork ignores it.
+    /// Every shell client plays it, as each plays upstream's semantic
+    /// sounds; a shell client without the fork ignores it. Only shell
+    /// clients hear transition sounds: the foreground client is always a
+    /// shell (the handshake and every promotion name one), so no
+    /// terminal-attach client is ever sent one (review F2).
     fn send_transition_sound(&mut self, label: String) {
-        let notify = || ServerMessage::Notify {
+        self.send_to_client_shells(ServerMessage::Notify {
             kind: protocol::NotifyKind::Sound,
-            message: label.clone(),
+            message: label,
             body: None,
-        };
-        self.send_to_client_shells(notify());
-        let foreground_attach = self.foreground_client_id.filter(|id| {
-            self.clients
-                .get(id)
-                .is_some_and(|client| !matches!(client.mode, ClientConnectionMode::ClientShell))
         });
-        if let Some(client_id) = foreground_attach {
-            self.send_to_client(client_id, notify());
-        }
     }
 }
