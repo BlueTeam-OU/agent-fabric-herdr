@@ -338,3 +338,57 @@ fn the_menus_paste_clears_the_selection_as_a_host_paste_does() {
     assert_eq!(pasted(&outcome, "pane_1").as_deref(), Some("ls"));
     assert!(state.selection.is_none());
 }
+
+#[test]
+fn without_copy_on_select_ctrl_alt_c_copies_a_retained_selection_even_with_shortcuts_off() {
+    let mut config = Config::default();
+    config.ui.clipboard_shortcuts = false;
+    config.ui.copy_on_select = false;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    select_in_pane_1(&mut state);
+
+    let outcome = state.handle_raw_events(vec![RawInputEvent::Key(ctrl_alt('c'))]);
+
+    assert!(
+        requests_selection_read(&outcome),
+        "the selection has no other key"
+    );
+    assert!(!forwards_a_key(&outcome, "pane_1"));
+}
+
+#[test]
+fn a_configured_ctrl_alt_c_binding_wins_over_the_copy_key() {
+    let mut config = Config::default();
+    config.keys.zoom = crate::config::BindingConfig::One("ctrl+alt+c".to_owned());
+    assert!(config.collect_diagnostics().is_empty());
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    select_in_pane_1(&mut state);
+
+    let outcome = state.handle_raw_events(vec![RawInputEvent::Key(ctrl_alt('c'))]);
+
+    assert!(
+        !requests_selection_read(&outcome),
+        "the binding took the key"
+    );
+    assert!(!outcome.actions.is_empty(), "the binding ran");
+}
+
+#[test]
+fn ctrl_alt_c_after_the_prefix_is_the_prefix_commands_key() {
+    let mut state = shortcuts_state(true);
+    select_in_pane_1(&mut state);
+    state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        KeyCode::Char('6'),
+        KeyModifiers::CONTROL,
+    ))]);
+    assert_eq!(state.mode, ClientShellMode::Prefix);
+
+    let outcome = state.handle_raw_events(vec![RawInputEvent::Key(ctrl_alt('c'))]);
+
+    assert!(!requests_selection_read(&outcome));
+    assert_ne!(state.mode, ClientShellMode::Prefix, "prefix mode ended");
+}

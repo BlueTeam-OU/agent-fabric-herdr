@@ -238,7 +238,15 @@ const DESKTOP: &[&str] = &[
 /// herdr's own keys outside the prefix (src/client/shell/input.rs and
 /// src/server/pane_input.rs): copy, paste into the pane, scroll herdr's
 /// scrollback.
-const HERDR_KEYS: &[&str] = &["ctrl+alt+c", "ctrl+alt+p", "alt+pageup", "alt+pagedown"];
+const HERDR_KEYS: &[&str] = &[
+    "ctrl+alt+c",
+    "ctrl+alt+p",
+    "alt+pageup",
+    "alt+pagedown",
+    // cmd+c copies and cmd+v pastes (macOS) where the host forwards cmd.
+    "super+c",
+    "super+v",
+];
 
 fn same_key(a: &crate::input::TerminalKey, b: &crate::input::TerminalKey) -> bool {
     a.code == b.code && a.modifiers == b.modifiers

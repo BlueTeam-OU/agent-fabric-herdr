@@ -71,6 +71,7 @@ something is selected or on the clipboard. herdr keeps only these:
 | **ctrl+6** | the prefix: herdr's commands are ctrl+6 then a key (`ctrl+6 q` detaches; the `prefix+f/a/p` keys below); ctrl+6 twice sends ctrl+6 to the pane. A legacy terminal sends it as ctrl+^ (0x1e), which works too. |
 | **ctrl+alt+c** | copies the selection |
 | **ctrl+alt+p** | pastes the clipboard's text into the pane |
+| **cmd+c / cmd+v** | copy and paste, where a macOS terminal forwards cmd |
 | **alt+PageUp / alt+PageDown** | scroll herdr's scrollback, when the pane is on its main screen with no mouse reporting (otherwise they reach the pane) |
 | the **mouse** | selection, menus and scrolling |
 
@@ -84,8 +85,10 @@ something is selected or on the clipboard. herdr keeps only these:
   pane. ctrl+v goes to the harness, which pastes itself (Claude Code reads an
   image from the clipboard).
 - To scroll, use alt+PageUp/PageDown or the mouse wheel.
-- `[ui] clipboard_shortcuts = false` gives ctrl+alt+c and ctrl+alt+p to the
-  pane as well.
+- `[ui] clipboard_shortcuts = false` gives ctrl+alt+p to the pane as well,
+  and ctrl+alt+c unless `copy_on_select = false` (then it is the only key
+  that copies a kept selection). A herdr binding configured on either key
+  wins over it.
 
 **Why these keys.** Each was checked on 2026-10-10 against what the
 harnesses bind, and against what the owner's desktop and terminal keep for
@@ -105,9 +108,9 @@ themselves (herdr never receives those).
   - the Qubes clipboard: ctrl+shift+c/v.
 
 Upstream's prefix, ctrl+b, is Claude Code's "background the task", and
-Codex's and readline's backward-char. Upstream's ctrl+c/ctrl+v copy and
-paste, and its plain PageUp/PageDown scrolling, took keys every harness
-uses.
+Codex's and readline's backward-char. Upstream's plain PageUp/PageDown
+scrolling, and this fork's earlier ctrl+c/ctrl+v copy and paste (60764f3f),
+took keys every harness uses.
 
 `src/client/shell/tests/harness_keys.rs` pins all of it:
 - **The lists.** Each harness's keys and the desktop's are written there. The

@@ -692,10 +692,16 @@ impl ClientShellState {
             return None;
         }
         self.word_selection_gesture = None;
-        if self.mode != ClientShellMode::Copy
+        // Only in terminal mode, and a configured binding on the same key
+        // wins, as it does for paste: in prefix mode the key is the prefix
+        // command's. Without copy-on-select a retained selection needs a key to
+        // be copied at all, so the key copies then whatever
+        // clipboard_shortcuts says.
+        if self.mode == ClientShellMode::Terminal
             && self.copy_or_terminal_mode() != ClientShellMode::Copy
-            && self.config.clipboard_shortcuts
+            && (self.config.clipboard_shortcuts || !self.config.copy_on_select)
             && is_retained_selection_copy_key(key)
+            && crate::input::resolve_direct_binding(&self.config.keybinds.keybinds, key).is_none()
         {
             // herdr's key whether or not something is selected: a legacy host
             // sends ctrl+alt+c as ESC 0x03, which a shell would take as an

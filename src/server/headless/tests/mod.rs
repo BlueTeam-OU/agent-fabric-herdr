@@ -5886,19 +5886,22 @@ fn client_page_keys_forward_when_modified_or_owned_by_application() {
         );
     });
 
+    // herdr's alt+PageUp goes to an application that owns its page keys.
     with_terminal_attach_runtime(b"\x1b[?1h", 0, |runtime, input_rx| {
         apply_client_pane_input_events(
             runtime,
             &[client_page_key(
                 crate::protocol::ClientKeyCode::PageUp,
-                crossterm::event::KeyModifiers::empty(),
+                crossterm::event::KeyModifiers::ALT,
                 crate::protocol::ClientKeyKind::Press,
             )],
         )
-        .expect("application PageUp");
+        .expect("application alt+PageUp");
         assert_eq!(
-            input_rx.try_recv().expect("forwarded application PageUp"),
-            Bytes::from_static(b"\x1b[5~")
+            input_rx
+                .try_recv()
+                .expect("forwarded application alt+PageUp"),
+            Bytes::from_static(b"\x1b[5;3~")
         );
         assert_eq!(
             runtime
