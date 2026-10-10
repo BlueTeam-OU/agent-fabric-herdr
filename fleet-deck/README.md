@@ -54,8 +54,21 @@ fleet-deck start     # starts what is missing, without attaching
 - **Outside FleetDeck's panes only.** `server.socket_access = "outside_panes"`
   refuses a pane's processes, so `fleet-deck` refuses to start anything from
   inside a pane (a FleetDeck popup is the operator's own and may).
-- **Install** once, on the operator's login:
-  `ln -s <this checkout>/fleet-deck/fleet-deck ~/.local/bin/fleet-deck`.
+- **Install**, and after each update of this checkout, run this on the
+  operator's login, from an ordinary terminal (not a pane):
+  `<this checkout>/fleet-deck/install` (`--dry-run` shows the steps).
+  - It builds `agent-fabric-fleetdeck` once (`--jobs 4` by default), installs it
+    into `~/.local/bin` by rename, and links `fleet-deck` beside it.
+  - If FleetDeck has no config yet, it copies `~/.config/herdr/config.toml`
+    across. An existing config is never overwritten.
+  - It then hands the running server's panes to the new binary by live
+    handoff. A running FleetDeck server is handed off by its own CLI. A
+    running `herdr` server from before the rename is handed off by `herdr`'s
+    CLI, and its panes keep running under FleetDeck's directories.
+    Afterwards, attach with `agent-fabric-fleetdeck` and run
+    `fleet-deck restart`.
+  - It never stops a server or a pane. A refused or failed handoff leaves the
+    old server and every pane as they were.
 
 `fabric-deck` is the controller itself; `fleet-deck` starts it. Run in a
 terminal by hand, it still refuses to run beside another deck.

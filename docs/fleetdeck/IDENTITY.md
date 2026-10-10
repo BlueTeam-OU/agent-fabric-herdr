@@ -71,7 +71,18 @@ with every command spelled `agent-fabric-fleetdeck`.
 ## Moving an existing installation
 
 The fork ran as `herdr`, and it still does until FleetDeck is installed.
-Nothing is moved for you. Do these steps once, as the login that runs it:
+Nothing is moved until you ask.
+
+**On the fleet's operator login, one command does the steps below.** Run
+`<checkout>/fleet-deck/install` from an ordinary terminal (`--dry-run`
+first). It builds and installs the binary, copies the herdr config when
+FleetDeck has none, and links `fleet-deck`. Then it asks the running
+`herdr` server, through `herdr`'s own CLI, to hand its panes to
+`agent-fabric-fleetdeck` by live handoff, so no agent is stopped
+(`fleet-deck/README.md`). This is the one place FleetDeck takes over a
+Herdr server, and only because you ran it.
+
+By hand, as the login that runs it:
 
 1. **Install `agent-fabric-fleetdeck`.** Before FleetDeck's first release,
    build it (`cargo build --release`) and put
