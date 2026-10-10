@@ -438,3 +438,22 @@ fn ctrl_alt_c_copies_a_selection_dragged_in_navigate_mode() {
         "the selection was copied, not dropped"
     );
 }
+
+#[test]
+fn in_navigate_mode_with_nothing_selected_a_navigate_binding_keeps_ctrl_alt_c() {
+    let config: Config =
+        toml::from_str("[keys]\nnavigate_workspace_up = \"ctrl+alt+c\"\n").expect("parses");
+    assert!(config.collect_diagnostics().is_empty());
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.mode = ClientShellMode::Navigate;
+
+    let outcome = state.handle_raw_events(vec![RawInputEvent::Key(ctrl_alt('c'))]);
+
+    assert!(!requests_selection_read(&outcome));
+    assert!(
+        outcome.repaint || !outcome.actions.is_empty() || !outcome.requests.is_empty(),
+        "the navigate binding handled the key"
+    );
+}

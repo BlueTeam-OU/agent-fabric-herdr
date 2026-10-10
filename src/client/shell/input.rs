@@ -693,12 +693,22 @@ impl ClientShellState {
         }
         self.word_selection_gesture = None;
         // Not in prefix mode, where the key is the prefix command's, nor in
-        // copy mode, which copies its own way. Navigate and resize mode keep a
-        // mouse selection, so the key copies there too. A configured binding or
-        // prefix on the same key wins, as it does for paste. Without
-        // copy-on-select a retained selection needs a key to be copied at all,
-        // so the key copies then whatever clipboard_shortcuts says.
-        if !matches!(self.mode, ClientShellMode::Prefix | ClientShellMode::Copy)
+        // copy mode, which copies its own way. In terminal mode the key is
+        // herdr's unless a configured direct binding or the prefix is on it, as
+        // for paste. Navigate and resize mode keep a mouse selection, so the
+        // key copies there too, but only over a visible selection: otherwise it
+        // is left to that mode's own bindings. Without copy-on-select a
+        // retained selection needs a key to be copied at all, so the key copies
+        // then whatever clipboard_shortcuts says.
+        let selection_visible = self
+            .selection
+            .as_ref()
+            .is_some_and(crate::selection::Selection::is_visible);
+        if (self.mode == ClientShellMode::Terminal
+            || matches!(
+                self.mode,
+                ClientShellMode::Navigate | ClientShellMode::Resize
+            ) && selection_visible)
             && self.copy_or_terminal_mode() != ClientShellMode::Copy
             && (self.config.clipboard_shortcuts || !self.config.copy_on_select)
             && is_retained_selection_copy_key(key)
@@ -708,11 +718,7 @@ impl ClientShellState {
             // herdr's key whether or not something is selected: a legacy host
             // sends ctrl+alt+c as ESC 0x03, which a shell would take as an
             // interrupt.
-            if self
-                .selection
-                .as_ref()
-                .is_some_and(crate::selection::Selection::is_visible)
-            {
+            if selection_visible {
                 self.request_selection_copy(outcome, true);
                 self.selection = None;
                 self.stop_selection_autoscroll();
