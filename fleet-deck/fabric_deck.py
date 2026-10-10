@@ -191,7 +191,9 @@ def parse_state_line(line: str) -> StateRecord | None:
     return StateRecord(
         login=login,
         host=host,
-        state=text_or(row.get("state"), "unknown"),
+        # Only a record that says "unknown" withholds its sessions (live_of):
+        # a row without a state keeps them.
+        state=text_or(row.get("state"), ""),
         sessions=sessions,
         ts=ts,
         last_session=text_or(row.get("last_session"), None),
@@ -220,10 +222,13 @@ def for_this_host(record: StateRecord | None, host: str | None) -> bool:
 
 
 def live_of(record: StateRecord | None, now_utc: datetime.datetime) -> Live | None:
-    # A record whose state is "unknown" (the account cannot read its session
-    # state: sessions [] and a fresh ts, agent-fabric #179) says nothing about
-    # sessions. Read as live = 0 it would note a fall, and a session that died
-    # with herdr would not be resumed; it is no record instead.
+    # A record whose state is "unknown" says nothing about sessions, whatever
+    # its ts and sessions[] show. ctl writes it for an account that cannot
+    # read its session state (sessions [] and a fresh ts, agent-fabric #179),
+    # and for a row older than two heartbeats (ts and sessions kept). Read as
+    # live = 0, the first would note a fall, and a session that died with
+    # herdr would not be resumed. Read as live, the second would show a
+    # session that may be gone as running elsewhere. It is no record instead.
     if record is None or record.state == "unknown":
         return None
     posted = parse_utc(record.ts)
@@ -970,7 +975,8 @@ class Deck:
         for login in self.placed:
             live = self.live(login)
             current = befores.get(login, Before())
-            if live is not None:
+            # A stale record changes nothing (README): neither a rise nor a fall.
+            if live is not None and live.fresh:
                 if live.count >= 1:
                     self.unsettled.discard(login)
                 # Undecided (pending, or awaiting a retry of its restore), or
