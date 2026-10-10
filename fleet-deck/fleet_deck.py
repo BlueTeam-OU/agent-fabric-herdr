@@ -26,7 +26,10 @@ import time
 from typing import Callable
 
 from fabric_deck import (
+    BIN,
     BOARD_DIR,
+    PANE_MARKER,
+    fleetdeck_env,
     herdr_socket_path,
     lock_holder,
     lock_path,
@@ -52,10 +55,12 @@ def log_path() -> str:
 
 
 def in_herdr_pane() -> bool:
-    """Whether this process runs inside a herdr pane. herdr marks a pane's
-    environment with HERDR_ENV=1 and a popup's with HERDR_POPUP=1 as well;
-    a popup is the operator's own configured command and may drive the deck."""
-    return os.environ.get("HERDR_ENV") == "1" and os.environ.get("HERDR_POPUP") != "1"
+    """Whether this process runs inside a FleetDeck pane. FleetDeck marks a
+    pane's environment with HERDR_ENV=1 and AGENT_FABRIC_FLEETDECK=1, and a
+    popup's with HERDR_POPUP=1 as well; a popup is the operator's own
+    configured command and may drive the deck. A Herdr pane is not one."""
+    env = fleetdeck_env()
+    return env.get(PANE_MARKER) == "1" and env.get("HERDR_POPUP") != "1"
 
 
 # The prefix herdr's tests check against every harness's keys
@@ -64,11 +69,12 @@ CHECKED_PREFIXES = frozenset({"ctrl+6", "ctrl+^"})
 
 
 def herdr_config_path() -> str:
-    """herdr's config file, as herdr resolves it (src/config/io.rs config_path)."""
-    if os.environ.get("HERDR_CONFIG_PATH"):
-        return os.environ["HERDR_CONFIG_PATH"]
-    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
-    return os.path.join(base, "herdr", "config.toml")
+    """FleetDeck's config file, as it resolves it (src/config/io.rs config_path)."""
+    env = fleetdeck_env()
+    if env.get("HERDR_CONFIG_PATH"):
+        return env["HERDR_CONFIG_PATH"]
+    base = env.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(base, BIN, "config.toml")
 
 
 def configured_prefix(path: str) -> list[str] | None:
@@ -151,16 +157,16 @@ def server_up() -> tuple[int, int] | None:
 def ensure_server(say: Callable[[str], None]) -> bool:
     if server_up():
         return True
-    if shutil.which("herdr") is None:
-        say("herdr is not on PATH")
+    if shutil.which(BIN) is None:
+        say(f"{BIN} is not on PATH")
         return False
-    say("starting herdr's server")
-    spawn_detached(["herdr", "server"], None)
+    say(f"starting {BIN}'s server")
+    spawn_detached([BIN, "server"], None)
     if wait_for(server_up, SERVER_READY_S):
         return True
     # herdr writes its own log; its stderr is /dev/null once detached.
     say(f"herdr's server did not answer within {SERVER_READY_S}s; "
-        "`herdr server` in a terminal shows why")
+        f"`{BIN} server` in a terminal shows why")
     return False
 
 
@@ -252,7 +258,7 @@ def status(say: Callable[[str], None]) -> int:
 
 
 def attach() -> int:
-    os.execvp("herdr", ["herdr"])
+    os.execvp(BIN, [BIN])
     return 127  # not reached
 
 
