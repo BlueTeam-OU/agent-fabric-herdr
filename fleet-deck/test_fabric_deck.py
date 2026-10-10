@@ -6,8 +6,9 @@ import unittest
 
 from deck_tabs import RESTORE_WAIT_S, RESUME, SAME_SESSION_S, SETTLE_S, WAIT, WATCH, Before, Shown
 from fabric_deck import (
-    NEW_WORKSPACE,
+    BOARD_DIR,
     PANE_MAP_REFRESH_S,
+    NEW_WORKSPACE,
     RESEND_AFTER_S,
     RESTORE_SETTLE_S,
     Account,
@@ -125,6 +126,11 @@ def record(login, *states, age_s=10):
 
 BARE = {"shell_pid": 10, "foreground_process_group_id": 10,
         "foreground_processes": [{"pid": 10, "argv": ["bash"]}]}
+# The fleet board, as fabric-view's launcher leaves it in its pane.
+BOARD = {"shell_pid": 30, "foreground_process_group_id": 30, "foreground_processes": [{"pid": 30, "argv": [
+    "/usr/local/bin/fabric-python", "-B", "-c",
+    "import sys; sys.path.insert(0, sys.argv[1]); from fabric_view import main; raise SystemExit(main(sys.argv[2:]))",
+    "/home/user/projects/herdr/fleet-deck", "board"]}]}
 # A shell still running the operator's rc file: neither bare nor moveto.
 BUSY = {"shell_pid": 10, "foreground_process_group_id": 11,
         "foreground_processes": [{"pid": 11, "argv": ["direnv", "hook"]}]}
@@ -134,6 +140,13 @@ def in_moveto(login, mode="", pid=20):
     argv = ["sudo", "-n", "-u", login, "-H", ENTER, f"/home/{login}/projects", login]
     return {"shell_pid": 10, "foreground_process_group_id": pid,
             "foreground_processes": [{"pid": pid, "argv": argv + ([mode] if mode else [])}]}
+
+
+def in_ssh(login, word, pid=20):
+    """moveto --via ssh: the operator's ssh into the account's forced command."""
+    argv = ["ssh", "-t", "-i", "/home/user/.ssh/fabric_deck", f"{login}@127.0.0.1", "--", word]
+    return {"shell_pid": 10, "foreground_process_group_id": pid,
+            "foreground_processes": [{"pid": pid, "argv": argv}]}
 
 
 class FakeHerdr(Herdr):
@@ -153,6 +166,7 @@ class FakeHerdr(Herdr):
         self.new_pane = BARE
         self.workspace_lists_ok = None  # after this many, `workspace list` fails
         self.fail_once = set()  # (subcommand, pane) pairs whose next call fails
+        self.plugin_linked = True
 
     def _id(self, kind):
         self.n += 1
@@ -216,6 +230,19 @@ class FakeHerdr(Herdr):
             return {"process_info": self.proc[args[3]]}
         if head[0] == "pane" and head[1] in ("run", "report-agent", "report-metadata", "release-agent"):
             return {}
+        if args[:3] == ("plugin", "pane", "open"):
+            if not self.plugin_linked:
+                raise RuntimeError("herdr plugin pane open: exit 1: plugin_not_found")
+            pane = self._id("p")
+            tab = self.add_tab(None, [(pane, None, BOARD)], args[args.index("--workspace") + 1])
+            return {"plugin_pane": {"plugin_id": args[4], "entrypoint": args[6],
+                                    "pane": {"pane_id": pane, "tab_id": tab}}}
+        if head == ("tab", "rename"):
+            for tabs in self.tabs.values():
+                for tab in tabs:
+                    if tab["tab_id"] == args[2]:
+                        tab["label"] = args[3]
+            return {}
         raise AssertionError(f"unexpected herdr call {args}")
 
 
@@ -226,7 +253,7 @@ class Harness:
     """A deck over a FakeHerdr, with the stream's records, a /proc tree and
     the record of what was shown as plain values a test sets."""
 
-    def __init__(self, herdr=None, logins=("ui",), modes=ALL_MODES, befores=None):
+    def __init__(self, herdr=None, logins=("ui",), modes=ALL_MODES, befores=None, fleet_tab=False):
         self.herdr = herdr or FakeHerdr()
         self.records = {}
         self.tree, self.argvs = {}, {}
@@ -253,6 +280,9 @@ class Harness:
             server=lambda: None if self.herdr.down else self.instance,
             log=self.logs.append,
             utc=lambda: self.wall,
+            # The account tabs' tests count herdr calls: the fleet tab is
+            # tested on its own (FleetTab).
+            fleet_tab=fleet_tab,
         )
 
     def at(self, deck_s):
@@ -269,6 +299,116 @@ class Harness:
 
 def harness_of(h, login="ui"):
     return h.deck.harness_pane[login]
+
+
+class FleetTab(unittest.TestCase):
+    def tabs(self, h):
+        return [(w, t["label"]) for w, ts in h.herdr.tabs.items() for t in ts]
+
+    def test_a_restore_opens_the_board_as_a_tab_labelled_fleet_once(self):
+        h = Harness(fleet_tab=True)
+        h.deck.restore(0)
+        opened = [c for c in h.herdr.calls if c[:3] == ("plugin", "pane", "open")]
+        self.assertEqual(len(opened), 1)
+        self.assertIn("--no-focus", opened[0])
+        self.assertEqual(opened[0][opened[0].index("--entrypoint") + 1], "board")
+        self.assertIn(("w1", "fleet"), self.tabs(h))
+        h.deck.restore(10)
+        self.assertEqual(len([c for c in h.herdr.calls if c[:3] == ("plugin", "pane", "open")]), 1)
+
+    def test_a_fleet_tab_running_the_board_anywhere_is_kept_and_none_is_added(self):
+        h = Harness(fleet_tab=True)
+        h.herdr.workspace_list.append({"workspace_id": "w9", "label": "Ops"})
+        h.herdr.tabs["w9"] = []
+        h.herdr.add_tab("fleet", [("p90", None, BOARD)], "w9")
+        h.deck.restore(0)
+        self.assertFalse([c for c in h.herdr.calls if c[:3] == ("plugin", "pane", "open")])
+
+    def test_a_fleet_tab_herdr_brought_back_as_a_bare_shell_gets_the_board_again(self):
+        # Measured on a real herdr: a session restore keeps the tab's label
+        # and gives its pane a shell, not the plugin's program.
+        h = Harness(fleet_tab=True)
+        old = h.herdr.add_tab("fleet", [("p90", None, BARE)])
+        h.herdr.panes["p90"]["cwd"] = BOARD_DIR
+        h.deck.restore(0)
+        self.assertIn(("tab", "close", old), h.herdr.calls)
+        self.assertEqual(len([c for c in h.herdr.calls if c[:3] == ("plugin", "pane", "open")]), 1)
+        self.assertEqual([t for _, t in self.tabs(h)].count("fleet"), 1)
+
+    def test_a_persons_shell_tab_named_fleet_elsewhere_is_never_closed(self):
+        h = Harness(fleet_tab=True)
+        tab = h.herdr.add_tab("fleet", [("p90", None, BARE)])
+        h.herdr.panes["p90"]["cwd"] = "/home/user/projects"
+        h.deck.restore(0)
+        self.assertNotIn(("tab", "close", tab), h.herdr.calls)
+        self.assertFalse([c for c in h.herdr.calls if c[0] == "plugin"])
+
+    def test_a_fleet_tab_whose_shell_has_not_started_is_looked_at_again_at_the_next_map_read(self):
+        h = Harness(fleet_tab=True)
+        tab = h.herdr.add_tab("fleet", [("p90", None, {"shell_pid": None, "foreground_processes": []})])
+        h.herdr.panes["p90"]["cwd"] = BOARD_DIR
+        h.deck.restore(0)
+        self.assertNotIn(("tab", "close", tab), h.herdr.calls)
+        self.assertFalse([l for l in h.logs if "something else" in l])
+        h.herdr.proc["p90"] = BARE
+        h.deck.follow(PANE_MAP_REFRESH_S + 1)
+        self.assertIn(("tab", "close", tab), h.herdr.calls)
+        self.assertEqual(len([c for c in h.herdr.calls if c[:3] == ("plugin", "pane", "open")]), 1)
+
+    def test_an_unsettled_fleet_tab_a_person_closes_is_not_reopened_before_the_next_restore(self):
+        h = Harness(fleet_tab=True)
+        tab = h.herdr.add_tab("fleet", [("p90", None, {"shell_pid": None, "foreground_processes": []})])
+        h.herdr.panes["p90"]["cwd"] = BOARD_DIR
+        h.deck.restore(0)
+        h.herdr.call("tab", "close", tab)
+        h.deck.follow(PANE_MAP_REFRESH_S + 1)
+        h.deck.follow(2 * PANE_MAP_REFRESH_S + 2)
+        self.assertFalse([c for c in h.herdr.calls if c[:3] == ("plugin", "pane", "open")])
+
+    def test_herdr_failing_while_an_unsettled_fleet_tab_is_looked_at_again_leaves_the_deck_running(self):
+        h = Harness(fleet_tab=True)
+        h.herdr.add_tab("fleet", [("p90", None, {"shell_pid": None, "foreground_processes": []})])
+        h.herdr.panes["p90"]["cwd"] = BOARD_DIR
+        h.deck.restore(0)
+        tabs = h.herdr.account_tabs
+
+        def then_down(logins):
+            got = tabs(logins)
+            h.herdr.down = True        # the server goes between the map read and the look
+            return got
+        h.herdr.account_tabs = then_down
+        h.deck.follow(PANE_MAP_REFRESH_S + 1)   # must not raise
+        self.assertIsNotNone(h.deck.fleet_unsettled)   # looked at again once herdr answers
+        h.herdr.down = False
+        h.herdr.account_tabs = tabs
+        h.herdr.proc["p90"] = BARE
+        h.deck.follow(2 * PANE_MAP_REFRESH_S + 2)
+        self.assertEqual(len([c for c in h.herdr.calls if c[:3] == ("plugin", "pane", "open")]), 1)
+
+    def test_a_fleet_tab_running_something_else_is_left_alone_and_said_once(self):
+        h = Harness(fleet_tab=True)
+        tab = h.herdr.add_tab("fleet", [("p90", None, in_moveto("ui"))])
+        h.deck.restore(0)
+        h.deck.restore(10)
+        self.assertNotIn(("tab", "close", tab), h.herdr.calls)
+        self.assertFalse([c for c in h.herdr.calls if c[0] == "plugin"])
+        self.assertEqual(sum("runs something else" in l for l in h.logs), 1)
+
+    def test_an_account_only_restore_leaves_the_fleet_tab_alone(self):
+        h = Harness(fleet_tab=True)
+        h.deck.restore(0, only={"ui"})
+        self.assertFalse([c for c in h.herdr.calls if c[0] == "plugin"])
+
+    def test_a_plugin_not_linked_is_said_once_and_the_accounts_are_restored(self):
+        h = Harness(fleet_tab=True)
+        h.herdr.plugin_linked = False
+        h.deck.restore(0)
+        h.deck.restore(10)
+        said = [l for l in h.logs if "no fleet tab" in l]
+        self.assertEqual(len(said), 1)
+        self.assertIn("herdr plugin link", said[0])
+        self.assertIn(("w1", "ui"), self.tabs(h))
+        self.assertNotIn(("w1", "fleet"), self.tabs(h))
 
 
 class Restore(unittest.TestCase):
@@ -484,6 +624,32 @@ class Restore(unittest.TestCase):
         h.deck.follow(RESTORE_SETTLE_S)
         self.assertEqual(h.herdr.runs(), [], "nothing is typed while moveto runs")
         self.assertEqual(h.herdr.reports("p0")[0][-1], "working")
+
+    def test_a_tab_entered_over_ssh_is_classified_like_a_sudo_one_from_the_stream(self):
+        herdr = FakeHerdr()
+        herdr.add_tab("ui", [("p0", "harness", in_ssh("ui", WAIT)), ("p1", "shell", in_ssh("ui", "shell")),
+                             ("p2", "status", in_ssh("ui", WATCH))])
+        h = Harness(herdr)
+        h.records["ui"] = record("ui", "working")
+        h.deck.restore(0)
+        h.deck.follow(RESTORE_SETTLE_S)
+        self.assertEqual(h.herdr.runs(), [], "nothing is typed while ssh runs the account")
+        self.assertEqual(h.herdr.reports("p0")[0][-1], "working")
+        h.records["ui"] = record("ui", "none")
+        h.deck.follow(RESTORE_SETTLE_S + 30)
+        self.assertEqual(h.herdr.runs(), [])
+        self.assertIn("idle=shell", h.herdr.reports("p0")[-1])
+
+    def test_an_ssh_pane_with_a_stale_record_is_left_as_it_was(self):
+        herdr = FakeHerdr()
+        herdr.add_tab("ui", [("p0", "harness", in_ssh("ui", WAIT)), ("p1", "shell", in_ssh("ui", "shell")),
+                             ("p2", "status", in_ssh("ui", WATCH))])
+        h = Harness(herdr)
+        h.records["ui"] = record("ui", "working", age_s=10_000)
+        h.deck.restore(0)
+        h.deck.follow(RESTORE_SETTLE_S)
+        self.assertEqual(h.herdr.runs(), [])
+        self.assertNotIn("working", [r[-1] for r in h.herdr.reports("p0")])
 
     def test_an_account_with_an_unsafe_login_is_never_typed(self):
         h = Harness(logins=("ui; rm -rf ~",))

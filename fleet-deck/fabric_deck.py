@@ -37,6 +37,7 @@ from deck_tabs import (
     RESTORE_WAIT_S,
     RESUME,
     SHELL,
+    SSH,
     STATUS,
     WAIT,
     WATCH,
@@ -63,6 +64,15 @@ from deck_tabs import (
 # The workspace an account goes to when the catalogue names no group for it,
 # or when its group's workspace no longer exists (the operator removed it).
 NEW_WORKSPACE = "New"
+# The fleet board's own tab: the views' plugin (herdr-plugin.toml), its
+# board entrypoint, under this label. No login is this word: a login with
+# a hyphenated suffix or a digit is what the registry places.
+FLEET_TAB = "fleet"
+FLEET_PLUGIN = "fabric.fleet"
+FLEET_ENTRYPOINT = "board"
+# The plugin's root, where herdr starts and restores the board's pane: this
+# file's directory, as README's `herdr plugin link <checkout>/fleet-deck`.
+BOARD_DIR = os.path.dirname(os.path.realpath(__file__))
 
 # A login is typed into the operator's shell as part of a moveto command, so
 # only a plain Linux login is ever used; anything else is skipped, said.
@@ -225,6 +235,46 @@ def printable(text: str) -> str:
 
 
 # ------------------------------------------------------- the process walk
+
+
+# Shells a restored pane starts: herdr's default program for a pane.
+SHELLS = frozenset({"bash", "zsh", "sh", "fish", "dash", "ksh", "tcsh"})
+
+
+def is_board(argv: list[str]) -> bool:
+    """fabric-view's board: the launcher execs a Python whose `-c` code
+    imports fabric_view, with the mode as the last argument."""
+    return bool(argv) and argv[-1] == FLEET_ENTRYPOINT and any(
+        "from fabric_view import main" in arg for arg in argv[1:])
+
+
+def same_dir(a: str | None, b: str) -> bool:
+    return isinstance(a, str) and os.path.realpath(a) == os.path.realpath(b)
+
+
+def at_bare_shell(info: dict) -> bool:
+    """A shell at its prompt: its own foreground group, and a shell's argv.
+    A plugin pane's program also leads its own group, so the group alone
+    would take a running view for a shell."""
+    shell, group = info.get("shell_pid"), info.get("foreground_process_group_id")
+    if shell is None or shell != group:
+        return False
+    fg = info.get("foreground_processes") or []
+    return bool(fg) and all(os.path.basename((p.get("argv") or ["?"])[0]).lstrip("-") in SHELLS for p in fg)
+
+
+def ssh_harness(live: Live | None) -> bool | None:
+    """Whether a harness runs in a pane entered over ssh, from the stream.
+    sshd starts the account's session, so its harness is no descendant of
+    the pane's `ssh` and the /proc walk cannot see it; nothing the deck may
+    read links an ssh client to the sshd session it opened. The account's
+    live session is taken as this pane's: the deck armed it, and an Enter
+    in a second pane is refused by fabric-resume. A session started
+    elsewhere therefore reads as running here, never as `running
+    elsewhere`. A stale or missing record says nothing (None)."""
+    if live is None or not live.fresh:
+        return None
+    return live.count >= 1
 
 
 def proc_parents(proc_root: str = "/proc") -> dict[int, int]:
@@ -450,6 +500,10 @@ class Deck:
     said: set[str] = field(default_factory=set)
     mapped_at: float | None = None
     lost: bool = False
+    fleet_tab: bool = True
+    # The fleet tab whose pane had not started its program when last looked
+    # at: looked at again at a map read while it is still there as `fleet`.
+    fleet_unsettled: str | None = None
 
     # ------------------------------------------------------------ restore
 
@@ -500,7 +554,61 @@ class Deck:
                     self.herdr.call("tab", "close", tab_id)
                 except Exception as error:
                     self.log(f"cannot close the spare tab {tab_id}: {printable(str(error))}")
+        if only is None and self.fleet_tab:
+            self._restore_fleet_tab()
         self.mapped_at = now
+
+    def _restore_fleet_tab(self, recheck: str | None = None) -> None:
+        """The fleet board as a tab of its own, labelled `fleet`, in the first
+        workspace, made only when no tab has that label: like an account's
+        pane, one a person closes stays closed until the next restore. The
+        board is opened unfocused, so it reads once and waits for a look.
+        `recheck` is the tab left unsettled at the last look: at a map read
+        only that tab is looked at again, and only while it is still there
+        as `fleet`. Every herdr call is in here, under the handler, so a
+        herdr failure is said and never ends the deck."""
+        try:
+            workspaces = self.herdr.workspaces()
+            listings = [(w, self.herdr.call("tab", "list", "--workspace", w["workspace_id"])) for w in workspaces]
+            if recheck is not None and not any(
+                    tab.get("tab_id") == recheck and tab.get("label") == FLEET_TAB
+                    for _, listing in listings for tab in listing.get("tabs", [])):
+                # The unsettled tab was closed or renamed by a person since:
+                # theirs until the next restore, and nothing is opened.
+                self.fleet_unsettled = None
+                return
+            for workspace, listing in listings:
+                for tab in listing.get("tabs", []):
+                    if tab.get("label") != FLEET_TAB:
+                        continue
+                    if recheck is not None and tab.get("tab_id") != recheck:
+                        continue
+                    held = self._fleet_tab_holds(tab["tab_id"])
+                    self.fleet_unsettled = tab["tab_id"] if held == "unsettled" else None
+                    if held == "remnant":
+                        # herdr restores a tab by its label but not a plugin
+                        # pane's program: the board's tab comes back as the
+                        # operator's bare shell. That tab is the deck's own.
+                        self.herdr.call("tab", "close", tab["tab_id"])
+                        self.log(f"the {FLEET_TAB} tab held only a shell after herdr came back; reopening the board")
+                        break
+                    if held == "other":
+                        self._say("fleet-tab-other", f"the {FLEET_TAB} tab runs something else; left alone")
+                    # unsettled: looked at again at the next map read.
+                    return
+                else:
+                    continue
+                break
+            if not workspaces:
+                return
+            made = self.herdr.call("plugin", "pane", "open", "--plugin", FLEET_PLUGIN,
+                                   "--entrypoint", FLEET_ENTRYPOINT,
+                                   "--workspace", workspaces[0]["workspace_id"], "--no-focus")
+            self.herdr.call("tab", "rename", made["plugin_pane"]["pane"]["tab_id"], FLEET_TAB)
+            self.log(f"opened the {FLEET_TAB} tab")
+        except Exception as error:  # the board is a view: no account's tab waits on it
+            self._say("fleet-tab", f"no {FLEET_TAB} tab: {printable(str(error))} "
+                      f"(is {FLEET_PLUGIN} linked? herdr plugin link <checkout>/fleet-deck)")
 
     def _restore_account(self, account, tab, workspace_labels, first_setup, spare, now) -> None:
         login = account.login
@@ -545,6 +653,21 @@ class Deck:
             del self.pending[login]
             self.unsettled.discard(login)
             self.tracks[login] = classify(seen, self.live(login)) or Track(State.IDLE)
+
+    def _fleet_tab_holds(self, tab_id: str) -> str:
+        """`board` when the board's view runs in the tab; `remnant` when its
+        one pane is a bare shell in the board's own directory (where herdr
+        restores the pane, the plugin's root); `unsettled` while a pane's
+        program has not started; else `other`: a person's, never closed."""
+        panes = [p for p in self.herdr.call("pane", "list").get("panes", []) if p.get("tab_id") == tab_id]
+        infos = [self.herdr.process_info(p["pane_id"]) for p in panes]
+        if any(is_board(p.get("argv") or []) for info in infos for p in info.get("foreground_processes", [])):
+            return "board"
+        if any(info.get("shell_pid") is None or not info.get("foreground_processes") for info in infos):
+            return "unsettled"
+        if len(infos) == 1 and at_bare_shell(infos[0]) and same_dir(panes[0].get("cwd"), BOARD_DIR):
+            return "remnant"
+        return "other"
 
     def _split(self, pane: str, direction: str, ratio: float, label: str) -> str:
         made = self.herdr.call("pane", "split", pane, "--direction", direction,
@@ -683,6 +806,8 @@ class Deck:
             tab = tabs.get(login)
             if tab is None or tab.panes.get(HARNESS) != self.harness_pane[login]:
                 self._forget(login)
+        if self.fleet_tab and self.fleet_unsettled is not None:
+            self._restore_fleet_tab(recheck=self.fleet_unsettled)
         return True
 
     def _forget(self, login: str) -> None:
@@ -723,6 +848,8 @@ class Deck:
             # Something else holds the operator's shell in this pane: not this
             # account's moveto, and not the deck's to judge.
             return Seen(present=True)
+        if found.via == SSH:
+            return Seen(present=True, moveto=True, harness=ssh_harness(self.live(login)), mode=found.mode)
         tree = parents if parents is not None else self.parents()
         return Seen(present=True, moveto=True, harness=harness_under(found.pid, tree, self.argv),
                     mode=found.mode)
@@ -1157,6 +1284,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--catalog", help="the role catalogue (identities/roles/catalog.json)")
     parser.add_argument("--exclude", action="append", default=[], help="a login to leave out")
     parser.add_argument("--cwd", default=os.path.expanduser("~/projects"))
+    parser.add_argument("--no-fleet-tab", action="store_true",
+                        help="do not open the fleet board as a tab of its own")
     args = parser.parse_args(argv)
 
     def log(line: str) -> None:
@@ -1204,6 +1333,7 @@ def main(argv: list[str] | None = None) -> int:
         save=lambda befores: save_befores(path, befores),
         server=lambda: server_instance(socket_path),
         log=log,
+        fleet_tab=not args.no_fleet_tab,
     )
     return run(deck, Stream(on_line=take, log=log), woken)
 

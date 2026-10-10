@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import enum
 import os
+import re
 from dataclasses import dataclass, replace
 
 # How long a --resume the deck started may run without a harness before the
@@ -334,12 +335,19 @@ def display(track: Track, live: Live | None) -> Shown:
 # ------------------------------------------------------------- foreground
 
 
+# How moveto entered the account: its `sudo` hand-off, or an ssh session
+# whose forced command runs `enter` as the account (agent-fabric ADR-048).
+SUDO, SSH = "sudo", "ssh"
+
+
 @dataclass(frozen=True)
 class Moveto:
-    """moveto's `sudo ... enter <dir> <title> [mode]` in a pane's foreground."""
+    """moveto's `sudo ... enter <dir> <title> [mode]`, or `ssh ... <login>@<host>
+    <mode|shell>`, in a pane's foreground."""
 
     pid: int
     mode: str
+    via: str = SUDO
 
 
 def moveto_in(foreground: list[tuple[int, list[str]]], login: str) -> Moveto | None:
@@ -351,6 +359,11 @@ def moveto_in(foreground: list[tuple[int, list[str]]], login: str) -> Moveto | N
         if not argv:
             continue
         program = os.path.basename(argv[0])
+        if program == "ssh":
+            mode = _ssh_mode(argv[1:], login)
+            if mode is not None:
+                return Moveto(pid, mode, SSH)
+            continue
         enter = any(arg.endswith("/moveto/enter") for arg in argv)
         if program == "sudo":
             if enter and _sudo_user_is(argv, login):
@@ -366,6 +379,74 @@ def moveto_in(foreground: list[tuple[int, list[str]]], login: str) -> Moveto | N
 
 def _mode(argv: list[str]) -> str:
     return argv[-1] if argv[-1] in MODES else PLAIN
+
+
+# ssh's options that take the next argument as their value (OpenSSH 9).
+_SSH_VALUE_OPTIONS = frozenset("BbcDEeFIiJLlmOoPpQRSWw")
+# What enter-ssh accepts as the whole remote command, and the mode each is.
+_SSH_WORDS = {WAIT: WAIT, WATCH: WATCH, RESUME: RESUME, "shell": PLAIN}
+
+
+def _ssh_mode(args: list[str], login: str) -> str | None:
+    """The mode of an ssh into this login's forced command, or None. Read as
+    OpenSSH reads it (checked against `ssh -G`, OpenSSH 10.0): options come
+    before and after the destination, up to `--` or the first other word;
+    the user is the first one set, by `-l`, `-o User=` or the destination's
+    `<user>@`; the rest is the remote command, which must be exactly one of
+    enter-ssh's four words. A word like `--wait` straight after the
+    destination is an option to ssh, which refuses it."""
+    user: str | None = None
+    destination: str | None = None
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            i += 1
+            break
+        if arg.startswith("-") and len(arg) > 1:
+            last = len(arg) - 1
+            for j, letter in enumerate(arg[1:], start=1):
+                if letter not in _SSH_VALUE_OPTIONS:
+                    continue
+                if j < last:
+                    value = arg[j + 1:]
+                else:
+                    i += 1
+                    if i >= len(args):
+                        return None
+                    value = args[i]
+                if user is None:
+                    user = _ssh_user_option(letter, value)
+                break
+            i += 1
+            continue
+        if destination is not None:
+            break
+        destination = arg.removeprefix("ssh://")
+        if user is None and "@" in destination:
+            user = destination.rsplit("@", 1)[0]
+        i += 1
+    command = args[i:]
+    if destination is None or user != login or len(command) != 1:
+        return None
+    return _SSH_WORDS.get(command[0])
+
+
+def _ssh_user_option(letter: str, value: str) -> str | None:
+    """The user an option sets: `-l <user>`, or `-o User=<user>` (also
+    `User <user>`; the keyword is not case-sensitive)."""
+    if letter == "l":
+        return value
+    if letter == "o":
+        # As OpenSSH splits a configuration line: blanks, the keyword, then
+        # `=` or blanks (spaces or tabs), then the value, quotes removed.
+        m = _SSH_OPTION.match(value)
+        if m and m.group(1).lower() == "user":
+            return m.group(2).strip().strip('"') or None
+    return None
+
+
+_SSH_OPTION = re.compile(r"\s*(\w+)(?:\s*=\s*|\s+)(.*)", re.DOTALL)
 
 
 def _sudo_user_is(argv: list[str], login: str) -> bool:

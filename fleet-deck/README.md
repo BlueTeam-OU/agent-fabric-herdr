@@ -93,6 +93,20 @@ per change.
     descendants.
   - This was measured live on develop-qzapp (GZCoord seq 22145); `/proc`
     is mounted without `hidepid`.
+- **A pane entered over ssh** (`moveto --via ssh`, agent-fabric ADR-048)
+  is the account's when its foreground is `ssh` connecting as the account
+  with one of the forced command's four words as the whole remote command:
+  `--wait`, `--watch`, `--resume`, or `shell` (plain). The argv is read as
+  OpenSSH reads it: the user is the first one set, by `-l`, `-o User=` or
+  `<login>@`; options after the destination are ssh's too, so a word that
+  starts with `-` must follow `--` (`ssh <login>@<host> -- --wait`). It is classified, followed and never typed into, like a
+  sudo pane.
+  - sshd starts the account's session, so its harness is no descendant of
+    the pane's `ssh`, and nothing the deck may read links the two. The
+    account's live session, from the stream, is taken as the pane's.
+  - So a session started elsewhere shows as running in an ssh pane, never
+    as `running elsewhere`; an Enter there is still refused by
+    `fabric-resume`. A stale record changes nothing.
 - **The account's sessions** come from `fabric-ctl all states --follow
   --json`, this host's records only. The stream is restarted after 1, 2,
   5, 10, 30, then 60 s.
@@ -166,16 +180,59 @@ key = "prefix+a"
 type = "plugin_action"
 command = "fabric.fleet.agent"
 description = "this agent"
+
+[[keys.command]]
+key = "prefix+p"
+type = "plugin_action"
+command = "fabric.fleet.prs"
+description = "pull requests in flight"
 ```
+
+The deck opens the board as a tab of its own, labelled `fleet`, in the
+first workspace, unless one exists anywhere (`--no-fleet-tab` turns this
+off). Like an account's pane, a fleet tab a person closes stays closed
+until the next restore. herdr's session restore brings a tab back by its
+label but not a plugin pane's program: a `fleet` tab whose one pane is a
+bare shell in the plugin's own directory (`fleet-deck/`, where herdr
+restores it) is the deck's, closed and replaced by the board. A pane whose
+program has not started yet is looked at again at the next map read. A
+`fleet` tab running anything else, or a shell elsewhere, is a person's,
+left alone and said once.
+Without the plugin linked, the deck says so once and restores the
+account tabs as before.
 
 | view | opens as | shows |
 |---|---|---|
-| **board** | a tab | one row per placed agent: state, current job, closed/open jobs, RSS, CPU, tokens over 7 days, the 5-hour usage window, open PR; each host's memory and memory pressure below |
+| **board** | the `fleet` tab | one row per placed agent: state, current job, closed/open jobs, RSS, CPU, tokens over 7 days, the 5-hour usage window, open PR; each host's memory and memory pressure below |
+| **compare** | `c` in the fleet tab | one bar per agent for one metric: RSS, CPU, swap, tokens over 7 days, jobs done, open jobs; largest first, scaled to the largest, labelled "operational, not a score" |
+| **plan** | `p` in the fleet tab | each plan the coordinator keeps (agent-fabric ADR-047): its steps on a board by state (to do, queued, doing, delivered, done, and any other state), and a Gantt below |
+| **PRs** | a popup (`fabric.fleet.prs`), or `P` in the fleet tab | in-flight pull requests by owner, each with its repository, title, work and fix commits, checks, review, armed, and the gate's verdict |
 | **agent** | an overlay over the tab it was opened from, or Enter on a board row | state, role, project, session, what it waits on; resources, with a sparkline of the samples taken while open; open and closed jobs with their times; its PRs; tokens over 7 days; usage windows |
 
 - **Keys.** ↑/↓ (or j/k), PgUp/PgDn, Home/End move. Enter on the board opens
-  that agent, and Esc goes back to the board. `r` refetches every section once.
-  `q` closes the pane, as does Esc on an overlay.
+  that agent, and Esc goes back to the board. In the fleet tab, `b`, `c`,
+  `p` and `P` switch between board, compare, plan and PRs, and Esc leaves
+  PRs for the screen it was opened from. In compare, ←/→ (or h/l, Tab)
+  and 1-6 choose the metric; the chosen one is bracketed in the footer.
+  `r` refetches the screen's sections once. `q` closes the pane, as does
+  Esc on an overlay or the popup.
+- **Compare.** A value that was not read has no bar and reads `…` or `?`,
+  and is listed after the rest; the footer says why. "Jobs done" counts
+  jobs closed as done, never dropped: fleet.py's `done_total`. Without
+  it, the list of closed jobs is counted only when it is the whole list.
+- **Plan.** A step's state is its job's (ADR-047). Each Gantt row is the
+  step's id, owner, title and what it waits for (`⇠s1,s2`). A bar from the
+  job's log (first active to last done, dropped or delivered; to now while
+  running) is solid. A step with no time recorded is drawn hollow and
+  marked `est`: it is placed after what it waits for, or at now, for its
+  `est_days`, else one day. The `│` column is now. fabric-plan reads the
+  plan files of the login it runs as, so on any login but the
+  coordinator's the view says `no plans kept by <login>`.
+- **PRs.** fleet.py reads fabric-pr gate in agent-fabric's checkout only,
+  and the popup says so. A pushed branch without a PR is counted under its
+  owner, not listed. A PR whose owner is no placed account is listed apart.
+  A gate or GitHub that did not answer is said beside the owner. A
+  fleet.py that does not list PRs of unplaced owners is said so.
 - **The agent.** The overlay is that of the tab it was opened from: the
   deck labels an agent's tab with its login, and the view reads the label
   from `HERDR_PLUGIN_CONTEXT_JSON`. On any other tab it says so.
@@ -192,7 +249,10 @@ description = "this agent"
   opened by its action (the keys above) is opened focused and starts live.
 - **What a cell says.** `…` means not read yet. `?` means its section failed,
   and the board's footer says why, once per section. `-` means there is
-  none. The selected row is marked `>`, and every state is a word, never
+  none. A value ending in `~` is stale: fleet.py's last good value, kept
+  while a fresh read fails inside the section's stale window. The footer
+  (board, compare), the owner's line (PRs) or the section (agent view)
+  says whose, since when and why. The selected row is marked `>`, and every state is a word, never
   only a colour. `NO_COLOR` turns colour off.
 - **Who can read what.** fleet.py's `jobs`, `usage`, `host`, `tokens` and
   `accounts` sections answer only a host operator. The views are meant for
@@ -216,8 +276,8 @@ description = "this agent"
 `just fleet-deck-test` runs the state machine (`test_deck_tabs`) and the
 deck against a fake herdr, a fake `/proc` and a real Unix socket
 (`test_fabric_deck`), without a server. It also runs both views' layout on
-fixture records (`test_view_render`), and the views' input, refresh rule
-and data location (`test_fabric_view`).
+fixture records (`test_view_render`, `test_report_render`), and the views' input,
+navigation, refresh rule and data location (`test_fabric_view`).
 
 The deck was also run against a real, isolated herdr server, with
 stand-ins for `moveto` and `fabric-ctl`. The `moveto` stand-in has the
