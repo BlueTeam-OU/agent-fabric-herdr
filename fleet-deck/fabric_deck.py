@@ -377,9 +377,58 @@ def save_befores(path: str, befores: dict[str, Before]) -> None:
     os.replace(tmp, path)
 
 
-def befores_path() -> str:
+def state_dir() -> str:
     state = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
-    return os.path.join(state, "fabric-deck", "before.json")
+    return os.path.join(state, "fabric-deck")
+
+
+def befores_path() -> str:
+    return os.path.join(state_dir(), "before.json")
+
+
+def lock_path() -> str:
+    return os.path.join(state_dir(), "deck.lock")
+
+
+def hold_lock(path: str) -> int | None:
+    """The one-deck-per-login lock: an flock on `path`, held for the life of
+    the process, with its pid written in. None when another deck holds it.
+    An flock, not a pid file alone, so a deck that died leaves nothing to
+    clean: the kernel drops the lock with the process."""
+    import fcntl
+
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    os.ftruncate(fd, 0)
+    os.write(fd, f"{os.getpid()}\n".encode())
+    return fd
+
+
+def lock_holder(path: str) -> int | None:
+    """The pid of the deck holding the lock, or None when no deck runs."""
+    import fcntl
+
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return None
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            text = os.read(fd, 32).decode(errors="replace").strip()
+            # A deck between taking the lock and writing its pid reads empty;
+            # it still runs, so 0 stands for "running, pid not yet written".
+            return int(text) if text.isdigit() else 0
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return None
+    finally:
+        os.close(fd)
 
 
 # ------------------------------------------------------------- the server
@@ -1300,8 +1349,18 @@ def main(argv: list[str] | None = None) -> int:
                         help="do not open the fleet board as a tab of its own")
     args = parser.parse_args(argv)
 
+    stamped = not sys.stderr.isatty()
+
     def log(line: str) -> None:
-        print(f"fabric-deck: {line}", file=sys.stderr, flush=True)
+        # Detached (fleet-deck start), stderr is the log file: stamp each line.
+        stamp = f"{datetime.datetime.now().astimezone().isoformat(timespec='seconds')} " if stamped else ""
+        print(f"{stamp}fabric-deck: {line}", file=sys.stderr, flush=True)
+
+    lock = hold_lock(lock_path())
+    if lock is None:
+        holder = lock_holder(lock_path())
+        log(f"another deck already runs on this login (pid {holder or '?'}); this one stops")
+        return 1
 
     host = local_host()
     if host is None:
