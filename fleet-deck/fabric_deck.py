@@ -61,6 +61,22 @@ from deck_tabs import (
     step,
 )
 
+# The executable the deck drives: FleetDeck, never a Herdr found on PATH.
+BIN = "agent-fabric-fleetdeck"
+# Set beside HERDR_ENV=1 in every process a FleetDeck server starts.
+PANE_MARKER = "AGENT_FABRIC_FLEETDECK"
+
+
+def fleetdeck_env(env: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment with a Herdr pane's context removed, by the rule the
+    binary applies at start (src/identity.rs drop_foreign_pane_context):
+    inside a pane that a Herdr server, not FleetDeck, started, every HERDR_*
+    variable names that server's socket, session and config, so none is read."""
+    env = dict(os.environ if env is None else env)
+    if env.get("HERDR_ENV") == "1" and env.get(PANE_MARKER) != "1":
+        return {key: value for key, value in env.items() if not key.startswith("HERDR_")}
+    return env
+
 # The workspace an account goes to when the catalogue names no group for it,
 # or when its group's workspace no longer exists (the operator removed it).
 NEW_WORKSPACE = "New"
@@ -71,7 +87,7 @@ FLEET_TAB = "fleet"
 FLEET_PLUGIN = "fabric.fleet"
 FLEET_ENTRYPOINT = "board"
 # The plugin's root, where herdr starts and restores the board's pane: this
-# file's directory, as README's `herdr plugin link <checkout>/fleet-deck`.
+# file's directory, as README's `agent-fabric-fleetdeck plugin link <checkout>/fleet-deck`.
 BOARD_DIR = os.path.dirname(os.path.realpath(__file__))
 
 # A login is typed into the operator's shell as part of a moveto command, so
@@ -451,13 +467,14 @@ def herdr_socket_path() -> str | None:
     active_api_socket_path): HERDR_SOCKET_PATH, else the session
     HERDR_SESSION names, else the default session; each session's socket as
     herdr lists it, never re-derived here."""
-    if os.environ.get("HERDR_SOCKET_PATH"):
-        return os.environ["HERDR_SOCKET_PATH"]
-    named = os.environ.get("HERDR_SESSION")
+    env = fleetdeck_env()
+    if env.get("HERDR_SOCKET_PATH"):
+        return env["HERDR_SOCKET_PATH"]
+    named = env.get("HERDR_SESSION")
     if named == "default":
         named = None
     try:
-        result = subprocess.run(["herdr", "session", "list", "--json"],
+        result = subprocess.run([BIN, "session", "list", "--json"],
                                 capture_output=True, text=True, timeout=30)
         sessions = json.loads(result.stdout).get("result", json.loads(result.stdout)).get("sessions", [])
     except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
@@ -670,7 +687,7 @@ class Deck:
             self.log(f"opened the {FLEET_TAB} tab")
         except Exception as error:  # the board is a view: no account's tab waits on it
             self._say("fleet-tab", f"no {FLEET_TAB} tab: {printable(str(error))} "
-                      f"(is {FLEET_PLUGIN} linked? herdr plugin link <checkout>/fleet-deck)")
+                      f"(is {FLEET_PLUGIN} linked? {BIN} plugin link <checkout>/fleet-deck)")
 
     def _restore_account(self, account, tab, workspace_labels, first_setup, spare, now) -> None:
         login = account.login
@@ -1096,7 +1113,7 @@ def status_line(login: str, status: str, detail: str = "") -> str:
 class Herdr:
     """herdr's CLI, as the deck's login sees it."""
 
-    binary: str = field(default_factory=lambda: shutil.which("herdr") or "herdr")
+    binary: str = field(default_factory=lambda: shutil.which(BIN) or BIN)
 
     def text(self, *args: str) -> str:
         result = subprocess.run(

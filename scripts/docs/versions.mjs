@@ -119,6 +119,8 @@ export async function backfillVersions() {
   });
 }
 
+const NO_STABLE_RELEASE = '0.0.0';
+
 export async function checkVersions() {
   const manifest = await readManifest();
   if (
@@ -130,7 +132,9 @@ export async function checkVersions() {
   }
 
   const latest = JSON.parse(await readFile(latestManifestPath, 'utf8')).version;
-  if (manifest.current !== normalizeVersion(latest)) {
+  // 0.0.0: FleetDeck has published no stable release, and the documentation
+  // versions here are all Herdr's, inherited at the fork (docs/fleetdeck/UPSTREAM.md).
+  if (normalizeVersion(latest) !== NO_STABLE_RELEASE && manifest.current !== normalizeVersion(latest)) {
     throw new Error(`docs current version ${manifest.current} does not match distribution latest ${latest}`);
   }
 

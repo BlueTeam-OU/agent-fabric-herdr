@@ -607,9 +607,9 @@ USAGE = "usage: fabric-view board | agent [--agent LOGIN] | prs | open board|age
 def open_pane(entrypoint: str, env: dict[str, str]) -> int:
     """A plugin action's command: open the entrypoint's pane. The pane then
     runs with its own context, so the overlay learns the tab it covers."""
-    herdr = env.get("HERDR_BIN_PATH") or shutil.which("herdr")
+    herdr = env.get("HERDR_BIN_PATH") or shutil.which("agent-fabric-fleetdeck")
     if not herdr:
-        print("fabric-view: no herdr to ask (HERDR_BIN_PATH is not set)", file=sys.stderr)
+        print("fabric-view: no agent-fabric-fleetdeck to ask (HERDR_BIN_PATH is not set)", file=sys.stderr)
         return 2
     plugin = env.get("HERDR_PLUGIN_ID") or PLUGIN_ID
     # --focus: the person pressed a key to see this view. herdr focuses the

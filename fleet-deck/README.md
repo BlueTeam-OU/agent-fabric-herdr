@@ -1,6 +1,6 @@
 # Fleet Deck
 
-The operator's console over the agent fleet, built on this herdr fork.
+The operator's console over the agent fleet, built into Agent Fabric FleetDeck.
 Each agent account gets one tab, labelled with its login, holding three
 panes:
 
@@ -24,8 +24,8 @@ operator's human login:
 fleet-deck
 ```
 
-It starts herdr's server if none answers, starts the deck controller if
-none runs, and attaches this terminal to herdr. Run it again, or from a
+It starts FleetDeck's server if none answers, starts the deck controller if
+none runs, and attaches this terminal to FleetDeck. Run it again, or from a
 second terminal, and it only attaches: the server answers its socket, and
 the controller holds a lock (`$XDG_STATE_HOME/fabric-deck/deck.lock`) that a
 second one cannot take. Detach with **ctrl+6 q**; the deck goes on.
@@ -41,21 +41,34 @@ fleet-deck start     # starts what is missing, without attaching
   input is `/dev/null`, and it writes to `$XDG_STATE_HOME/fabric-deck/deck.log`
   (one line per change, timestamped). Each time a controller starts, a log
   past 1 MiB is moved to `deck.log.1`; a controller that runs for weeks
-  keeps writing to the same file. Closing a terminal or a herdr tab never
+  keeps writing to the same file. Closing a terminal or a FleetDeck tab never
   reaches it. Only `fleet-deck stop` or `restart` stops it.
-- **`stop` never stops herdr's server.** The server keeps every agent's pane
-  running; `herdr server stop` would end them all. After a server restart the
+- **`stop` never stops FleetDeck's server.** The server keeps every agent's pane
+  running; `agent-fabric-fleetdeck server stop` would end them all. After a server restart the
   deck restores the tabs (see Restore).
 - **The deck's options** (`--catalog`, `--exclude`, `--cwd`, `--no-fleet-tab`)
   are given to `fleet-deck` and take effect when it starts the controller;
   change them with `fleet-deck restart <options>`. The catalogue defaults to
   the agent-fabric checkout's (`AGENT_FABRIC_ROOT`, else
   `~/projects/agent-fabric`).
-- **Outside herdr's panes only.** `server.socket_access = "outside_panes"`
+- **Outside FleetDeck's panes only.** `server.socket_access = "outside_panes"`
   refuses a pane's processes, so `fleet-deck` refuses to start anything from
-  inside a pane (a herdr popup is the operator's own and may).
-- **Install** once, on the operator's login:
-  `ln -s <this checkout>/fleet-deck/fleet-deck ~/.local/bin/fleet-deck`.
+  inside a pane (a FleetDeck popup is the operator's own and may).
+- **Install**, and after each update of this checkout, run this on the
+  operator's login, from an ordinary terminal (not a pane):
+  `<this checkout>/fleet-deck/install` (`--dry-run` shows the steps).
+  - It builds `agent-fabric-fleetdeck` once (`--jobs 4` by default), installs it
+    into `~/.local/bin` by rename, and links `fleet-deck` beside it.
+  - If FleetDeck has no config yet, it copies `~/.config/herdr/config.toml`
+    across. An existing config is never overwritten.
+  - It then hands the running server's panes to the new binary by live
+    handoff. A running FleetDeck server is handed off by its own CLI. A
+    running `herdr` server from before the rename is handed off by `herdr`'s
+    CLI, and its panes keep running under FleetDeck's directories.
+    Afterwards, attach with `agent-fabric-fleetdeck` and run
+    `fleet-deck restart`.
+  - It never stops a server or a pane. A refused or failed handoff leaves the
+    old server and every pane as they were.
 
 `fabric-deck` is the controller itself; `fleet-deck` starts it. Run in a
 terminal by hand, it still refuses to run beside another deck.
@@ -64,15 +77,15 @@ terminal by hand, it still refuses to run beside another deck.
 
 Every pane runs a harness, so every key combination reaches it as typed:
 ctrl+c, ctrl+v, ctrl+z, esc, PageUp and PageDown included, whether or not
-something is selected or on the clipboard. herdr keeps only these:
+something is selected or on the clipboard. FleetDeck keeps only these:
 
-| key | herdr's action |
+| key | FleetDeck's action |
 |---|---|
-| **ctrl+6** | the prefix: herdr's commands are ctrl+6 then a key (`ctrl+6 q` detaches; the `prefix+f/a/p` keys below); ctrl+6 twice sends ctrl+6 to the pane. A legacy terminal sends it as ctrl+^ (0x1e), which works too. |
+| **ctrl+6** | the prefix: FleetDeck's commands are ctrl+6 then a key (`ctrl+6 q` detaches; the `prefix+f/a/p` keys below); ctrl+6 twice sends ctrl+6 to the pane. A legacy terminal sends it as ctrl+^ (0x1e), which works too. |
 | **ctrl+alt+c** | copies the selection |
 | **ctrl+alt+p** | pastes the clipboard's text into the pane |
 | **cmd+c / cmd+v** | copy (any system) and paste (macOS), where the terminal forwards cmd |
-| **alt+PageUp / alt+PageDown** | scroll herdr's scrollback, when the pane is on its main screen with no mouse reporting (otherwise they reach the pane) |
+| **alt+PageUp / alt+PageDown** | scroll FleetDeck's scrollback, when the pane is on its main screen with no mouse reporting (otherwise they reach the pane) |
 | the **mouse** | selection, menus and scrolling |
 
 **Copying and pasting.**
@@ -87,17 +100,17 @@ something is selected or on the clipboard. herdr keeps only these:
 - To scroll, use alt+PageUp/PageDown or the mouse wheel.
 - `[ui] clipboard_shortcuts = false` gives ctrl+alt+p to the pane as well,
   and ctrl+alt+c unless `copy_on_select = false` (then it is the only key
-  that copies a kept selection). A herdr binding configured on either key
+  that copies a kept selection). A FleetDeck binding configured on either key
   wins over it.
 
 **Why these keys.** Each was checked on 2026-10-10 against what the
 harnesses bind, and against what the owner's desktop and terminal keep for
-themselves (herdr never receives those).
+themselves (FleetDeck never receives those).
 - **Claude Code:** its default keybindings in every context, chords by their
   first key, and its reserved keys (code.claude.com/docs/en/keybindings).
 - **Codex CLI:** its built-in TUI keymap (openai/codex
   `codex-rs/tui/src/keymap.rs` at 806d9732). It binds ctrl+alt+v to paste an
-  image, which is why herdr's paste is ctrl+alt+p.
+  image, which is why FleetDeck's paste is ctrl+alt+p.
 - **A plain shell:** bash's emacs keymap (`bind -p`), with its ESC-ctrl
   bindings counted as ctrl+alt (a legacy terminal sends ctrl+alt+x as ESC
   ctrl+x), and the tty's control characters (`stty -a`).
@@ -114,22 +127,22 @@ took keys every harness uses.
 
 `src/client/shell/tests/harness_keys.rs` pins all of it:
 - **The lists.** Each harness's keys and the desktop's are written there. The
-  prefix, every default direct binding and herdr's own keys are checked
+  prefix, every default direct binding and FleetDeck's own keys are checked
   against them, and so are the `prefix+f/a/p` keys below.
-- **Byte for byte.** Through herdr's real input path, the keys a harness uses
+- **Byte for byte.** Through FleetDeck's real input path, the keys a harness uses
   reach the pane exactly as typed, from a legacy terminal and from a kitty
   terminal. ctrl+c still does with a visible selection, and ctrl+v with text
   on the clipboard.
-- **herdr's own keys** never reach the pane.
+- **FleetDeck's own keys** never reach the pane.
 - **ctrl+^.** A binding to it is refused beside the ctrl+6 prefix, since a
   legacy terminal sends both as one byte.
 
-A `keys.prefix` in herdr's config replaces ctrl+6; `fleet-deck` says when it
+A `keys.prefix` in FleetDeck's config replaces ctrl+6; `fleet-deck` says when it
 is one the check does not cover.
 
 ## Restore
 
-When the deck starts, and whenever herdr's server comes back after being
+When the deck starts, and whenever FleetDeck's server comes back after being
 lost or replaced, every placed account (`moveto --list`, without the
 deck's own login) gets its tab. An account placed while the deck runs
 gets its tab within 10 s. One whose restore failed part-way is restored
@@ -160,12 +173,12 @@ again whole within 10 s, and is followed in nothing until then.
 
 ## What a person sees
 
-The deck reports each harness pane into herdr's agent panel as the agent
-`claude` from the source `fabric`. herdr's default agent row shows the
-agent's name, so the deck's word goes in its place, and herdr's own
+The deck reports each harness pane into FleetDeck's agent panel as the agent
+`claude` from the source `fabric`. FleetDeck's default agent row shows the
+agent's name, so the deck's word goes in its place, and FleetDeck's own
 `claude` comes back while a harness runs.
 
-| state | herdr state (icon, notifications) | the row reads |
+| state | FleetDeck state (icon, notifications) | the row reads |
 |---|---|---|
 | a harness runs in the pane | the session's: `working`, `idle` or `blocked` | `claude` |
 | waiting for Enter | `idle` | `dormant` |
@@ -177,22 +190,22 @@ agent's name, so the deck's word goes in its place, and herdr's own
 | a session runs on the account, not in this pane | `unknown` | `running elsewhere` |
 | the account's record is older than two heartbeats, or says the account cannot read its session state (`state: unknown`) | `unknown` | `stale` |
 
-The same words are set as herdr state labels, for a sidebar layout that
-shows `state_text`. herdr shows an `idle` the person has not looked at as
+The same words are set as FleetDeck state labels, for a sidebar layout that
+shows `state_text`. FleetDeck shows an `idle` the person has not looked at as
 `done`, so the word is set for both. The deck's log prints one line per
 change.
 
 Each harness pane also carries the metadata token `account=<login>`, so
-herdr can tell the accounts apart although every pane reports as
-`claude`: `[ui.sound.accounts."<login>"]` in herdr's config gives an
+FleetDeck can tell the accounts apart although every pane reports as
+`claude`: `[ui.sound.accounts."<login>"]` in FleetDeck's config gives an
 account its own sound per state transition (see the Sound section of the
-configuration docs). Sounds follow the herdr state column above, the
+configuration docs). Sounds follow the FleetDeck state column above, the
 deck's own states included: a `--resume` that fails (`working ->
 blocked`) sounds as any agent that needs attention does.
 
 ## What the deck observes, and never does
 
-- **moveto in the pane** comes from herdr's `pane process-info`. The
+- **moveto in the pane** comes from FleetDeck's `pane process-info`. The
   pane's foreground is moveto's `sudo … enter <dir> <title> [mode]`
   hand-off, or the operator's bare shell once moveto ended. A bare shell
   is its own foreground process group (`foreground_process_group_id ==
@@ -222,13 +235,15 @@ blocked`) sounds as any agent that needs attention does.
 - **The account's sessions** come from `fabric-ctl all states --follow
   --json`, this host's records only. The stream is restarted after 1, 2,
   5, 10, 30, then 60 s.
-- **herdr's server instance** is the pid at the socket's other end
+- **FleetDeck's server instance** is the pid at the socket's other end
   (`SO_PEERCRED`) plus that process's start ticks.
-  - The socket is the one the deck's herdr commands reach, in herdr's
+  - The socket is the one the deck's FleetDeck commands reach, in FleetDeck's
     own order: `HERDR_SOCKET_PATH`, else the session `HERDR_SESSION`
-    names, else the default session, each as `herdr session list --json`
-    reports it.
-  - A different or unreadable instance is a loss of herdr, and its next
+    names, else the default session, each as `agent-fabric-fleetdeck session list --json`
+    reports it. Inside a pane that a Herdr server started, the `HERDR_*`
+    variables name that server and are ignored, as the binary ignores
+    them (`docs/fleetdeck/IDENTITY.md`).
+  - A different or unreadable instance is a loss of FleetDeck, and its next
     answer is a restore.
   - A failing `moveto --list` is not a loss: the last tab map stays.
 - **What the deck does to panes:** it starts a fixed `moveto <account>
@@ -249,7 +264,7 @@ blocked`) sounds as any agent that needs attention does.
 Until agent-fabric's activation PR puts `--wait`, `--watch` and
 `fabric-resume`'s second-session refusal on main, `moveto --help` does not
 list them. The deck then arms no pane with them, says so once, and shows
-those harness panes as herdr's `unknown`.
+those harness panes as FleetDeck's `unknown`.
 
 ## What the deck keeps
 
@@ -257,10 +272,10 @@ those harness panes as herdr's `unknown`.
 account, whether its session was running. It is read only at a restore,
 to decide `--resume`.
 - **A rise** is written at once.
-- **A fall** is written only once herdr has visibly stayed up. That takes
+- **A fall** is written only once FleetDeck has visibly stayed up. That takes
   an answer from the same server instance as the last answer before the
-  fall, at least 5 s after it. A fall seen around a loss of herdr never
-  settles, so a session that died with herdr is resumed.
+  fall, at least 5 s after it. A fall seen around a loss of FleetDeck never
+  settles, so a session that died with FleetDeck is resumed.
 - **A fall still pending when the deck stops** is kept with its server
   instance. At the next start it settles only if that same server is
   still running.
@@ -269,16 +284,16 @@ to decide `--resume`.
 ## Views
 
 `fabric-view` shows what the fleet does, as a fleet and per agent, in
-herdr plugin panes (`herdr-plugin.toml`, plugin `fabric.fleet`). Its data
+FleetDeck plugin panes (`herdr-plugin.toml`, plugin `fabric.fleet`). Its data
 is agent-fabric's `tools/fabric/fleet.py`, imported from the agent-fabric
 checkout and never copied (agent-fabric ADR-046). The checkout is
 `AGENT_FABRIC_ROOT`, else the one the installed `fabric-ctl` links into.
 
 ```sh
-herdr plugin link <this checkout>/fleet-deck   # once, on the operator's login
+agent-fabric-fleetdeck plugin link <this checkout>/fleet-deck   # once, on the operator's login
 ```
 
-and, in herdr's `config.toml`, the keys:
+and, in FleetDeck's `config.toml`, the keys:
 
 ```toml
 [[keys.command]]
@@ -303,9 +318,9 @@ description = "pull requests in flight"
 The deck opens the board as a tab of its own, labelled `fleet`, in the
 first workspace, unless one exists anywhere (`--no-fleet-tab` turns this
 off). Like an account's pane, a fleet tab a person closes stays closed
-until the next restore. herdr's session restore brings a tab back by its
+until the next restore. FleetDeck's session restore brings a tab back by its
 label but not a plugin pane's program: a `fleet` tab whose one pane is a
-bare shell in the plugin's own directory (`fleet-deck/`, where herdr
+bare shell in the plugin's own directory (`fleet-deck/`, where FleetDeck
 restores it) is the deck's, closed and replaced by the board. A pane whose
 program has not started yet is looked at again at the next map read. A
 `fleet` tab running anything else, or a shell elsewhere, is a person's,
@@ -355,7 +370,7 @@ account tabs as before.
   (fleet.py's cost classes). When focus leaves, the status line says
   `paused` and nothing new is fetched. A fetch already running finishes,
   since fleet.py bounds every source.
-- **Focus starts unknown.** herdr reports focus changes only. So a view
+- **Focus starts unknown.** FleetDeck reports focus changes only. So a view
   counts as focused from the first focus-in or key, and until then it
   stays at its open-time fetch, saying `press a key to go live`. A view
   opened by its action (the keys above) is opened focused and starts live.
@@ -370,9 +385,9 @@ account tabs as before.
   `accounts` sections answer only a host operator. The views are meant for
   the operator's login; on any other they show those sections as `?`,
   with fabric-ctl's refusal.
-- **What a view never does.** It calls no herdr socket: `outside_panes`
+- **What a view never does.** It calls no FleetDeck socket: `outside_panes`
   refuses a pane's process. The overlay is opened by the plugin's action,
-  which herdr runs outside the panes. A view sends no signed action and
+  which FleetDeck runs outside the panes. A view sends no signed action and
   reads no other source than fleet.py.
 - **What it writes.** Nothing of its own; it runs Python with `-B`.
   - fleet.py, which it calls, keeps its shared cache under
@@ -386,12 +401,12 @@ account tabs as before.
 ## Tests
 
 `just fleet-deck-test` runs the state machine (`test_deck_tabs`) and the
-deck against a fake herdr, a fake `/proc` and a real Unix socket
+deck against a fake FleetDeck, a fake `/proc` and a real Unix socket
 (`test_fabric_deck`), without a server. It also runs both views' layout on
 fixture records (`test_view_render`, `test_report_render`), and the views' input,
 navigation, refresh rule and data location (`test_fabric_view`).
 
-The deck was also run against a real, isolated herdr server, with
+The deck was also run against a real, isolated FleetDeck server, with
 stand-ins for `moveto` and `fabric-ctl`. The `moveto` stand-in has the
 same `sudo … enter` argv shape and a pty of its own for the account's
 shell. The run covered:
@@ -399,9 +414,9 @@ shell. The run covered:
 - Enter;
 - a session ending;
 - a deck restart that re-armed nothing;
-- a herdr server restart that resumed only the session that died with
+- a FleetDeck server restart that resumed only the session that died with
   it.
 
-The rendered herdr client was inspected on a private X display. The real
+The rendered FleetDeck client was inspected on a private X display. The real
 `moveto`, `fabric-resume` and the fleet's stream have not been run with
 it.

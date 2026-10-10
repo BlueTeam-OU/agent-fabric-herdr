@@ -17,7 +17,7 @@ from scripts import package_windows_conpty as package
 
 class WindowsConptyPackageTests(unittest.TestCase):
     def test_local_build_installs_beside_cargos_reported_executable(self) -> None:
-        executable = Path("other-target/x86_64-pc-windows-msvc/release/herdr.exe")
+        executable = Path("other-target/x86_64-pc-windows-msvc/release/agent-fabric-fleetdeck.exe")
         cargo = mock.MagicMock()
         cargo.__enter__.return_value = cargo
         cargo.stdout = io.StringIO(
@@ -25,7 +25,7 @@ class WindowsConptyPackageTests(unittest.TestCase):
                 {
                     "reason": "compiler-artifact",
                     "manifest_path": str(package.PROJECT_ROOT / "Cargo.toml"),
-                    "target": {"name": "herdr", "kind": ["bin"]},
+                    "target": {"name": "agent-fabric-fleetdeck", "kind": ["bin"]},
                     "executable": str(executable),
                 }
             )
@@ -169,12 +169,12 @@ class WindowsConptyPackageTests(unittest.TestCase):
             package.stage_bundle(metadata_path, "x86_64", nupkg, herdr, stage)
             package.validate_stage(metadata_path, "x86_64", stage)
 
-            (stage / "herdr.exe").write_bytes(
+            (stage / "agent-fabric-fleetdeck.exe").write_bytes(
                 self._pe_with_imports(0x8664, ["MSVCP140D.dll"])
             )
             with self.assertRaisesRegex(ValueError, "dynamic Microsoft"):
                 package.validate_stage(metadata_path, "x86_64", stage)
-            (stage / "herdr.exe").write_bytes(
+            (stage / "agent-fabric-fleetdeck.exe").write_bytes(
                 self._pe_with_imports(0x8664, ["KERNEL32.dll"])
             )
 
@@ -190,7 +190,7 @@ class WindowsConptyPackageTests(unittest.TestCase):
 
             local = root / "local" / "release"
             local.mkdir(parents=True)
-            local_exe = local / "herdr.exe"
+            local_exe = local / "agent-fabric-fleetdeck.exe"
             local_exe.write_bytes(herdr.read_bytes())
             package.install_local_bundle(metadata_path, "x86_64", nupkg, local_exe)
             self.assertEqual((local / "conpty" / "conpty.dll").read_bytes(), dll)
@@ -225,7 +225,7 @@ class WindowsConptyPackageTests(unittest.TestCase):
 
             dangling_root = root / "dangling-root"
             dangling_root.mkdir()
-            dangling_exe = dangling_root / "herdr.exe"
+            dangling_exe = dangling_root / "agent-fabric-fleetdeck.exe"
             dangling_exe.write_bytes(herdr.read_bytes())
             try:
                 (dangling_root / "conpty").symlink_to("missing", target_is_directory=True)

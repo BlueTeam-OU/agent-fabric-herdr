@@ -72,6 +72,9 @@ const KIMI_HOOK_ASSET: &str = if cfg!(windows) {
     include_str!("assets/kimi/herdr-agent-state.sh")
 };
 const KIMI_INTEGRATION_VERSION: u32 = 7;
+// Written into Kimi's config and matched on reinstall and uninstall: kept
+// identical to Herdr's so either product replaces, never duplicates, the other's
+// block (docs/fleetdeck/IDENTITY.md).
 const KIMI_CONFIG_BLOCK_BEGIN: &str = "# >>> herdr kimi integration";
 const KIMI_CONFIG_BLOCK_END: &str = "# <<< herdr kimi integration";
 const KIMI_MIN_VERSION: &str = "0.14.0";

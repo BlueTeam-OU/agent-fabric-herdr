@@ -111,7 +111,7 @@ exec {sha256sum} "$@"
         manifest: dict[str, object] = {
             "version": "9.9.9",
             "assets": {
-                "linux-x86_64": "https://example.invalid/herdr-linux-x86_64"
+                "linux-x86_64": "https://example.invalid/agent-fabric-fleetdeck-linux-x86_64"
             },
         }
         if checksum is not None:
@@ -134,7 +134,7 @@ exec {sha256sum} "$@"
             "FAKE_MANIFEST": str(manifest),
             "FAKE_PAYLOAD": str(self.payload),
             "FAKE_CURL_MARKER": str(self.root / "curl-called"),
-            "HERDR_INSTALL_DIR": str(self.install_dir),
+            "AGENT_FABRIC_FLEETDECK_INSTALL_DIR": str(self.install_dir),
             **(extra_env or {}),
         }
         return subprocess.run(
@@ -155,11 +155,11 @@ exec {sha256sum} "$@"
                 result = self._run_installer(self.expected_sha256.upper(), tool)
 
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual((self.install_dir / "herdr").read_bytes(), self.payload.read_bytes())
+                self.assertEqual((self.install_dir / "agent-fabric-fleetdeck").read_bytes(), self.payload.read_bytes())
 
     def test_android_is_rejected_before_replacing_existing_binary(self) -> None:
         self.install_dir.mkdir()
-        installed = self.install_dir / "herdr"
+        installed = self.install_dir / "agent-fabric-fleetdeck"
         installed.write_bytes(b"existing-herdr\n")
 
         result = self._run_installer(
@@ -179,11 +179,11 @@ exec {sha256sum} "$@"
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.install_dir / "herdr").read_bytes(), self.payload.read_bytes())
+        self.assertEqual((self.install_dir / "agent-fabric-fleetdeck").read_bytes(), self.payload.read_bytes())
 
     def test_checksum_mismatch_does_not_replace_existing_binary(self) -> None:
         self.install_dir.mkdir()
-        installed = self.install_dir / "herdr"
+        installed = self.install_dir / "agent-fabric-fleetdeck"
         installed.write_bytes(b"existing-herdr\n")
 
         result = self._run_installer("0" * 64)
@@ -194,7 +194,7 @@ exec {sha256sum} "$@"
 
     def test_missing_checksum_fails_without_replacing_existing_binary(self) -> None:
         self.install_dir.mkdir()
-        installed = self.install_dir / "herdr"
+        installed = self.install_dir / "agent-fabric-fleetdeck"
         installed.write_bytes(b"existing-herdr\n")
 
         result = self._run_installer(None)

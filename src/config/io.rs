@@ -19,11 +19,14 @@ const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "worktrees",
 ];
 
+/// FleetDeck's own directory name under the config and state roots, so it
+/// never reads, writes or binds the sockets of a Herdr installation, which
+/// uses `herdr` and `herdr-dev` there.
 pub fn app_dir_name() -> &'static str {
     if cfg!(debug_assertions) {
-        "herdr-dev"
+        "agent-fabric-fleetdeck-dev"
     } else {
-        "herdr"
+        "agent-fabric-fleetdeck"
     }
 }
 
@@ -278,7 +281,9 @@ pub fn config_diagnostic_summary(diagnostics: &[String]) -> Option<String> {
         ""
     };
 
-    Some(format!("{target}{impact}; herdr config check"))
+    Some(format!(
+        "{target}{impact}; agent-fabric-fleetdeck config check"
+    ))
 }
 
 pub fn load_live_config() -> Result<LoadedConfig, Vec<String>> {
@@ -877,7 +882,7 @@ mod tests {
 
         assert_eq!(
             config_diagnostic_summary(&diagnostics).as_deref(),
-            Some("config.toml; herdr config check")
+            Some("config.toml; agent-fabric-fleetdeck config check")
         );
     }
 
@@ -890,7 +895,7 @@ mod tests {
 
         assert_eq!(
             config_diagnostic_summary(&diagnostics).as_deref(),
-            Some("config.toml has unknown keys; herdr config check")
+            Some("config.toml has unknown keys; agent-fabric-fleetdeck config check")
         );
     }
 
@@ -903,7 +908,7 @@ mod tests {
 
         assert_eq!(
             config_diagnostic_summary(&diagnostics).as_deref(),
-            Some("config.toml; herdr config check")
+            Some("config.toml; agent-fabric-fleetdeck config check")
         );
     }
 
@@ -916,7 +921,7 @@ mod tests {
 
         assert_eq!(
             config_diagnostic_summary(&diagnostics).as_deref(),
-            Some("config.toml invalid; using defaults; herdr config check")
+            Some("config.toml invalid; using defaults; agent-fabric-fleetdeck config check")
         );
     }
 
@@ -925,14 +930,14 @@ mod tests {
         let startup = vec!["config read error: permission denied; using defaults".to_string()];
         assert_eq!(
             config_diagnostic_summary(&startup).as_deref(),
-            Some("config.toml unreadable; using defaults; herdr config check")
+            Some("config.toml unreadable; using defaults; agent-fabric-fleetdeck config check")
         );
 
         let reload =
             vec!["config read error: permission denied; keeping current config".to_string()];
         assert_eq!(
             config_diagnostic_summary(&reload).as_deref(),
-            Some("config.toml unreadable; keeping current config; herdr config check")
+            Some("config.toml unreadable; keeping current config; agent-fabric-fleetdeck config check")
         );
     }
 
@@ -945,7 +950,9 @@ mod tests {
 
         assert_eq!(
             config_diagnostic_summary(&diagnostics).as_deref(),
-            Some("config.toml invalid; keeping current config; herdr config check")
+            Some(
+                "config.toml invalid; keeping current config; agent-fabric-fleetdeck config check"
+            )
         );
     }
 

@@ -1357,7 +1357,7 @@ command = ["echo", " a", "first "]
                 "plugin-missing-min-herdr",
                 r#"
 id = "example.missing-min-herdr"
-name = "Missing Min Herdr"
+name = "Missing Min FleetDeck"
 version = "0.1.0"
 platforms = ["linux", "macos", "windows"]
 "#,
@@ -1367,7 +1367,7 @@ platforms = ["linux", "macos", "windows"]
                 "plugin-invalid-min-herdr",
                 r#"
 id = "example.invalid-min-herdr"
-name = "Invalid Min Herdr"
+name = "Invalid Min FleetDeck"
 version = "0.1.0"
 min_herdr_version = "soon"
 platforms = ["linux", "macos", "windows"]
@@ -1378,7 +1378,7 @@ platforms = ["linux", "macos", "windows"]
                 "plugin-future-min-herdr",
                 r#"
 id = "example.future-min-herdr"
-name = "Future Min Herdr"
+name = "Future Min FleetDeck"
 version = "0.1.0"
 min_herdr_version = "999.0.0"
 platforms = ["linux", "macos", "windows"]
@@ -1547,7 +1547,10 @@ platforms = ["linux", "macos"]
     fn plugin_command_output_reader_caps_and_marks_truncation() {
         let output = read_capped_plugin_output("abcdef".as_bytes(), 3);
 
-        assert_eq!(output, "abc\n[herdr truncated plugin output after 3 bytes]");
+        assert_eq!(
+            output,
+            "abc\n[agent-fabric-fleetdeck truncated plugin output after 3 bytes]"
+        );
     }
 
     #[test]
@@ -1894,7 +1897,7 @@ command = ["sh", "-c", '"$HERDR_BIN_PATH" --list >/dev/null; printf "%s\n" "$?" 
             assert_eq!(
                 (action_status.trim(), pane_status.trim()),
                 ("0", "0"),
-                "plugin action and pane must launch Herdr after its executable is replaced"
+                "plugin action and pane must launch FleetDeck after its executable is replaced"
             );
             return;
         }
@@ -1908,7 +1911,7 @@ command = ["sh", "-c", '"$HERDR_BIN_PATH" --list >/dev/null; printf "%s\n" "$?" 
                 .as_nanos()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let executable = root.join("herdr test");
+        let executable = root.join("agent-fabric-fleetdeck test");
         std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
         let result = std::process::Command::new(&executable)
             .args([

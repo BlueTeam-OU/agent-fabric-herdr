@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HERDR_BIN="${HERDR_BIN:-$ROOT/target/debug/herdr}"
+HERDR_BIN="${HERDR_BIN:-$ROOT/target/debug/agent-fabric-fleetdeck}"
 BASE="${BASE:-$(mktemp -d /tmp/herdr-handoff-smoke.XXXXXX)}"
 CONFIG_HOME="$BASE/config"
 RUNTIME_DIR="$BASE/runtime"
@@ -47,9 +47,9 @@ run_herdr() {
 session_dir() {
   local session="$1"
   if [[ "$session" == "default" ]]; then
-    printf '%s/herdr-dev' "$CONFIG_HOME"
+    printf '%s/agent-fabric-fleetdeck-dev' "$CONFIG_HOME"
   else
-    printf '%s/herdr-dev/sessions/%s' "$CONFIG_HOME" "$session"
+    printf '%s/agent-fabric-fleetdeck-dev/sessions/%s' "$CONFIG_HOME" "$session"
   fi
 }
 
@@ -64,7 +64,7 @@ client_socket() {
 assert_smoke_socket() {
   local socket="$1"
   case "$socket" in
-    "$CONFIG_HOME"/herdr-dev/herdr.sock | "$CONFIG_HOME"/herdr-dev/sessions/*/herdr.sock)
+    "$CONFIG_HOME"/agent-fabric-fleetdeck-dev/herdr.sock | "$CONFIG_HOME"/agent-fabric-fleetdeck-dev/sessions/*/herdr.sock)
       ;;
     *)
       echo "refusing to use non-smoke socket: $socket" >&2
@@ -182,8 +182,8 @@ echo "using herdr: $HERDR_BIN"
 echo "smoke base: $BASE"
 
 cargo build --locked --manifest-path "$ROOT/Cargo.toml" >/dev/null
-mkdir -p "$CONFIG_HOME/herdr-dev" "$RUNTIME_DIR" "$STATE_DIR"
-printf 'onboarding = false\n' > "$CONFIG_HOME/herdr-dev/config.toml"
+mkdir -p "$CONFIG_HOME/agent-fabric-fleetdeck-dev" "$RUNTIME_DIR" "$STATE_DIR"
+printf 'onboarding = false\n' > "$CONFIG_HOME/agent-fabric-fleetdeck-dev/config.toml"
 
 for session in "${sessions[@]}"; do
   echo "starting smoke session $session at $(api_socket "$session")"

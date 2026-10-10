@@ -306,7 +306,7 @@ fn retired_pane_graphics_method_error(line: &str, id: &str) -> Option<ErrorRespo
 fn prepare_socket_path(path: &Path) -> std::io::Result<()> {
     crate::ipc::prepare_socket_path(path, |path| {
         format!(
-            "herdr is already running (socket busy at {})",
+            "agent-fabric-fleetdeck is already running (socket busy at {})",
             path.display()
         )
     })

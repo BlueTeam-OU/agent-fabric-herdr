@@ -19,8 +19,10 @@ pub(crate) fn init_file_logging(file_name: &str) {
         return;
     };
 
-    let filter =
-        EnvFilter::try_from_env("HERDR_LOG").unwrap_or_else(|_| EnvFilter::new("herdr=info"));
+    // The default target is the crate's own name, which the rename to
+    // agent-fabric-fleetdeck changed from `herdr`.
+    let filter = EnvFilter::try_from_env("HERDR_LOG")
+        .unwrap_or_else(|_| EnvFilter::new(concat!(env!("CARGO_CRATE_NAME"), "=info")));
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -44,7 +46,7 @@ pub(crate) fn startup(role: &'static str) {
         subsystem = role,
         outcome = "started",
         pid = std::process::id(),
-        "herdr starting"
+        "agent-fabric-fleetdeck starting"
     );
 }
 
@@ -54,7 +56,7 @@ pub(crate) fn shutdown(role: &'static str) {
         subsystem = role,
         outcome = "completed",
         pid = std::process::id(),
-        "herdr exiting"
+        "agent-fabric-fleetdeck exiting"
     );
 }
 

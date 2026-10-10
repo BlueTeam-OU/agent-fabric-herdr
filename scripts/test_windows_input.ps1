@@ -89,16 +89,16 @@ if (-not $ExePath) {
         if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE" }
     } finally { Pop-Location }
     $targetRoot = if ($env:CARGO_TARGET_DIR) { [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR, $repo) } else { Join-Path $repo 'target' }
-    $builtExe = Join-Path $targetRoot 'release/herdr.exe'
+    $builtExe = Join-Path $targetRoot 'release/agent-fabric-fleetdeck.exe'
     $package = Join-Path $repo '.local/windows-input/cache/Microsoft.Windows.Console.ConPTY.nupkg'
     $stage = Join-Path $root 'package'
     Write-Host 'Staging the current binary with the pinned ConPTY runtime'
     $null = Invoke-GauntletProcess $python @((Join-Path $PSScriptRoot 'package_windows_conpty.py'), 'stage', '--package', $package, '--herdr-exe', $builtExe, '--output-dir', $stage) -Timeout 300
-    $ExePath = Join-Path $stage 'herdr.exe'
+    $ExePath = Join-Path $stage 'agent-fabric-fleetdeck.exe'
 }
 $exe = (Resolve-Path -LiteralPath $ExePath).Path
 $conpty = Join-Path ([IO.Path]::GetDirectoryName($exe)) 'conpty/conpty.dll'
-if (-not (Test-Path -LiteralPath $conpty -PathType Leaf)) { throw "Selected Herdr binary has no adjacent bundled ConPTY runtime: $exe. Pass -ExePath to a packaged herdr.exe" }
+if (-not (Test-Path -LiteralPath $conpty -PathType Leaf)) { throw "Selected Herdr binary has no adjacent bundled ConPTY runtime: $exe. Pass -ExePath to a packaged agent-fabric-fleetdeck.exe" }
 $pwsh = (Get-Process -Id $PID).Path
 $exeHash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
 if ($sourceCommit) { Write-Host "Source: $sourceCommit$(if ($sourceDirty) { ' + working tree changes' })" }

@@ -20,6 +20,8 @@ concurrency:
 
 jobs:
   trigger:
+    # Herdr's own automation (its bot token, its website); FleetDeck has neither.
+    if: github.repository == 'herdrdev/herdr'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

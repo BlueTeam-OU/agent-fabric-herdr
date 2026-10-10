@@ -32,9 +32,9 @@ STUBS = {
     """,
     "moveto": "exit 0",
     "fabric-whoami": 'echo \'{"address": "testhost/operator"}\'',
-    # herdr: `server` listens on STUB_SOCK; `session list` names it; the rest
-    # answers nothing, as a server with no workspace would.
-    "herdr": """
+    # agent-fabric-fleetdeck: `server` listens on STUB_SOCK; `session list`
+    # names it; the rest answers nothing, as a server with no workspace would.
+    "agent-fabric-fleetdeck": """
         case "$1" in
         server)
             echo started >> "$STUB_DIR/servers"
@@ -100,7 +100,8 @@ class FleetDeckTest(unittest.TestCase):
         patch = mock.patch.dict(os.environ, env)
         patch.start()
         self.addCleanup(patch.stop)
-        for name in ("HERDR_ENV", "HERDR_POPUP", "HERDR_SOCKET_PATH", "HERDR_SESSION"):
+        for name in ("HERDR_ENV", "HERDR_POPUP", "HERDR_SOCKET_PATH", "HERDR_SESSION",
+                     "AGENT_FABRIC_FLEETDECK"):
             os.environ.pop(name, None)
         self.addCleanup(self.clean)
         self.said = []
@@ -203,8 +204,9 @@ class FleetDeckTest(unittest.TestCase):
         self.assertEqual(fleet_deck.status(self.say), 0)
         self.assertIn(f"deck controller: running, pid {lock_holder(lock_path())}", self.said)
 
-    def test_start_refuses_inside_a_herdr_pane(self):
+    def test_start_refuses_inside_a_fleetdeck_pane(self):
         os.environ["HERDR_ENV"] = "1"
+        os.environ["AGENT_FABRIC_FLEETDECK"] = "1"
         with mock.patch("sys.stderr"):
             self.assertEqual(fleet_deck.main(["start", "--no-fleet-tab"]), 2)
         self.assertIsNone(lock_holder(lock_path()))
@@ -288,7 +290,15 @@ class FleetDeckTest(unittest.TestCase):
     def test_a_missing_herdr_is_named(self):
         os.environ["PATH"] = os.path.join(self.dir, "empty")
         self.assertFalse(fleet_deck.ensure_server(self.say))
-        self.assertIn("herdr is not on PATH", self.said)
+        self.assertIn("agent-fabric-fleetdeck is not on PATH", self.said)
+
+    def test_a_herdr_panes_context_is_not_the_decks(self):
+        # Inside a pane a Herdr server started, its socket is another
+        # product's: the deck neither counts itself in a pane nor reads it.
+        os.environ["HERDR_ENV"] = "1"
+        os.environ["HERDR_SOCKET_PATH"] = os.path.join(self.dir, "herdr.sock")
+        self.assertFalse(fleet_deck.in_herdr_pane())
+        self.assertEqual(fleet_deck.herdr_socket_path(), os.environ["STUB_SOCK"])
 
     def test_a_controller_that_cannot_be_run_says_so_in_its_log(self):
         with mock.patch.object(fleet_deck, "DECK", os.path.join(self.dir, "no-such-deck")), \

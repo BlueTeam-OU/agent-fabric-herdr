@@ -714,7 +714,7 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         run_git(&seed, &["init", "--quiet"]);
         run_git(&seed, &["config", "user.email", "herdr@example.invalid"]);
-        run_git(&seed, &["config", "user.name", "Herdr Test"]);
+        run_git(&seed, &["config", "user.name", "FleetDeck Test"]);
         run_git(
             &seed,
             &["commit", "--quiet", "--allow-empty", "-m", "initial"],
@@ -814,7 +814,7 @@ mod tests {
         }
 
         run_git(&root, &["config", "user.email", "herdr@example.invalid"]);
-        run_git(&root, &["config", "user.name", "Herdr Test"]);
+        run_git(&root, &["config", "user.name", "FleetDeck Test"]);
         run_git(&root, &["commit", "--allow-empty", "-m", "initial"]);
 
         let head_oid = git_rev_parse_verify(&root, "HEAD").unwrap();

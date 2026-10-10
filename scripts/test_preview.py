@@ -13,9 +13,9 @@ import scripts.preview as preview
 class PreviewNotesTests(unittest.TestCase):
     def test_notes_contain_only_build_and_comparison_link(self):
         self.assertEqual(
-            preview.build_notes("previous-sha", "current-sha", "2026-09-16-abcdef123456", "herdrdev/herdr"),
+            preview.build_notes("previous-sha", "current-sha", "2026-09-16-abcdef123456", "BlueTeam-OU/agent-fabric-fleetdeck"),
             "Preview build 2026-09-16-abcdef123456\n\n"
-            "[View changes](https://github.com/herdrdev/herdr/compare/previous-sha...current-sha)\n",
+            "[View changes](https://github.com/BlueTeam-OU/agent-fabric-fleetdeck/compare/previous-sha...current-sha)\n",
         )
 
     def test_build_manifest_archives_assets_with_selected_source_generation(self):
@@ -24,7 +24,7 @@ class PreviewNotesTests(unittest.TestCase):
             notes = "Preview notes\n"
             content = preview.build_manifest(
                 output=output,
-                repo="herdrdev/herdr",
+                repo="BlueTeam-OU/agent-fabric-fleetdeck",
                 tag="preview-2026-06-02-abcdef123456",
                 build_id="2026-06-02-abcdef123456",
                 commit="abcdef1234567890",
@@ -52,7 +52,7 @@ class PreviewNotesTests(unittest.TestCase):
             )
             self.assertEqual(
                 data["assets"]["windows-x86_64"]["url"],
-                "https://github.com/herdrdev/herdr/releases/download/preview-2026-06-02-abcdef123456/herdr-windows-x86_64.zip",
+                "https://github.com/BlueTeam-OU/agent-fabric-fleetdeck/releases/download/preview-2026-06-02-abcdef123456/agent-fabric-fleetdeck-windows-x86_64.zip",
             )
             self.assertEqual(
                 data["assets"]["windows-x86_64"]["sha256"],
@@ -70,7 +70,7 @@ class PreviewNotesTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "windows-x86_64 requires"):
                 preview.build_manifest(
                     output=Path(tmp) / "preview.json",
-                    repo="herdrdev/herdr",
+                    repo="BlueTeam-OU/agent-fabric-fleetdeck",
                     tag="preview-test",
                     build_id="test",
                     commit="abcdef",
@@ -131,9 +131,12 @@ class PreviewNotesTests(unittest.TestCase):
             git("config", "user.email", "test@example.com")
             git("config", "user.name", "Test User")
 
+            (repo / "Cargo.toml").write_text(
+                '[package]\nname = "agent-fabric-fleetdeck"\n', encoding="utf-8"
+            )
             marker = repo / "marker.txt"
             marker.write_text("preview\n", encoding="utf-8")
-            git("add", "marker.txt")
+            git("add", "marker.txt", "Cargo.toml")
             git("commit", "-m", "feat: previous preview")
             previous_preview = git("rev-parse", "HEAD")
 
@@ -151,6 +154,36 @@ class PreviewNotesTests(unittest.TestCase):
                 )
             finally:
                 os.chdir(original_cwd)
+
+class StableTagTests(unittest.TestCase):
+    def test_inherited_herdr_tags_are_not_fleetdeck_stable_releases(self):
+        with tempfile.TemporaryDirectory(prefix="fleetdeck-preview-") as root:
+            def git(*args):
+                return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
+
+            def commit(name, version):
+                Path(root, "Cargo.toml").write_text(
+                    f'[package]\nname = "{name}"\nversion = "{version}"\n', encoding="utf-8"
+                )
+                git("add", ".")
+                git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", version)
+
+            git("init", "-q", "-b", "master")
+            commit("herdr", "0.9.3")
+            git("-c", "tag.gpgsign=false", "tag", "v0.9.3")
+            previous_cwd = Path.cwd()
+            os.chdir(root)
+            try:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    preview.latest_stable_tag()
+                commit("agent-fabric-fleetdeck", "0.10.0")
+                git("-c", "tag.gpgsign=false", "tag", "v0.10.0")
+                commit("herdr", "0.11.0")
+                git("-c", "tag.gpgsign=false", "tag", "v0.11.0")
+                self.assertEqual(preview.latest_stable_tag(), "v0.10.0")
+            finally:
+                os.chdir(previous_cwd)
+
 
 class ConventionalCommitTests(unittest.TestCase):
     def test_valid_subjects_allow_scopes_and_bang(self):

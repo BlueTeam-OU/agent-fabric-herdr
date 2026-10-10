@@ -370,7 +370,7 @@ pub(crate) fn integration_update_instructions(
         .iter()
         .map(|target| {
             format!(
-                "`herdr integration install {}`",
+                "`agent-fabric-fleetdeck integration install {}`",
                 integration_target_label(*target)
             )
         })
@@ -394,7 +394,7 @@ pub(crate) fn print_outdated_update_notice() -> bool {
         .map(|integration| integration.target)
         .collect::<Vec<_>>();
     eprintln!(
-        "installed herdr integrations need updating; {}.",
+        "installed agent-fabric-fleetdeck integrations need updating; {}.",
         integration_update_instructions(&targets).replace('`', "")
     );
     true

@@ -43,6 +43,10 @@ impl App {
                 crate::api::socket_path().display().to_string(),
             ),
             ("HERDR_ENV".to_string(), "1".to_string()),
+            (
+                crate::identity::PANE_MARKER_ENV_VAR.to_string(),
+                "1".to_string(),
+            ),
             ("HERDR_PLUGIN_ID".to_string(), plugin.plugin_id.clone()),
             ("HERDR_PLUGIN_CONTEXT_JSON".to_string(), context_json),
         ]);
@@ -357,7 +361,7 @@ pub(super) fn read_capped_plugin_output(mut reader: impl Read, cap: usize) -> St
     let mut output = String::from_utf8_lossy(&kept).into_owned();
     if truncated {
         output.push_str(&format!(
-            "\n[herdr truncated plugin output after {cap} bytes]"
+            "\n[agent-fabric-fleetdeck truncated plugin output after {cap} bytes]"
         ));
     }
     output
