@@ -1,9 +1,9 @@
 [CmdletBinding()]
 param(
-    [string]$Channel = $env:HERDR_CHANNEL,
-    [string]$ManifestUrl = $env:HERDR_MANIFEST_URL,
-    [string]$InstallDir = $env:HERDR_INSTALL_DIR,
-    [string]$ExpectedBuildId = $env:HERDR_EXPECTED_BUILD_ID,
+    [string]$Channel = $env:AGENT_FABRIC_FLEETDECK_CHANNEL,
+    [string]$ManifestUrl = $env:AGENT_FABRIC_FLEETDECK_MANIFEST_URL,
+    [string]$InstallDir = $env:AGENT_FABRIC_FLEETDECK_INSTALL_DIR,
+    [string]$ExpectedBuildId = $env:AGENT_FABRIC_FLEETDECK_EXPECTED_BUILD_ID,
     [int]$Retain = 3,
     [string]$LocalPackagePath,
     [string]$LocalPackageFormat,
@@ -17,7 +17,7 @@ $ProgressPreference = "SilentlyContinue"
 
 $channelWasExplicit = -not [string]::IsNullOrWhiteSpace($Channel)
 if ($channelWasExplicit -and $Channel -notin @("stable", "preview")) {
-    Write-Error "Invalid Herdr channel '$Channel'. Use 'stable' or 'preview'."
+    Write-Error "Invalid FleetDeck channel '$Channel'. Use 'stable' or 'preview'."
     exit 1
 }
 
@@ -33,7 +33,7 @@ if ($localPackageValueCount -notin @(0, 4)) {
 }
 $useLocalPackage = $localPackageValueCount -eq 4
 if ($useLocalPackage -and $LocalPackageFormat -notin @("zip", "exe")) {
-    throw "Local Herdr package has unsupported format '$LocalPackageFormat'."
+    throw "Local FleetDeck package has unsupported format '$LocalPackageFormat'."
 }
 
 function Write-Step {
@@ -47,7 +47,7 @@ function Write-WarningStep {
 }
 
 function Get-HerdrCommandSource {
-    $existing = Get-Command herdr -ErrorAction SilentlyContinue
+    $existing = Get-Command agent-fabric-fleetdeck -ErrorAction SilentlyContinue
     if ($null -eq $existing) {
         return $null
     }
@@ -60,7 +60,7 @@ function Get-HerdrMigrationFallback {
 
     if (Test-IsJunction -Path $CurrentDir) {
         $target = [string](Get-Item -LiteralPath $CurrentDir -Force).Target
-        $candidate = Join-Path $target "herdr.exe"
+        $candidate = Join-Path $target "agent-fabric-fleetdeck.exe"
         if (Test-RegularFile -Path $candidate) {
             return $candidate
         }
@@ -78,14 +78,14 @@ function Get-HerdrExecutableKind {
     )
 
     if ([string]::IsNullOrWhiteSpace($Path) -or
-        -not [System.IO.Path]::GetFileName($Path).Equals("herdr.exe", [System.StringComparison]::OrdinalIgnoreCase)) {
+        -not [System.IO.Path]::GetFileName($Path).Equals("agent-fabric-fleetdeck.exe", [System.StringComparison]::OrdinalIgnoreCase)) {
         return $null
     }
 
     try {
         $fullPath = [System.IO.Path]::GetFullPath($Path)
         foreach ($alias in @($CurrentDir, $VisibleBinDir)) {
-            $aliasHerdr = [System.IO.Path]::GetFullPath((Join-Path $alias "herdr.exe"))
+            $aliasHerdr = [System.IO.Path]::GetFullPath((Join-Path $alias "agent-fabric-fleetdeck.exe"))
             if ($fullPath.Equals($aliasHerdr, [System.StringComparison]::OrdinalIgnoreCase)) {
                 return "alias"
             }
@@ -261,13 +261,13 @@ function Invoke-CurlDownload {
     $parsedUri = $null
     if (-not [System.Uri]::TryCreate($Uri, [System.UriKind]::Absolute, [ref]$parsedUri) -or
         $parsedUri.Scheme -notin @("http", "https")) {
-        throw "Herdr download URL must use HTTP or HTTPS: $Uri"
+        throw "FleetDeck download URL must use HTTP or HTTPS: $Uri"
     }
 
     $curl = Get-Command curl.exe -CommandType Application -ErrorAction SilentlyContinue |
         Select-Object -First 1
     if ($null -eq $curl) {
-        throw "Herdr installation requires curl.exe, which is included with supported Windows versions."
+        throw "FleetDeck installation requires curl.exe, which is included with supported Windows versions."
     }
 
     $arguments = @(
@@ -345,7 +345,7 @@ function Test-FileDigest {
         $sha256.Dispose()
     }
     if ($actual -ne $ExpectedDigest.ToLowerInvariant()) {
-        throw "Downloaded Herdr checksum did not match. Expected $ExpectedDigest but got $actual."
+        throw "Downloaded FleetDeck checksum did not match. Expected $ExpectedDigest but got $actual."
     }
 }
 
@@ -378,7 +378,7 @@ function Test-HerdrReleaseComplete {
     if (-not (Test-RegularDirectory -Path $ReleaseDir)) {
         return $false
     }
-    $herdrExe = Join-Path $ReleaseDir "herdr.exe"
+    $herdrExe = Join-Path $ReleaseDir "agent-fabric-fleetdeck.exe"
     if (-not (Test-RegularFile -Path $herdrExe)) {
         return $false
     }
@@ -514,7 +514,7 @@ function Remove-DirectoryWithRetry {
             return
         } catch {
             if ([DateTime]::UtcNow -ge $deadline) {
-                Write-WarningStep "Herdr installed successfully but could not remove a temporary release backup at $Path."
+                Write-WarningStep "FleetDeck installed successfully but could not remove a temporary release backup at $Path."
                 return
             }
             Start-Sleep -Milliseconds 100
@@ -615,13 +615,13 @@ function Move-LegacyHerdrBinDirectory {
         return $false
     }
 
-    if (($entries | Where-Object { $_.Name -ieq "herdr.exe" } | Select-Object -First 1) -eq $null) {
+    if (($entries | Where-Object { $_.Name -ieq "agent-fabric-fleetdeck.exe" } | Select-Object -First 1) -eq $null) {
         return $false
     }
 
     $legacyPath = "$Path.legacy.$([System.Guid]::NewGuid().ToString("N"))"
     Move-Item -LiteralPath $Path -Destination $legacyPath
-    Write-Step "Moved legacy Herdr bin directory to $legacyPath."
+    Write-Step "Moved legacy FleetDeck bin directory to $legacyPath."
     return $true
 }
 
@@ -691,7 +691,7 @@ if ($env:OS -ne "Windows_NT") {
 }
 
 if (-not [Environment]::Is64BitOperatingSystem) {
-    Write-Error "Herdr requires 64-bit Windows."
+    Write-Error "FleetDeck requires 64-bit Windows."
     exit 1
 }
 
@@ -712,10 +712,10 @@ switch ($architecture) {
     }
 }
 
-$herdrHome = if ([string]::IsNullOrWhiteSpace($env:HERDR_HOME)) {
-    Join-Path $env:USERPROFILE ".herdr"
+$herdrHome = if ([string]::IsNullOrWhiteSpace($env:AGENT_FABRIC_FLEETDECK_HOME)) {
+    Join-Path $env:USERPROFILE ".agent-fabric-fleetdeck"
 } else {
-    $env:HERDR_HOME
+    $env:AGENT_FABRIC_FLEETDECK_HOME
 }
 $herdrHome = [System.IO.Path]::GetFullPath($herdrHome)
 $standaloneRoot = Join-Path $herdrHome "packages\standalone"
@@ -723,7 +723,7 @@ $releasesDir = Join-Path $standaloneRoot "releases"
 $currentDir = Join-Path $standaloneRoot "current"
 $lockPath = Join-Path $standaloneRoot "install.lock"
 
-$defaultVisibleBinDir = Join-Path $env:LOCALAPPDATA "Programs\Herdr\bin"
+$defaultVisibleBinDir = Join-Path $env:LOCALAPPDATA "Programs\FleetDeck\bin"
 $visibleBinDir = if ([string]::IsNullOrWhiteSpace($InstallDir)) {
     $defaultVisibleBinDir
 } else {
@@ -748,8 +748,8 @@ $existingHerdrKind = Get-HerdrExecutableKind `
     -CurrentDir $currentDir `
     -VisibleBinDir $visibleBinDir
 if (-not [string]::IsNullOrWhiteSpace($commandHerdr) -and $null -eq $existingHerdrKind) {
-    Write-Step "Detected existing Herdr command at $commandHerdr"
-    Write-WarningStep "PATH order decides which Herdr runs. This installer will put the active versioned release first for future and current PowerShell sessions."
+    Write-Step "Detected existing FleetDeck command at $commandHerdr"
+    Write-WarningStep "PATH order decides which FleetDeck runs. This installer will put the active versioned release first for future and current PowerShell sessions."
 }
 
 if ($useLocalPackage) {
@@ -761,16 +761,16 @@ if ($useLocalPackage) {
 } else {
     if (-not $channelWasExplicit) {
         if (-not [string]::IsNullOrWhiteSpace($channelHerdr) -and $null -eq $existingHerdrKind) {
-            throw "Refusing to run unrecognized Herdr command at $channelHerdr to detect its update channel. Rerun with -Channel stable or -Channel preview."
+            throw "Refusing to run unrecognized FleetDeck command at $channelHerdr to detect its update channel. Rerun with -Channel stable or -Channel preview."
         }
         if (-not [string]::IsNullOrWhiteSpace($channelHerdr)) {
             $detectedChannel = [string](& $channelHerdr channel show 2>$null | Select-Object -Last 1)
             $detectedChannel = $detectedChannel.Trim()
             if ($LASTEXITCODE -ne 0 -or $detectedChannel -notin @("stable", "preview")) {
-                throw "Could not determine the existing Herdr update channel. Rerun with -Channel stable or -Channel preview."
+                throw "Could not determine the existing FleetDeck update channel. Rerun with -Channel stable or -Channel preview."
             }
             $Channel = $detectedChannel
-            Write-Step "Preserving existing Herdr $Channel channel"
+            Write-Step "Preserving existing FleetDeck $Channel channel"
         } elseif (-not [string]::IsNullOrWhiteSpace($ManifestUrl) -and $ManifestUrl -match "/preview\.json$") {
             $Channel = "preview"
         } else {
@@ -780,13 +780,13 @@ if ($useLocalPackage) {
 
     if ([string]::IsNullOrWhiteSpace($ManifestUrl)) {
         $ManifestUrl = if ($Channel -eq "preview") {
-            "https://herdr.dev/preview.json"
+            "https://raw.githubusercontent.com/BlueTeam-OU/agent-fabric-fleetdeck/master/distribution/preview.json"
         } else {
-            "https://herdr.dev/latest.json"
+            "https://raw.githubusercontent.com/BlueTeam-OU/agent-fabric-fleetdeck/master/distribution/latest.json"
         }
     }
 
-    Write-Step "Fetching Herdr $Channel manifest"
+    Write-Step "Fetching FleetDeck $Channel manifest"
     $manifest = Get-RemoteManifest -Uri $ManifestUrl
     $manifestChannelProperty = $manifest.PSObject.Properties["channel"]
     if (-not $channelWasExplicit -and $null -ne $manifestChannelProperty -and [string]$manifestChannelProperty.Value -eq "preview") {
@@ -805,7 +805,7 @@ if ($useLocalPackage) {
         Write-WarningStep "The stable manifest does not include Windows yet; using preview during the stable-channel rollout."
         $Channel = "preview"
         $ManifestUrl = $ManifestUrl.Substring(0, $ManifestUrl.Length - "latest.json".Length) + "preview.json"
-        Write-Step "Fetching Herdr preview manifest"
+        Write-Step "Fetching FleetDeck preview manifest"
         $manifest = Get-RemoteManifest -Uri $ManifestUrl
     }
     $asset = Get-ManifestAsset -Manifest $manifest -Target $target
@@ -818,7 +818,7 @@ $safeVersionIdentity = $versionIdentity -replace '[^0-9A-Za-z._-]', '-'
 $releaseName = "$safeVersionIdentity-$targetTriple"
 $releaseDir = Join-Path $releasesDir $releaseName
 
-Write-Step "Installing Herdr $versionIdentity for $targetTriple"
+Write-Step "Installing FleetDeck $versionIdentity for $targetTriple"
 $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("herdr-install-" + [System.Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
 
@@ -835,7 +835,7 @@ try {
             }
             $stagingDir = Join-Path $releasesDir ".staging.$releaseName.$PID"
             if (-not $useLocalPackage) {
-                Write-Step "Downloading Herdr"
+                Write-Step "Downloading FleetDeck"
                 Invoke-CurlDownload -Uri $asset.Url -Destination $downloadPath
             }
             Test-FileDigest -Path $downloadPath -ExpectedDigest $asset.Sha256
@@ -844,15 +844,15 @@ try {
                 Expand-Archive -LiteralPath $downloadPath -DestinationPath $stagingDir
             } else {
                 New-Item -ItemType Directory -Force -Path $stagingDir | Out-Null
-                Copy-Item -LiteralPath $downloadPath -Destination (Join-Path $stagingDir "herdr.exe")
+                Copy-Item -LiteralPath $downloadPath -Destination (Join-Path $stagingDir "agent-fabric-fleetdeck.exe")
             }
             if (-not (Test-HerdrReleaseComplete -ReleaseDir $stagingDir -Format $asset.Format)) {
-                throw "Downloaded Herdr package is incomplete or failed ConPTY verification."
+                throw "Downloaded FleetDeck package is incomplete or failed ConPTY verification."
             }
-            $stagedHerdr = Join-Path $stagingDir "herdr.exe"
+            $stagedHerdr = Join-Path $stagingDir "agent-fabric-fleetdeck.exe"
             & $stagedHerdr --version *> $null
             if ($LASTEXITCODE -ne 0) {
-                throw "Downloaded Herdr command failed verification: $stagedHerdr --version"
+                throw "Downloaded FleetDeck command failed verification: $stagedHerdr --version"
             }
             $backupDir = $null
             if (Test-Path -LiteralPath $releaseDir) {
@@ -870,10 +870,10 @@ try {
             }
         }
 
-        $releaseHerdr = Join-Path $releaseDir "herdr.exe"
+        $releaseHerdr = Join-Path $releaseDir "agent-fabric-fleetdeck.exe"
         & $releaseHerdr --version *> $null
         if ($LASTEXITCODE -ne 0) {
-            throw "Installed Herdr command failed verification: $releaseHerdr --version"
+            throw "Installed FleetDeck command failed verification: $releaseHerdr --version"
         }
         Get-ChildItem -LiteralPath $releasesDir -Force -Directory -Filter ".backup.$releaseName.*" -ErrorAction SilentlyContinue |
             ForEach-Object { Remove-DirectoryWithRetry -Path $_.FullName }
@@ -921,7 +921,7 @@ $resolvedHerdrKind = Get-HerdrExecutableKind `
     -ReleasesDir $releasesDir `
     -CurrentDir $currentDir `
     -VisibleBinDir $visibleBinDir
-$releaseHerdr = Join-Path $releaseDir "herdr.exe"
+$releaseHerdr = Join-Path $releaseDir "agent-fabric-fleetdeck.exe"
 if ($resolvedHerdrKind -ne "release" -or
     -not [System.IO.Path]::GetFullPath($resolvedHerdr).Equals(
         [System.IO.Path]::GetFullPath($releaseHerdr),
@@ -932,4 +932,4 @@ if ($resolvedHerdrKind -ne "release" -or
 
 Write-Step "Current PowerShell session: herdr"
 Write-Step "Future PowerShell windows: open a new PowerShell window and run: herdr"
-Write-Host "Herdr $versionIdentity installed successfully."
+Write-Host "FleetDeck $versionIdentity installed successfully."

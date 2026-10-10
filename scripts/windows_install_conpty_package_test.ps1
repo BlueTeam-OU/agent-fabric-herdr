@@ -111,7 +111,7 @@ $webRoot = Join-Path $root "web"
 $herdrHome = Join-Path $root "home"
 $installDir = Join-Path $root "bin"
 New-Item -ItemType Directory -Force -Path $webRoot | Out-Null
-Copy-Item -LiteralPath $archive -Destination (Join-Path $webRoot "herdr-windows-x86_64.zip")
+Copy-Item -LiteralPath $archive -Destination (Join-Path $webRoot "agent-fabric-fleetdeck-windows-x86_64.zip")
 Copy-Item -LiteralPath $installerPath -Destination (Join-Path $webRoot "install.ps1")
 $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
 
@@ -125,7 +125,7 @@ $previewManifest = @{
     build_id = "installer-test"
     assets = @{
         "windows-x86_64" = @{
-            url = "http://127.0.0.1:$port/herdr-windows-x86_64.zip"
+            url = "http://127.0.0.1:$port/agent-fabric-fleetdeck-windows-x86_64.zip"
             sha256 = $hash
             format = "zip"
         }
@@ -138,7 +138,7 @@ $legacyStableManifest = @{
 $stableManifest = @{
     version = "0.0.1"
     assets = @{
-        "windows-x86_64" = "http://127.0.0.1:$port/herdr-windows-x86_64.zip"
+        "windows-x86_64" = "http://127.0.0.1:$port/agent-fabric-fleetdeck-windows-x86_64.zip"
     }
     sha256 = @{
         "windows-x86_64" = $hash
@@ -154,7 +154,7 @@ $legacyStableManifest | Out-File -LiteralPath $stableManifestPath -Encoding utf8
 $customPreviewManifest | ConvertTo-Json -Depth 5 | Out-File -LiteralPath $customPreviewManifestPath -Encoding utf8
 
 $server = $null
-$oldHerdrHome = $env:HERDR_HOME
+$oldHerdrHome = $env:AGENT_FABRIC_FLEETDECK_HOME
 $oldInstallerUrl = $env:HERDR_INSTALLER_URL
 $oldProcessPath = $env:Path
 $registryOptions = [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
@@ -176,7 +176,7 @@ $realUserPathKind = if ($realUserPathExisted) {
 $realUserEnvironmentKey.Dispose()
 try {
     $server = Start-Process python -ArgumentList @("-m", "http.server", "$port", "--bind", "127.0.0.1", "--directory", $webRoot) -PassThru -WindowStyle Hidden
-    $env:HERDR_HOME = Join-Path $root "unused\..\home"
+    $env:AGENT_FABRIC_FLEETDECK_HOME = Join-Path $root "unused\..\home"
     $previewManifestUrl = "http://127.0.0.1:$port/preview.json"
     $stableManifestUrl = "http://127.0.0.1:$port/latest.json"
     for ($attempt = 0; $attempt -lt 20; $attempt++) {
@@ -192,7 +192,7 @@ try {
     $freshStableHome = Join-Path $root "fresh-stable-home"
     $freshStableBin = Join-Path $root "fresh-stable-bin"
     $stableManifest | Out-File -LiteralPath $stableManifestPath -Encoding utf8
-    $env:HERDR_HOME = $freshStableHome
+    $env:AGENT_FABRIC_FLEETDECK_HOME = $freshStableHome
     $env:HERDR_INSTALLER_URL = "http://127.0.0.1:$port/install.ps1"
     $env:Path = $oldProcessPath
     & $bootstrapPath `
@@ -210,7 +210,7 @@ try {
     }
 
     $legacyStableManifest | Out-File -LiteralPath $stableManifestPath -Encoding utf8
-    $env:HERDR_HOME = Join-Path $root "unused\..\home"
+    $env:AGENT_FABRIC_FLEETDECK_HOME = Join-Path $root "unused\..\home"
     $env:Path = $oldProcessPath
     & $installerPath `
         -ManifestUrl $stableManifestUrl `
@@ -221,7 +221,7 @@ try {
     & $installerPath "preview" $previewManifestUrl $installDir "installer-test" 3
 
     $localInstallDir = Join-Path $root "local-bin"
-    $env:HERDR_HOME = Join-Path $root "local-home"
+    $env:AGENT_FABRIC_FLEETDECK_HOME = Join-Path $root "local-home"
     $partialLocalModeRejected = $false
     try {
         & $installerPath `
@@ -263,13 +263,13 @@ try {
         -LocalPackageFormat "zip" `
         -LocalPackageIdentity "0.0.0-preview.local-package" `
         -LocalPackageSha256 $hash
-    if (-not (Test-Path -LiteralPath (Join-Path $localInstallDir "herdr.exe") -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath (Join-Path $localInstallDir "agent-fabric-fleetdeck.exe") -PathType Leaf)) {
         throw "installer did not activate the verified local package"
     }
-    $env:HERDR_HOME = $herdrHome
+    $env:AGENT_FABRIC_FLEETDECK_HOME = $herdrHome
 
     $required = @(
-        "herdr.exe",
+        "agent-fabric-fleetdeck.exe",
         "conpty\herdr-conpty.json",
         "conpty\conpty.dll",
         "conpty\x64\OpenConsole.exe",
@@ -294,7 +294,7 @@ try {
     $pathWithoutHerdr = @(
         $env:Path.Split(";", [System.StringSplitOptions]::RemoveEmptyEntries) |
             Where-Object {
-                -not (Test-Path -LiteralPath (Join-Path $_ "herdr.exe") -PathType Leaf) -and
+                -not (Test-Path -LiteralPath (Join-Path $_ "agent-fabric-fleetdeck.exe") -PathType Leaf) -and
                 -not (Test-Path -LiteralPath (Join-Path $_ "herdr.cmd") -PathType Leaf)
             }
     ) -join ";"
@@ -344,7 +344,7 @@ try {
     if (-not $downloadFailed) {
         throw "installer repair unexpectedly accepted a missing archive"
     }
-    if (-not (Test-Path -LiteralPath (Join-Path $releaseDir.FullName "herdr.exe") -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath (Join-Path $releaseDir.FullName "agent-fabric-fleetdeck.exe") -PathType Leaf)) {
         throw "failed repair removed the existing release"
     }
 
@@ -438,14 +438,14 @@ try {
         if (-not $swapFailed) {
             throw "installer unexpectedly activated a release with a locked staged file"
         }
-        if (-not (Test-Path -LiteralPath (Join-Path $releaseDir.FullName "herdr.exe") -PathType Leaf)) {
+        if (-not (Test-Path -LiteralPath (Join-Path $releaseDir.FullName "agent-fabric-fleetdeck.exe") -PathType Leaf)) {
             throw "failed activation did not restore the prior release"
         }
         if (@(Get-ChildItem -LiteralPath $releasesDir -Force -Directory -Filter ".backup.$($releaseDir.Name).*").Count -ne 0) {
             throw "failed activation stranded a release backup"
         }
         foreach ($junction in @($installDir, (Join-Path $herdrHome "packages\standalone\current"))) {
-            if (-not (Test-Path -LiteralPath (Join-Path $junction "herdr.exe") -PathType Leaf)) {
+            if (-not (Test-Path -LiteralPath (Join-Path $junction "agent-fabric-fleetdeck.exe") -PathType Leaf)) {
                 throw "failed activation left an invalid installer junction at $junction"
             }
         }
@@ -547,7 +547,7 @@ try {
     }
     $resolvedHerdr = Get-Command herdr -CommandType Application -ErrorAction Stop
     if (-not $resolvedHerdr.Source.Equals(
-        (Join-Path $stableReleaseDir.FullName "herdr.exe"),
+        (Join-Path $stableReleaseDir.FullName "agent-fabric-fleetdeck.exe"),
         [System.StringComparison]::OrdinalIgnoreCase
     )) {
         throw "installed command does not resolve through the active concrete release"
@@ -584,7 +584,7 @@ exit /b 1
 
     $preserveHome = Join-Path $root "preserve-home"
     $preserveBin = Join-Path $root "preserve-bin"
-    $env:HERDR_HOME = $preserveHome
+    $env:AGENT_FABRIC_FLEETDECK_HOME = $preserveHome
     $env:Path = "$fakeBin;$oldProcessPath"
     $unrecognizedCommandRejected = $false
     try {
@@ -619,7 +619,7 @@ exit /b 1
         throw "installer invoked an unrecognized command despite an explicit channel"
     }
 } finally {
-    $env:HERDR_HOME = $oldHerdrHome
+    $env:AGENT_FABRIC_FLEETDECK_HOME = $oldHerdrHome
     $env:HERDR_INSTALLER_URL = $oldInstallerUrl
     $env:Path = $oldProcessPath
     if ($null -ne $server -and -not $server.HasExited) {

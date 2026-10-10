@@ -38,9 +38,13 @@ mkdir -p "$root/results"
 
 if [[ -z "$baseline" ]]; then
   baseline_version=$(jq -er '.version' "$repo_root/distribution/latest.json")
-  baseline="$root/herdr-baseline"
+  if [[ "$baseline_version" == "0.0.0" ]]; then
+    echo "FleetDeck has no stable release to compare against; set HERDR_PERF_BASELINE_BIN" >&2
+    exit 1
+  fi
+  baseline="$root/fleetdeck-baseline"
   curl -fL --retry 3 \
-    "https://github.com/herdrdev/herdr/releases/download/v${baseline_version}/herdr-${platform}-${arch}" \
+    "https://github.com/BlueTeam-OU/agent-fabric-fleetdeck/releases/download/v${baseline_version}/agent-fabric-fleetdeck-${platform}-${arch}" \
     -o "$baseline"
   chmod +x "$baseline"
 else
