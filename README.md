@@ -23,6 +23,8 @@ channel, so it runs beside a Herdr installation without touching it.
   installation: [docs/fleetdeck/IDENTITY.md](docs/fleetdeck/IDENTITY.md)
 - The fork point, the versioning policy, and how upstream changes are
   imported: [docs/fleetdeck/UPSTREAM.md](docs/fleetdeck/UPSTREAM.md)
+- Settings FleetDeck adds, such as `server.socket_access`:
+  [docs/fleetdeck/CONFIGURATION.md](docs/fleetdeck/CONFIGURATION.md)
 
 ## Install
 
