@@ -810,7 +810,7 @@ if ($useLocalPackage) {
     }
     $asset = Get-ManifestAsset -Manifest $manifest -Target $target
     if (-not [string]::IsNullOrWhiteSpace($ExpectedBuildId) -and [string]$manifest.build_id -ne $ExpectedBuildId) {
-        throw "Preview manifest changed while updating. Expected build $ExpectedBuildId but found $($manifest.build_id). Run herdr update again."
+        throw "Preview manifest changed while updating. Expected build $ExpectedBuildId but found $($manifest.build_id). Run agent-fabric-fleetdeck update again."
     }
     $versionIdentity = Resolve-HerdrVersion -Manifest $manifest -SelectedChannel $Channel
 }
@@ -865,7 +865,7 @@ try {
                 if ($null -ne $backupDir -and -not (Test-Path -LiteralPath $releaseDir)) {
                     [System.IO.Directory]::Move($backupDir, $releaseDir)
                 }
-                Write-WarningStep "Windows could not activate the downloaded release. Another process may have a package file open, such as antivirus or indexing. No incomplete release was activated. Run herdr update again."
+                Write-WarningStep "Windows could not activate the downloaded release. Another process may have a package file open, such as antivirus or indexing. No incomplete release was activated. Run agent-fabric-fleetdeck update again."
                 throw
             }
         }
@@ -927,9 +927,9 @@ if ($resolvedHerdrKind -ne "release" -or
         [System.IO.Path]::GetFullPath($releaseHerdr),
         [System.StringComparison]::OrdinalIgnoreCase
     )) {
-    Write-WarningStep "PowerShell still resolves herdr to $resolvedHerdr. Open a new PowerShell window or inspect PATH order manually."
+    Write-WarningStep "PowerShell still resolves agent-fabric-fleetdeck to $resolvedHerdr. Open a new PowerShell window or inspect PATH order manually."
 }
 
-Write-Step "Current PowerShell session: herdr"
-Write-Step "Future PowerShell windows: open a new PowerShell window and run: herdr"
+Write-Step "Current PowerShell session: agent-fabric-fleetdeck"
+Write-Step "Future PowerShell windows: open a new PowerShell window and run: agent-fabric-fleetdeck"
 Write-Host "FleetDeck $versionIdentity installed successfully."

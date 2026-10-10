@@ -87,7 +87,7 @@ FLEET_TAB = "fleet"
 FLEET_PLUGIN = "fabric.fleet"
 FLEET_ENTRYPOINT = "board"
 # The plugin's root, where herdr starts and restores the board's pane: this
-# file's directory, as README's `herdr plugin link <checkout>/fleet-deck`.
+# file's directory, as README's `agent-fabric-fleetdeck plugin link <checkout>/fleet-deck`.
 BOARD_DIR = os.path.dirname(os.path.realpath(__file__))
 
 # A login is typed into the operator's shell as part of a moveto command, so
@@ -687,7 +687,7 @@ class Deck:
             self.log(f"opened the {FLEET_TAB} tab")
         except Exception as error:  # the board is a view: no account's tab waits on it
             self._say("fleet-tab", f"no {FLEET_TAB} tab: {printable(str(error))} "
-                      f"(is {FLEET_PLUGIN} linked? herdr plugin link <checkout>/fleet-deck)")
+                      f"(is {FLEET_PLUGIN} linked? {BIN} plugin link <checkout>/fleet-deck)")
 
     def _restore_account(self, account, tab, workspace_labels, first_setup, spare, now) -> None:
         login = account.login

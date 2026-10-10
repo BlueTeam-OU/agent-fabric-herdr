@@ -70,8 +70,8 @@ mod update;
 mod workspace;
 mod worktree;
 
-const DEFAULT_CONFIG: &str = r##"# herdr configuration
-# Place this file at ~/.config/herdr/config.toml
+const DEFAULT_CONFIG: &str = r##"# Agent Fabric FleetDeck configuration
+# Place this file at ~/.config/agent-fabric-fleetdeck/config.toml
 
 # Show first-run notification setup on startup.
 # Missing also shows onboarding; set false after you've chosen.
@@ -132,10 +132,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # so existing preview installs stay there until explicitly switched.
 # channel = "stable"
 
-# Check herdr.dev for new Herdr versions in the background.
+# Check FleetDeck's release manifest for new versions in the background.
 # version_check = true
 
-# Check herdr.dev for remote agent-detection manifest updates in the background.
+# Check FleetDeck's agent-detection catalog for manifest updates in the background.
 # manifest_check = true
 
 [keys]
@@ -276,7 +276,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # ctrl+alt+c copies the selected text and ctrl+alt+p pastes clipboard text
 # into the focused pane; the right-click menu offers both. ctrl+c and ctrl+v
 # always reach the pane, as do PageUp and PageDown (alt+PageUp/PageDown scroll
-# herdr's scrollback). A selection stays highlighted after it is copied until
+# FleetDeck's scrollback). A selection stays highlighted after it is copied until
 # you click, type or press ctrl+alt+c.
 # clipboard_shortcuts = true
 
@@ -484,10 +484,7 @@ fn help_subcommand(command: &str) -> &str {
 /// product or nothing. The agent reading it gets this build's command.
 fn skill_for_this_build() -> String {
     SKILL
-        .replace(
-            "`agent-fabric-fleetdeck`",
-            &format!("`{}`", identity::BIN_NAME),
-        )
+        .replace("`herdr`", &format!("`{}`", identity::BIN_NAME))
         .replace("herdr ", &format!("{} ", identity::BIN_NAME))
 }
 
@@ -877,10 +874,13 @@ mod tests {
     fn the_printed_skill_names_this_builds_command() {
         let skill = super::skill_for_this_build();
         assert!(skill.contains("agent-fabric-fleetdeck "));
-        assert!(
-            !skill.contains("herdr "),
-            "an agent-fabric-fleetdeck command survived in the skill"
-        );
+        assert!(skill.contains("`agent-fabric-fleetdeck`"));
+        for herdr_command in ["herdr ", "`herdr`"] {
+            assert!(
+                !skill.contains(herdr_command),
+                "{herdr_command:?} survived in the skill"
+            );
+        }
     }
 
     use super::*;

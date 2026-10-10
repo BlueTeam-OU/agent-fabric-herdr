@@ -410,7 +410,7 @@ class FleetTab(unittest.TestCase):
         h.deck.restore(10)
         said = [l for l in h.logs if "no fleet tab" in l]
         self.assertEqual(len(said), 1)
-        self.assertIn("herdr plugin link", said[0])
+        self.assertIn("agent-fabric-fleetdeck plugin link", said[0])
         self.assertIn(("w1", "ui"), self.tabs(h))
         self.assertNotIn(("w1", "fleet"), self.tabs(h))
 

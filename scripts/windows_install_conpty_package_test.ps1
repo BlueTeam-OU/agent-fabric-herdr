@@ -155,7 +155,7 @@ $customPreviewManifest | ConvertTo-Json -Depth 5 | Out-File -LiteralPath $custom
 
 $server = $null
 $oldHerdrHome = $env:AGENT_FABRIC_FLEETDECK_HOME
-$oldInstallerUrl = $env:HERDR_INSTALLER_URL
+$oldInstallerUrl = $env:AGENT_FABRIC_FLEETDECK_INSTALLER_URL
 $oldProcessPath = $env:Path
 $registryOptions = [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
 $realUserEnvironmentKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey("Environment")
@@ -193,7 +193,7 @@ try {
     $freshStableBin = Join-Path $root "fresh-stable-bin"
     $stableManifest | Out-File -LiteralPath $stableManifestPath -Encoding utf8
     $env:AGENT_FABRIC_FLEETDECK_HOME = $freshStableHome
-    $env:HERDR_INSTALLER_URL = "http://127.0.0.1:$port/install.ps1"
+    $env:AGENT_FABRIC_FLEETDECK_INSTALLER_URL = "http://127.0.0.1:$port/install.ps1"
     $env:Path = $oldProcessPath
     & $bootstrapPath `
         -ManifestUrl $stableManifestUrl `
@@ -201,7 +201,7 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "CMD bootstrap failed with exit code $LASTEXITCODE"
     }
-    $env:HERDR_INSTALLER_URL = $oldInstallerUrl
+    $env:AGENT_FABRIC_FLEETDECK_INSTALLER_URL = $oldInstallerUrl
     $freshStableRelease = Get-ChildItem -LiteralPath (Join-Path $freshStableHome "packages\standalone\releases") -Directory |
         Where-Object { $_.Name.StartsWith("0.0.1-") } |
         Select-Object -First 1
@@ -620,7 +620,7 @@ exit /b 1
     }
 } finally {
     $env:AGENT_FABRIC_FLEETDECK_HOME = $oldHerdrHome
-    $env:HERDR_INSTALLER_URL = $oldInstallerUrl
+    $env:AGENT_FABRIC_FLEETDECK_INSTALLER_URL = $oldInstallerUrl
     $env:Path = $oldProcessPath
     if ($null -ne $server -and -not $server.HasExited) {
         Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
