@@ -692,12 +692,13 @@ impl ClientShellState {
             return None;
         }
         self.word_selection_gesture = None;
-        // Only in terminal mode, and a configured binding or prefix on the
-        // same key wins, as it does for paste: in prefix mode the key is the prefix
-        // command's. Without copy-on-select a retained selection needs a key to
-        // be copied at all, so the key copies then whatever
-        // clipboard_shortcuts says.
-        if self.mode == ClientShellMode::Terminal
+        // Not in prefix mode, where the key is the prefix command's, nor in
+        // copy mode, which copies its own way. Navigate and resize mode keep a
+        // mouse selection, so the key copies there too. A configured binding or
+        // prefix on the same key wins, as it does for paste. Without
+        // copy-on-select a retained selection needs a key to be copied at all,
+        // so the key copies then whatever clipboard_shortcuts says.
+        if !matches!(self.mode, ClientShellMode::Prefix | ClientShellMode::Copy)
             && self.copy_or_terminal_mode() != ClientShellMode::Copy
             && (self.config.clipboard_shortcuts || !self.config.copy_on_select)
             && is_retained_selection_copy_key(key)

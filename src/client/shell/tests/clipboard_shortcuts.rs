@@ -407,3 +407,34 @@ fn a_prefix_on_ctrl_alt_c_enters_prefix_mode() {
     assert!(!requests_selection_read(&outcome));
     assert_eq!(state.mode, ClientShellMode::Prefix);
 }
+
+#[test]
+fn ctrl_alt_c_copies_a_selection_dragged_in_navigate_mode() {
+    let mut state = shortcuts_state(true);
+    state.compose(106, 20).expect("composed frame");
+    state.mode = ClientShellMode::Navigate;
+    let pane = state.hits.panes[0].clone();
+    let at = |column_offset: u16, kind| {
+        RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind,
+            column: pane.inner_rect.x + column_offset,
+            row: pane.inner_rect.y,
+            modifiers: KeyModifiers::empty(),
+        })
+    };
+    state.handle_raw_events(vec![at(0, MouseEventKind::Down(MouseButton::Left))]);
+    state.handle_raw_events(vec![at(2, MouseEventKind::Drag(MouseButton::Left))]);
+    state.handle_raw_events(vec![at(2, MouseEventKind::Up(MouseButton::Left))]);
+    assert_eq!(state.mode, ClientShellMode::Navigate);
+    assert!(state
+        .selection
+        .as_ref()
+        .is_some_and(crate::selection::Selection::is_visible));
+
+    let outcome = state.handle_raw_events(vec![RawInputEvent::Key(ctrl_alt('c'))]);
+
+    assert!(
+        requests_selection_read(&outcome),
+        "the selection was copied, not dropped"
+    );
+}
