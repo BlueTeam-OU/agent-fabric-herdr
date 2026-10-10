@@ -470,12 +470,16 @@ impl BindingRegistry {
         let combos = self.prefix_combos.clone();
         for combo in combos {
             self.reserve_direct(combo, field, source);
+            if let Some(twin) = legacy_twin(combo) {
+                self.reserve_direct(twin, field, source);
+            }
         }
     }
 
     fn prefix_rhs_is_reserved(&self, combo: KeyCombo) -> bool {
         let combo = normalize_key_combo(combo);
         self.prefix_combos.contains(&combo)
+            || legacy_twin(combo).is_some_and(|twin| self.prefix_combos.contains(&twin))
     }
 
     fn conflict(&self, binding: &ResolvedBinding) -> Option<&RegisteredBinding> {
@@ -1465,6 +1469,21 @@ fn key_parts_match_combo(
             expected_code,
             expected_modifiers,
         )
+}
+
+/// The key a legacy host sends as the same byte: ctrl+6 and ctrl+^ are both
+/// 0x1e. Binding one reserves the other, or a binding to the twin would
+/// shadow it there without a diagnostic.
+fn legacy_twin(combo: KeyCombo) -> Option<KeyCombo> {
+    match combo {
+        (KeyCode::Char('6'), KeyModifiers::CONTROL) => {
+            Some((KeyCode::Char('^'), KeyModifiers::CONTROL))
+        }
+        (KeyCode::Char('^'), KeyModifiers::CONTROL) => {
+            Some((KeyCode::Char('6'), KeyModifiers::CONTROL))
+        }
+        _ => None,
+    }
 }
 
 /// A legacy host has one byte, 0x1e, for ctrl+6 and ctrl+^, and it parses as

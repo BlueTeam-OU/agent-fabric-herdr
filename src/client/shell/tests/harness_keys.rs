@@ -1,6 +1,10 @@
-//! gzapi-org's fork: herdr keeps its prefix and nothing a coding-agent harness
+//! gzapi-org's fork: herdr's own bindings take no key a coding-agent harness
 //! uses. Every pane in the Fleet Deck runs a harness, so a key herdr takes is a
-//! key the agent loses.
+//! key the agent loses. What is checked here: the prefix and every default
+//! direct binding are no harness key, and the typed keys below reach the pane
+//! byte for byte. Not covered, and still herdr's: ctrl+c over a visible
+//! selection, ctrl+v with clipboard text, plain PageUp/PageDown on a pane's
+//! main screen without mouse reporting (fleet-deck/README.md, "Keys").
 //!
 //! The lists below are each harness's default bindings as checked on
 //! 2026-10-10. A harness that gains a binding on the prefix shows up here only
@@ -373,4 +377,31 @@ fn the_check_refuses_upstreams_ctrl_b_prefix() {
         caught.is_err(),
         "ctrl+b is Claude Code's, Codex's and readline's"
     );
+}
+
+#[test]
+fn a_binding_to_ctrl_caret_is_refused_beside_the_ctrl_6_prefix() {
+    // A legacy host sends both as 0x1e: the binding would hide the prefix.
+    let config: Config = toml::from_str(
+        "[[keys.command]]\nkey = \"ctrl+^\"\ntype = \"shell\"\ncommand = \"true\"\n",
+    )
+    .expect("parses");
+    assert!(!config.collect_diagnostics().is_empty());
+    let shell = ClientShellConfig::from_config(&config);
+    let legacy = crate::input::TerminalKey::new(KeyCode::Char('^'), KeyModifiers::CONTROL);
+    assert!(resolve_direct_binding(&shell.keybinds.keybinds, &legacy).is_none());
+    assert!(shell.keybinds.matches_prefix(&legacy));
+}
+
+#[test]
+fn indexed_ctrl_digits_lose_ctrl_6_to_the_prefix_and_say_so() {
+    let config: Config = toml::from_str("[keys.indexed]\ntabs = \"ctrl\"\n").expect("parses");
+    let diagnostics = config.collect_diagnostics();
+    assert!(
+        diagnostics.iter().any(|d| d.contains("ctrl+6")),
+        "{diagnostics:?}"
+    );
+    let labels: Vec<_> = config.keybinds().switch_tab.iter().map(|b| b.label.clone()).collect();
+    assert_eq!(labels.len(), 8);
+    assert!(!labels.iter().any(|label| label == "ctrl+6"), "{labels:?}");
 }
