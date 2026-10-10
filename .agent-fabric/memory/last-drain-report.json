@@ -1,0 +1,78 @@
+{
+  "clipped_descriptions": [],
+  "collision_decisions": [],
+  "files": [
+    ".agent-fabric/memory/rust-ui-dev/rationale.md",
+    ".agent-fabric/memory/rust-ui-dev/solution/herdr-agent-row-display.md",
+    ".agent-fabric/memory/rust-ui-dev/solution/herdr-host-toolchain.md",
+    ".agent-fabric/memory/rust-ui-dev/solution/herdr-pane-focus-reporting.md",
+    ".agent-fabric/memory/rust-ui-dev/solution/herdr-restart-loses-moveto-agents.md",
+    ".agent-fabric/memory/rust-ui-dev/solution/herdr-restore-drops-plugin-panes.md",
+    ".agent-fabric/memory/rust-ui-dev/solution/herdr-sound-paths.md",
+    ".agent-fabric/memory/rust-ui-dev/solution/moveto-sudo-own-pty.md",
+    ".agent-fabric/memory/rust-ui-dev/workflow.md",
+    ".agent-fabric/memory/rust-ui-dev/INDEX.md"
+  ],
+  "files_written": 10,
+  "harvest": {
+    "host": "develop-qzapp",
+    "in_scope": 10,
+    "next_watermark": 1791589521436,
+    "provisional_agent": 0,
+    "since_watermark": 0,
+    "skipped_no_roles_class": [
+      "feedback-act-without-asking.md"
+    ]
+  },
+  "harvest_sources": {
+    "rust-ui-dev-01@develop-qzapp": {
+      "host": "develop-qzapp",
+      "in_scope": 10,
+      "next_watermark": 1791589521436,
+      "provisional_agent": 0,
+      "since_watermark": 0,
+      "skipped_no_roles_class": [
+        "feedback-act-without-asking.md"
+      ]
+    }
+  },
+  "held_back": [],
+  "hygiene_problems": [],
+  "merge_target_unresolved": [],
+  "migrated": [],
+  "oversized_claims": [],
+  "project": "herdr",
+  "redactions": [],
+  "rejected_hygiene": [],
+  "retired_in_siblings": [],
+  "roles": [
+    "rust-ui-dev"
+  ],
+  "shared_slices": 0,
+  "shared_topics": [],
+  "stamp": "2026-10-10",
+  "telemetry": {
+    "rust-ui-dev": {
+      "admitted": 9,
+      "candidates": 10,
+      "merged_into_existing": 0,
+      "observations_in": 10,
+      "rejected": 1
+    }
+  },
+  "telemetry_sources": {
+    "rust-ui-dev-01@develop-qzapp": {
+      "rust-ui-dev": {
+        "admitted": 9,
+        "candidates": 10,
+        "merged_into_existing": 0,
+        "observations_in": 10,
+        "rejected": 1
+      }
+    }
+  },
+  "title_collisions": [],
+  "watermarks": {
+    "rust-ui-dev-01@develop-qzapp": 1791589521436
+  }
+}
