@@ -268,14 +268,15 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # mouse_capture = true
 
 # Automatically copy text selected with the mouse.
-# Set false to retain drag or double-click word selection until Ctrl+C,
+# Set false to retain drag or double-click word selection until ctrl+alt+c,
 # or Cmd+C when the host forwards it, copies and clears it.
 # copy_on_select = true
 
-# Ctrl+C copies the selected text and Ctrl+V pastes clipboard text into the
-# focused pane. With nothing selected, Ctrl+C reaches the pane (interrupt);
-# with no text on the clipboard, Ctrl+V does. A selection stays highlighted
-# after it is copied until you click, type or press Ctrl+C.
+# ctrl+alt+c copies the selected text and ctrl+alt+p pastes clipboard text
+# into the focused pane; the right-click menu offers both. ctrl+c and ctrl+v
+# always reach the pane, as do PageUp and PageDown (alt+PageUp/PageDown scroll
+# herdr's scrollback). A selection stays highlighted after it is copied until
+# you click, type or press ctrl+alt+c.
 # clipboard_shortcuts = true
 
 # Host cursor policy: "auto", "native", or "drawn".

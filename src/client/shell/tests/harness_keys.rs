@@ -1,10 +1,10 @@
-//! gzapi-org's fork: herdr's own bindings take no key a coding-agent harness
+//! gzapi-org's fork: herdr's own keys take no key a coding-agent harness
 //! uses. Every pane in the Fleet Deck runs a harness, so a key herdr takes is a
-//! key the agent loses. What is checked here: the prefix and every default
-//! direct binding are no harness key, and the typed keys below reach the pane
-//! byte for byte. Not covered, and still herdr's: ctrl+c over a visible
-//! selection, ctrl+v with clipboard text, plain PageUp/PageDown on a pane's
-//! main screen without mouse reporting (fleet-deck/README.md, "Keys").
+//! key the agent loses. What is checked here: herdr's prefix, every default
+//! direct binding and herdr's own keys (`HERDR_KEYS`) are no harness key and
+//! none the owner's desktop or terminal keeps; the typed keys below, ctrl+c,
+//! ctrl+v and PageUp/PageDown included, reach the pane byte for byte, also
+//! over a visible selection and with text on the clipboard.
 //!
 //! The lists below are each harness's default bindings as checked on
 //! 2026-10-10. A harness that gains a binding on the prefix shows up here only
@@ -136,7 +136,22 @@ const CODEX: &[&str] = &[
 /// A plain shell: bash's default emacs keymap (`bind -p`, readline 8) and the
 /// tty's control characters (`stty -a`: intr, quit, susp, eof, kill, werase,
 /// rprnt, lnext, discard, start, stop).
+// The emacs keymap's ESC-ctrl bindings are listed as ctrl+alt: a legacy
+// terminal sends ctrl+alt+<key> as ESC and ctrl+<key>, which readline reads so.
 const SHELL: &[&str] = &[
+    "ctrl+alt+b",
+    "ctrl+alt+d",
+    "ctrl+alt+e",
+    "ctrl+alt+f",
+    "ctrl+alt+g",
+    "ctrl+alt+h",
+    "ctrl+alt+i",
+    "ctrl+alt+l",
+    "ctrl+alt+r",
+    "ctrl+alt+t",
+    "ctrl+alt+y",
+    "ctrl+alt+]",
+    "ctrl+alt+backspace",
     "ctrl+space",
     "ctrl+a",
     "ctrl+b",
@@ -192,6 +207,67 @@ const HARNESSES: &[(&str, &[&str])] = &[
     ("Codex", CODEX),
     ("shell", SHELL),
 ];
+
+/// What the owner's desktop and terminal keep for themselves, so herdr must
+/// not use them either: dom0's Xfce (ctrl+alt+l, ctrl+alt+Escape), ptyxis
+/// (alt+digits, alt+comma, ctrl(+shift)+PageUp/PageDown, ctrl+shift+c/v) and
+/// the Qubes clipboard (ctrl+shift+c/v), as fabric-coordinator checked them on
+/// 2026-10-10 (GZCoord 01a126a3).
+const DESKTOP: &[&str] = &[
+    "ctrl+alt+l",
+    "ctrl+alt+esc",
+    "alt+1",
+    "alt+2",
+    "alt+3",
+    "alt+4",
+    "alt+5",
+    "alt+6",
+    "alt+7",
+    "alt+8",
+    "alt+9",
+    "alt+0",
+    "alt+,",
+    "ctrl+pageup",
+    "ctrl+pagedown",
+    "ctrl+shift+pageup",
+    "ctrl+shift+pagedown",
+    "ctrl+shift+c",
+    "ctrl+shift+v",
+];
+
+/// herdr's own keys outside the prefix (src/client/shell/input.rs and
+/// src/server/pane_input.rs): copy, paste into the pane, scroll herdr's
+/// scrollback.
+const HERDR_KEYS: &[&str] = &["ctrl+alt+c", "ctrl+alt+p", "alt+pageup", "alt+pagedown"];
+
+fn same_key(a: &crate::input::TerminalKey, b: &crate::input::TerminalKey) -> bool {
+    a.code == b.code && a.modifiers == b.modifiers
+}
+
+fn taken_by(key: &crate::input::TerminalKey) -> Option<String> {
+    HARNESSES
+        .iter()
+        .chain(std::iter::once(&("the owner's desktop", DESKTOP)))
+        .find_map(|(owner, labels)| {
+            labels
+                .iter()
+                .find(|label| same_key(&harness_key(label), key))
+                .map(|label| format!("{owner}'s {label}"))
+        })
+}
+
+#[test]
+fn herdrs_own_keys_are_no_harness_or_desktop_key() {
+    for label in HERDR_KEYS.iter().chain(&["ctrl+6"]) {
+        let key = harness_key(label);
+        assert_eq!(taken_by(&key), None, "herdr's {label}");
+    }
+    // The check is live: Codex's image paste is why paste is not ctrl+alt+v.
+    assert_eq!(
+        taken_by(&harness_key("ctrl+alt+v")).as_deref(),
+        Some("Codex's ctrl+alt+v")
+    );
+}
 
 /// The operator's Fleet Deck keys (fleet-deck/README.md, "Views").
 const FLEET_DECK_KEYS: &str = r#"
@@ -303,6 +379,9 @@ const TYPED: &[(&str, &[u8], &[u8])] = &[
     ("alt+up", b"\x1b[1;3A", b"\x1b[1;3A"),
     ("f2", b"\x1bOQ", b"\x1b[Q"),
     ("f12", b"\x1b[24~", b"\x1b[24~"),
+    ("ctrl+v", b"\x16", b"\x1b[118;5u"),
+    ("pageup", b"\x1b[5~", b"\x1b[5~"),
+    ("pagedown", b"\x1b[6~", b"\x1b[6~"),
 ];
 
 fn deck_path(host: HostProfile) -> HerdrPath {
@@ -401,7 +480,79 @@ fn indexed_ctrl_digits_lose_ctrl_6_to_the_prefix_and_say_so() {
         diagnostics.iter().any(|d| d.contains("ctrl+6")),
         "{diagnostics:?}"
     );
-    let labels: Vec<_> = config.keybinds().switch_tab.iter().map(|b| b.label.clone()).collect();
+    let labels: Vec<_> = config
+        .keybinds()
+        .switch_tab
+        .iter()
+        .map(|b| b.label.clone())
+        .collect();
     assert_eq!(labels.len(), 8);
     assert!(!labels.iter().any(|label| label == "ctrl+6"), "{labels:?}");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn ctrl_c_and_ctrl_v_reach_the_pane_over_a_selection_and_clipboard_text() {
+    for (host, ctrl_c, ctrl_v) in [
+        (HostProfile::Legacy, b"\x03".as_slice(), b"\x16".as_slice()),
+        (
+            HostProfile::Kitty,
+            b"\x1b[99;5u".as_slice(),
+            b"\x1b[118;5u".as_slice(),
+        ),
+    ] {
+        let mut path = deck_path(host);
+        path.state.read_clipboard_text = || Some("clipboard text".to_owned());
+        let mut selection =
+            crate::selection::Selection::absolute_range("pane_1".to_owned(), (0, 0), (0, 1));
+        assert!(selection.finish());
+        path.state.selection = Some(selection);
+        assert_eq!(
+            path.feed(ctrl_c).as_deref(),
+            Some(ctrl_c),
+            "ctrl+c ({})",
+            host.name()
+        );
+        assert_eq!(
+            path.feed(ctrl_v).as_deref(),
+            Some(ctrl_v),
+            "ctrl+v ({})",
+            host.name()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn herdrs_own_keys_never_reach_the_pane() {
+    for (host, keys) in [
+        (
+            HostProfile::Legacy,
+            [
+                b"\x1b\x03".as_slice(),
+                b"\x1b\x10",
+                b"\x1b[5;3~",
+                b"\x1b[6;3~",
+            ],
+        ),
+        (
+            HostProfile::Kitty,
+            [
+                b"\x1b[99;7u".as_slice(),
+                b"\x1b[112;7u",
+                b"\x1b[5;3~",
+                b"\x1b[6;3~",
+            ],
+        ),
+    ] {
+        let mut path = deck_path(host);
+        for (label, bytes) in HERDR_KEYS.iter().zip(keys) {
+            let reached = path.feed(bytes).unwrap_or_default();
+            assert!(
+                reached.is_empty(),
+                "{label} reached the pane as {reached:?} ({})",
+                host.name()
+            );
+        }
+    }
 }

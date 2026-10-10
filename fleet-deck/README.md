@@ -62,43 +62,67 @@ terminal by hand, it still refuses to run beside another deck.
 
 ## Keys
 
-Every pane runs a harness, so herdr keeps one key for itself: its prefix,
-**ctrl+6** (a legacy terminal sends it as ctrl+^, 0x1e, and that works too).
-Every default herdr binding is the prefix and then a key (`prefix+f`,
-`prefix+a`, `prefix+p` below included), so no binding takes a key from a
-pane but the prefix; the few keys herdr takes otherwise are listed below.
-Pressing the prefix twice sends it to the pane.
+Every pane runs a harness, so every key combination reaches it as typed:
+ctrl+c, ctrl+v, ctrl+z, esc, PageUp and PageDown included, whether or not
+something is selected or on the clipboard. herdr keeps only these:
 
-ctrl+6 is bound by none of the harnesses checked on 2026-10-10. Upstream's
-ctrl+b is Claude Code's "background the task", Codex's and readline's
-backward-char.
+| key | herdr's action |
+|---|---|
+| **ctrl+6** | the prefix: herdr's commands are ctrl+6 then a key (`ctrl+6 q` detaches; the `prefix+f/a/p` keys below); ctrl+6 twice sends ctrl+6 to the pane. A legacy terminal sends it as ctrl+^ (0x1e), which works too. |
+| **ctrl+alt+c** | copies the selection |
+| **ctrl+alt+p** | pastes the clipboard's text into the pane |
+| **alt+PageUp / alt+PageDown** | scroll herdr's scrollback, when the pane is on its main screen with no mouse reporting (otherwise they reach the pane) |
+| the **mouse** | selection, menus and scrolling |
+
+**Copying and pasting.**
+- A mouse selection is copied as soon as the button is released, and stays
+  highlighted until you click or type. ctrl+alt+c copies it again. The
+  right-click menu has Copy and Paste.
+- `ctrl+6 [` enters copy mode, to select and copy with the keyboard.
+- ctrl+alt+p pastes, and so does the terminal's own paste (ctrl+shift+v in
+  ptyxis, which Qubes' clipboard also uses). Either arrives as a paste in the
+  pane. ctrl+v goes to the harness, which pastes itself (Claude Code reads an
+  image from the clipboard).
+- To scroll, use alt+PageUp/PageDown or the mouse wheel.
+- `[ui] clipboard_shortcuts = false` gives ctrl+alt+c and ctrl+alt+p to the
+  pane as well.
+
+**Why these keys.** Each was checked on 2026-10-10 against what the
+harnesses bind, and against what the owner's desktop and terminal keep for
+themselves (herdr never receives those).
 - **Claude Code:** its default keybindings in every context, chords by their
   first key, and its reserved keys (code.claude.com/docs/en/keybindings).
 - **Codex CLI:** its built-in TUI keymap (openai/codex
-  `codex-rs/tui/src/keymap.rs` at 806d9732).
-- **A plain shell:** bash's emacs keymap (`bind -p`) and the tty's control
-  characters (`stty -a`).
+  `codex-rs/tui/src/keymap.rs` at 806d9732). It binds ctrl+alt+v to paste an
+  image, which is why herdr's paste is ctrl+alt+p.
+- **A plain shell:** bash's emacs keymap (`bind -p`), with its ESC-ctrl
+  bindings counted as ctrl+alt (a legacy terminal sends ctrl+alt+x as ESC
+  ctrl+x), and the tty's control characters (`stty -a`).
+- **The desktop:**
+  - dom0's Xfce: ctrl+alt+l and ctrl+alt+Escape;
+  - ptyxis: alt+digits, alt+comma, ctrl(+shift)+PageUp/PageDown and
+    ctrl+shift+c/v;
+  - the Qubes clipboard: ctrl+shift+c/v.
 
-`src/client/shell/tests/harness_keys.rs` pins it. The lists are there, so
-the prefix and every default binding are checked against them, as are the
-`prefix+f/a/p` keys below. A binding to ctrl+^ is refused beside the ctrl+6
-prefix, since a legacy terminal sends both as one byte. Through herdr's real input path, the keys a harness uses
-(ctrl+c, ctrl+d, ctrl+z, ctrl+r, ctrl+b, esc, alt- and shift- combinations,
-function keys) reach the pane byte for byte, from a legacy and from a kitty
-terminal. A `keys.prefix` in herdr's config replaces ctrl+6; `fleet-deck`
-says when it is one the check does not cover.
+Upstream's prefix, ctrl+b, is Claude Code's "background the task", and
+Codex's and readline's backward-char. Upstream's ctrl+c/ctrl+v copy and
+paste, and its plain PageUp/PageDown scrolling, took keys every harness
+uses.
 
-What herdr still takes, apart from the prefix:
-- **ctrl+c** while a mouse selection is visible copies it (with no selection
-  it reaches the pane);
-- **ctrl+v** while the clipboard holds text pastes that text (otherwise it
-  reaches the pane);
-- **PageUp and PageDown** without modifiers scroll herdr's scrollback when the
-  pane is on its main screen with no mouse reporting;
-- the **mouse** is herdr's for selection, menus and scrolling.
+`src/client/shell/tests/harness_keys.rs` pins all of it:
+- **The lists.** Each harness's keys and the desktop's are written there. The
+  prefix, every default direct binding and herdr's own keys are checked
+  against them, and so are the `prefix+f/a/p` keys below.
+- **Byte for byte.** Through herdr's real input path, the keys a harness uses
+  reach the pane exactly as typed, from a legacy terminal and from a kitty
+  terminal. ctrl+c still does with a visible selection, and ctrl+v with text
+  on the clipboard.
+- **herdr's own keys** never reach the pane.
+- **ctrl+^.** A binding to it is refused beside the ctrl+6 prefix, since a
+  legacy terminal sends both as one byte.
 
-`[ui] clipboard_shortcuts = false` in herdr's config gives ctrl+c and ctrl+v
-back to the pane in every case.
+A `keys.prefix` in herdr's config replaces ctrl+6; `fleet-deck` says when it
+is one the check does not cover.
 
 ## Restore
 

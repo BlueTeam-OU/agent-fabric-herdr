@@ -325,7 +325,7 @@ fn retained_mouse_selection_survives_output_and_copies_without_terminal_input() 
 
     let copy = state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
         KeyCode::Char('c'),
-        KeyModifiers::CONTROL,
+        KeyModifiers::CONTROL | KeyModifiers::ALT,
     ))]);
     assert!(state.selection.is_none());
     assert!(matches!(
@@ -1892,7 +1892,7 @@ fn copy_mode_survives_mouse_motion_and_parks_across_focus_changes() {
     assert!(state.selection.is_some());
     let copy = state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
         KeyCode::Char('c'),
-        KeyModifiers::CONTROL,
+        KeyModifiers::CONTROL | KeyModifiers::ALT,
     ))]);
     assert!(copy.requests.is_empty());
     assert!(
@@ -1951,7 +1951,10 @@ fn retained_selection_copy_suppresses_key_repeats() {
     assert!(selection.finish());
     state.selection = Some(selection);
 
-    let key = crate::input::TerminalKey::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let key = crate::input::TerminalKey::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL | KeyModifiers::ALT,
+    );
     let press = state.handle_raw_events(vec![RawInputEvent::Key(key.clone())]);
     assert!(press.actions.iter().any(|action| matches!(
         action,
