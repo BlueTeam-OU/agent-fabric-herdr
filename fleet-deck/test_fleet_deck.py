@@ -183,7 +183,7 @@ class FleetDeckTest(unittest.TestCase):
             capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
         )
         self.assertEqual(second.returncode, 1)
-        self.assertIn(f"another deck already runs on this login (pid {holder})", second.stderr)
+        self.assertIn(f"another deck held the lock on this login (pid {holder})", second.stderr)
         self.assertEqual(lock_holder(lock_path()), holder)
 
     def test_the_server_is_started_once(self):
@@ -295,6 +295,12 @@ class FleetDeckTest(unittest.TestCase):
              mock.patch.object(fleet_deck, "CONTROLLER_READY_S", 1):
             self.assertFalse(fleet_deck.ensure_controller(self.args(), self.say))
         self.assertTrue(any("cannot run" in line for line in self.said), self.said)
+
+    def test_stop_never_signals_a_pid_it_cannot_see(self):
+        with mock.patch.object(fleet_deck, "lock_holder", lambda _path: 0), \
+             mock.patch.object(fleet_deck.os, "kill") as kill:
+            self.assertFalse(fleet_deck.stop_controller(self.say))
+        kill.assert_not_called()
 
 
 if __name__ == "__main__":

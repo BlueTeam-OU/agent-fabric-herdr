@@ -1361,7 +1361,9 @@ def main(argv: list[str] | None = None) -> int:
     lock = hold_lock(lock_path())
     if lock is None:
         holder = lock_holder(lock_path())
-        log(f"another deck already runs on this login (pid {holder}); this one stops")
+        # The holder may have exited between the two calls: say what is known.
+        who = f" (pid {holder})" if holder else ""
+        log(f"another deck held the lock on this login{who}; this one stops")
         return 1
 
     host = local_host()

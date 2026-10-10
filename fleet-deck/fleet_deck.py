@@ -3,7 +3,7 @@
 `fleet-deck` makes sure herdr's server runs, makes sure one deck controller
 (fabric-deck) runs detached, then attaches this terminal to herdr. Run twice,
 it starts nothing twice: the server answers its socket, and the controller
-holds an flock (fabric_deck.hold_lock) that a second one cannot take.
+holds a record lock (fabric_deck.hold_lock) that a second one cannot take.
 
 The controller is started in a session of its own with no terminal: its
 stdin is /dev/null and its output goes to a log file, so closing a terminal
@@ -223,6 +223,12 @@ def stop_controller(say: Callable[[str], None]) -> bool:
     if holder is None:
         say("the deck controller is not running")
         return True
+    if holder <= 0:
+        # The kernel reports 0 for a holder in another pid namespace, and
+        # kill(0) would signal this command's own process group.
+        say("the deck controller runs where this command cannot see its pid; "
+            "stop it from the namespace it runs in")
+        return False
     try:
         os.kill(holder, signal.SIGTERM)
     except ProcessLookupError:
