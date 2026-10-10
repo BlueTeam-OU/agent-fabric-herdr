@@ -72,8 +72,8 @@ const KIMI_HOOK_ASSET: &str = if cfg!(windows) {
     include_str!("assets/kimi/herdr-agent-state.sh")
 };
 const KIMI_INTEGRATION_VERSION: u32 = 7;
-const KIMI_CONFIG_BLOCK_BEGIN: &str = "# >>> herdr kimi integration";
-const KIMI_CONFIG_BLOCK_END: &str = "# <<< herdr kimi integration";
+const KIMI_CONFIG_BLOCK_BEGIN: &str = "# >>> agent-fabric-fleetdeck kimi integration";
+const KIMI_CONFIG_BLOCK_END: &str = "# <<< agent-fabric-fleetdeck kimi integration";
 const KIMI_MIN_VERSION: &str = "0.14.0";
 const KIMI_ASK_USER_QUESTION_MATCHER: &str = "^AskUserQuestion$";
 const KIMI_OTHER_TOOL_MATCHER: &str = "^(?!AskUserQuestion$).*$";

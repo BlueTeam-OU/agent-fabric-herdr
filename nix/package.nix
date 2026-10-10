@@ -32,7 +32,7 @@ let
   ];
 in
 rustPlatform.buildRustPackage {
-  pname = "herdr";
+  pname = "agent-fabric-fleetdeck";
   version = manifest.package.version;
 
   src = lib.fileset.toSource {
@@ -82,10 +82,10 @@ rustPlatform.buildRustPackage {
   doCheck = false;
 
   meta = {
-    description = "Terminal workspace manager for AI coding agents";
-    homepage = "https://herdr.dev";
+    description = "Agent Fabric FleetDeck: the agent fleet's terminal workspace, forked from Herdr";
+    homepage = "https://github.com/BlueTeam-OU/agent-fabric-fleetdeck";
     license = lib.licenses.asl20;
-    mainProgram = "herdr";
+    mainProgram = "agent-fabric-fleetdeck";
     platforms = lib.platforms.linux ++ lib.platforms.darwin;
   };
 }

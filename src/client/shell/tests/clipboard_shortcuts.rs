@@ -100,7 +100,7 @@ fn ctrl_alt_c_copies_a_visible_selection() {
     assert!(requests_selection_read(&outcome));
     assert!(
         !forwards_a_key(&outcome, "pane_1"),
-        "herdr's copy key stays herdr's"
+        "agent-fabric-fleetdeck's copy key stays agent-fabric-fleetdeck's"
     );
     assert!(state.selection.is_none(), "the copy clears the highlight");
 }

@@ -25,8 +25,9 @@ fn clone_native_image_source(
     ))
 }
 
-// Herdr's default log filter is `herdr=info`; keep these warnings under its target.
-const LOG_TARGET: &str = "herdr::pane_graphics_files";
+// FleetDeck's default log filter is `agent_fabric_fleetdeck=info` (the binary
+// crate's name); keep these warnings under its target.
+const LOG_TARGET: &str = "agent_fabric_fleetdeck::pane_graphics_files";
 
 #[cfg(unix)]
 const DIRECTORY_MODE: u32 = 0o700;

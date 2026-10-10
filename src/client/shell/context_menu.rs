@@ -80,7 +80,7 @@ impl ClientContextMenuOverlay {
                     item("Zoom", Action::Zoom),
                     item(
                         if *right_click_passthrough {
-                            "Use Herdr right-click menu"
+                            "Use FleetDeck right-click menu"
                         } else {
                             "Send right-clicks to pane"
                         },

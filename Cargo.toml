@@ -1,12 +1,12 @@
 [package]
-name = "herdr"
-version = "0.9.3"
+name = "agent-fabric-fleetdeck"
+version = "0.10.0"
 edition = "2021"
 build = "build.rs"
-description = "terminal workspace manager for AI coding agents"
+description = "Agent Fabric FleetDeck: the agent fleet's terminal workspace, forked from Herdr"
 license = "Apache-2.0"
-repository = "https://github.com/herdrdev/herdr"
-homepage = "https://herdr.dev"
+repository = "https://github.com/BlueTeam-OU/agent-fabric-fleetdeck"
+homepage = "https://github.com/BlueTeam-OU/agent-fabric-fleetdeck"
 keywords = ["terminal", "tui", "ai", "agents", "multiplexer"]
 categories = ["command-line-utilities"]
 include = [

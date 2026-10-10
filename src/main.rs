@@ -28,6 +28,7 @@ mod detect;
 mod events;
 use ghostty_vt as ghostty;
 mod handoff_runtime;
+mod identity;
 mod input;
 mod integration;
 mod ipc;
@@ -240,7 +241,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # headless_rows = 40
 
 # [worktrees]
-# directory = "~/.herdr/worktrees"
+# directory = "~/.agent-fabric-fleetdeck/worktrees"
 
 [ui]
 # Sidebar width (auto-scaled based on workspace names, this sets the default)
@@ -464,6 +465,32 @@ pane_history = false
 // Bundled at build time so the printed skill always matches this binary's release.
 const SKILL: &str = include_str!("../skills/herdr/SKILL.md");
 
+/// A help-table command without the executable's name, which the usage
+/// lines above already give: at FleetDeck's length it would push every
+/// description past the column.
+fn help_subcommand(command: &str) -> &str {
+    match command
+        .strip_prefix(identity::BIN_NAME)
+        .map(str::trim_start)
+    {
+        Some("") => "(no command)",
+        Some(rest) => rest,
+        None => command,
+    }
+}
+
+/// The skill file is Herdr's, kept verbatim so upstream updates apply cleanly;
+/// every command in it is spelled `herdr`, which on a FleetDeck host is another
+/// product or nothing. The agent reading it gets this build's command.
+fn skill_for_this_build() -> String {
+    SKILL
+        .replace(
+            "`agent-fabric-fleetdeck`",
+            &format!("`{}`", identity::BIN_NAME),
+        )
+        .replace("herdr ", &format!("{} ", identity::BIN_NAME))
+}
+
 fn should_block_nested(config: &config::Config) -> bool {
     should_block_nested_for_env(config, std::env::var(HERDR_ENV_VAR).ok().as_deref())
 }
@@ -485,7 +512,7 @@ fn random_nested_message() -> &'static str {
 
 fn exit_if_nested_disabled(config: &config::Config) {
     if should_block_nested(config) {
-        eprintln!("\x1b[1merror:\x1b[0m nested herdr is disabled by default.");
+        eprintln!("\x1b[1merror:\x1b[0m nested agent-fabric-fleetdeck is disabled by default.");
         eprintln!("see configuration if you want to enable it.");
         eprintln!();
         eprintln!("\x1b[2m\"{}\"\x1b[0m", random_nested_message());
@@ -524,11 +551,12 @@ fn finish_cli(outcome: io::Result<cli::CommandOutcome>) -> io::Result<()> {
 }
 
 fn main() -> io::Result<()> {
+    identity::drop_foreign_pane_context();
     let raw_args: Vec<String> = match args_as_utf8(std::env::args_os()) {
         Ok(args) => args,
         Err(err) => {
             eprintln!("error: {err}");
-            eprintln!("run 'herdr --help' for usage");
+            eprintln!("run 'agent-fabric-fleetdeck --help' for usage");
             std::process::exit(2);
         }
     };
@@ -543,7 +571,7 @@ fn main() -> io::Result<()> {
         Ok(args) => args,
         Err(err) => {
             eprintln!("error: {err}");
-            eprintln!("run 'herdr --help' for usage");
+            eprintln!("run 'agent-fabric-fleetdeck --help' for usage");
             std::process::exit(2);
         }
     };
@@ -551,7 +579,7 @@ fn main() -> io::Result<()> {
         Ok(parsed) => parsed,
         Err(err) => {
             eprintln!("error: {err}");
-            eprintln!("run 'herdr --help' for usage");
+            eprintln!("run 'agent-fabric-fleetdeck --help' for usage");
             std::process::exit(2);
         }
     };
@@ -566,7 +594,7 @@ fn main() -> io::Result<()> {
         })
     {
         eprintln!("error: --remote can only be used with the default launch command");
-        eprintln!("run 'herdr --help' for usage");
+        eprintln!("run 'agent-fabric-fleetdeck --help' for usage");
         std::process::exit(2);
     }
 
@@ -601,7 +629,7 @@ fn main() -> io::Result<()> {
             }
             Err(err) => {
                 eprintln!("{err}");
-                eprintln!("usage: herdr update [--handoff]");
+                eprintln!("usage: agent-fabric-fleetdeck update [--handoff]");
                 std::process::exit(2);
             }
         };
@@ -620,106 +648,127 @@ fn main() -> io::Result<()> {
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
         platform::begin_cli_output();
-        println!("herdr — terminal workspace manager for AI coding agents");
+        println!(
+            "{} — the agent fleet's terminal workspace, a fork of Herdr",
+            identity::PRODUCT_NAME
+        );
         println!();
-        println!("Usage: herdr [options]");
-        println!("       herdr --session <name> [options]");
-        println!("       herdr --machine <label-or-id> <command>");
-        println!("       herdr --remote <ssh-target> [--session <name>]");
-        println!("       herdr session attach <name>");
-        println!("       herdr completion zsh");
-        println!("       herdr update [--handoff]");
-        println!("       herdr channel set <stable|preview>");
-        println!("       herdr machine <subcommand> ...");
-        println!("       herdr server stop");
-        println!("       herdr server reload-config");
-        println!("       herdr api <subcommand> ...");
-        println!("       herdr completion <shell>");
-        println!("       herdr config <subcommand> ...");
-        println!("       herdr channel <subcommand> ...");
-        println!("       herdr workspace <subcommand> ...");
-        println!("       herdr worktree <subcommand> ...");
-        println!("       herdr tab <subcommand> ...");
-        println!("       herdr notification <subcommand> ...");
-        println!("       herdr agent <subcommand> ...");
-        println!("       herdr pane <subcommand> ...");
-        println!("       herdr session <subcommand> ...");
-        println!("       herdr integration <subcommand> ...");
+        println!("Usage: agent-fabric-fleetdeck [options]");
+        println!("       agent-fabric-fleetdeck --session <name> [options]");
+        println!("       agent-fabric-fleetdeck --machine <label-or-id> <command>");
+        println!("       agent-fabric-fleetdeck --remote <ssh-target> [--session <name>]");
+        println!("       agent-fabric-fleetdeck session attach <name>");
+        println!("       agent-fabric-fleetdeck completion zsh");
+        println!("       agent-fabric-fleetdeck update [--handoff]");
+        println!("       agent-fabric-fleetdeck channel set <stable|preview>");
+        println!("       agent-fabric-fleetdeck machine <subcommand> ...");
+        println!("       agent-fabric-fleetdeck server stop");
+        println!("       agent-fabric-fleetdeck server reload-config");
+        println!("       agent-fabric-fleetdeck api <subcommand> ...");
+        println!("       agent-fabric-fleetdeck completion <shell>");
+        println!("       agent-fabric-fleetdeck config <subcommand> ...");
+        println!("       agent-fabric-fleetdeck channel <subcommand> ...");
+        println!("       agent-fabric-fleetdeck workspace <subcommand> ...");
+        println!("       agent-fabric-fleetdeck worktree <subcommand> ...");
+        println!("       agent-fabric-fleetdeck tab <subcommand> ...");
+        println!("       agent-fabric-fleetdeck notification <subcommand> ...");
+        println!("       agent-fabric-fleetdeck agent <subcommand> ...");
+        println!("       agent-fabric-fleetdeck pane <subcommand> ...");
+        println!("       agent-fabric-fleetdeck session <subcommand> ...");
+        println!("       agent-fabric-fleetdeck integration <subcommand> ...");
         println!();
-        println!("Common commands:");
+        println!("Common commands (after `{}`):", identity::BIN_NAME);
         for (command, description) in [
-            ("herdr", "Launch or attach to the persistent session"),
             (
-                "herdr status [server|client]",
+                identity::BIN_NAME,
+                "Launch or attach to the persistent session",
+            ),
+            (
+                "agent-fabric-fleetdeck status [server|client]",
                 "Show local client and running server status",
             ),
-            ("herdr update", "Download and install the latest version"),
-            ("herdr completion zsh", "Generate shell completions for zsh"),
             (
-                "herdr server stop",
+                "agent-fabric-fleetdeck update",
+                "Download and install the latest version",
+            ),
+            (
+                "agent-fabric-fleetdeck completion zsh",
+                "Generate shell completions for zsh",
+            ),
+            (
+                "agent-fabric-fleetdeck server stop",
                 "Stop the running server via the API socket",
             ),
             (
-                "herdr channel set <stable|preview>",
+                "agent-fabric-fleetdeck channel set <stable|preview>",
                 "Choose the stable or preview update channel",
             ),
             (
-                "herdr server reload-config",
+                "agent-fabric-fleetdeck server reload-config",
                 "Reload config.toml in the running server",
             ),
             (
-                "herdr config reset-keys",
+                "agent-fabric-fleetdeck config reset-keys",
                 "Back up config.toml and remove custom keybindings",
             ),
             (
-                "herdr channel <subcommand>",
+                "agent-fabric-fleetdeck channel <subcommand>",
                 "Manage the stable or preview update channel",
             ),
-            ("herdr machine <subcommand>", "Manage saved SSH machines"),
             (
-                "herdr api <subcommand>",
+                "agent-fabric-fleetdeck machine <subcommand>",
+                "Manage saved SSH machines",
+            ),
+            (
+                "agent-fabric-fleetdeck api <subcommand>",
                 "Inspect socket API metadata and live runtime state",
             ),
             (
-                "herdr workspace <subcommand>",
+                "agent-fabric-fleetdeck workspace <subcommand>",
                 "Workspace helpers over the socket API",
             ),
             (
-                "herdr worktree <subcommand>",
+                "agent-fabric-fleetdeck worktree <subcommand>",
                 "Git worktree helpers over the socket API",
             ),
-            ("herdr tab <subcommand>", "Tab helpers over the socket API"),
             (
-                "herdr notification <subcommand>",
+                "agent-fabric-fleetdeck tab <subcommand>",
+                "Tab helpers over the socket API",
+            ),
+            (
+                "agent-fabric-fleetdeck notification <subcommand>",
                 "Notification helpers over the socket API",
             ),
             (
-                "herdr agent <subcommand>",
+                "agent-fabric-fleetdeck agent <subcommand>",
                 "Agent/terminal helpers over the socket API",
             ),
             (
-                "herdr pane <subcommand>",
+                "agent-fabric-fleetdeck pane <subcommand>",
                 "Pane control helpers over the socket API",
             ),
             (
-                "herdr session <subcommand>",
+                "agent-fabric-fleetdeck session <subcommand>",
                 "Manage named persistent sessions",
             ),
             (
-                "herdr integration <subcommand>",
+                "agent-fabric-fleetdeck integration <subcommand>",
                 "Manage built-in agent integrations",
             ),
         ] {
-            println!("  {command:<32} {description}");
+            println!("  {:<32} {description}", help_subcommand(command));
         }
         println!();
         println!("Advanced commands:");
-        println!("  {:<32} Run as headless server", "herdr server");
+        println!(
+            "  {:<32} Run as headless server",
+            help_subcommand("agent-fabric-fleetdeck server")
+        );
         println!();
         println!("Options:");
         println!("  --session <name>    Use or create a named persistent session");
         println!("  --machine <label-or-id>  Run an API command on a saved SSH machine");
-        println!("  --remote <target>   Attach through SSH to a remote Herdr server");
+        println!("  --remote <target>   Attach through SSH to a remote FleetDeck server");
         println!("  --remote-keybindings <local|server>");
         println!("                      Keybindings for --remote app attach (default: local)");
         println!("  --handoff           Opt into live handoff for update or remote attach");
@@ -731,7 +780,8 @@ fn main() -> io::Result<()> {
         println!("Config: {}", config::config_path().display());
         println!("Logs:   {}", logging::help_log_paths_summary());
         println!("Env:    HERDR_CONFIG_PATH overrides config file path");
-        println!("Home:   https://herdr.dev");
+        println!("Home:   {}", identity::REPOSITORY_URL);
+        println!("Fork of {}", identity::UPSTREAM_URL);
         println!();
         println!("{}", cli::AGENT_HELP_FOOTER);
         return Ok(());
@@ -739,7 +789,7 @@ fn main() -> io::Result<()> {
 
     if args.iter().any(|a| a == "--version" || a == "-V") {
         platform::begin_cli_output();
-        println!("herdr {}", crate::build_info::version());
+        println!("{} {}", identity::BIN_NAME, crate::build_info::version());
         return Ok(());
     }
 
@@ -751,7 +801,7 @@ fn main() -> io::Result<()> {
 
     if args.iter().any(|a| a == "--skill") {
         platform::begin_cli_output();
-        print!("{SKILL}");
+        print!("{}", skill_for_this_build());
         return Ok(());
     }
 
@@ -772,7 +822,7 @@ fn main() -> io::Result<()> {
         let arg_name = arg.split_once('=').map(|(name, _)| name).unwrap_or(arg);
         if arg.starts_with('-') && !known_flags.contains(&arg_name) {
             eprintln!("unknown option: {arg}");
-            eprintln!("run 'herdr --help' for usage");
+            eprintln!("run 'agent-fabric-fleetdeck --help' for usage");
             std::process::exit(2);
         }
         if !arg.starts_with('-')
@@ -794,7 +844,7 @@ fn main() -> io::Result<()> {
             .contains(&arg.as_str())
         {
             eprintln!("unknown command: {arg}");
-            eprintln!("run 'herdr --help' for usage");
+            eprintln!("run 'agent-fabric-fleetdeck --help' for usage");
             std::process::exit(2);
         }
     }
@@ -823,6 +873,16 @@ fn main() -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_printed_skill_names_this_builds_command() {
+        let skill = super::skill_for_this_build();
+        assert!(skill.contains("agent-fabric-fleetdeck "));
+        assert!(
+            !skill.contains("herdr "),
+            "an agent-fabric-fleetdeck command survived in the skill"
+        );
+    }
+
     use super::*;
 
     #[test]

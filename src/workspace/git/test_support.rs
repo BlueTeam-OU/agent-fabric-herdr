@@ -20,7 +20,7 @@ fn init_repo_with_commit(repo: &Path) {
     std::fs::create_dir_all(repo).unwrap();
     run_git(repo, &["init", "--quiet"]);
     run_git(repo, &["config", "user.email", "herdr@example.invalid"]);
-    run_git(repo, &["config", "user.name", "Herdr Test"]);
+    run_git(repo, &["config", "user.name", "FleetDeck Test"]);
     run_git(
         repo,
         &["commit", "--quiet", "--allow-empty", "-m", "initial"],

@@ -106,8 +106,11 @@ pub(crate) fn render_config_diagnostic_buffer(
         .take(area.height as usize)
         .enumerate()
     {
-        let text = format!(" {line} ");
-        let width = (text.len() as u16).min(area.width);
+        let text = format!(
+            " {} ",
+            fit_keeping_action(line, usize::from(area.width).saturating_sub(2))
+        );
+        let width = (text.chars().count() as u16).min(area.width);
         let diagnostic_area = Rect::new(
             area.x + area.width.saturating_sub(width),
             area.y + row as u16,
@@ -124,9 +127,40 @@ pub(crate) fn render_config_diagnostic_buffer(
     rendered_rows
 }
 
+/// A diagnostic ends in the command that fixes it (`…; agent-fabric-fleetdeck
+/// config check`). Cut at the right edge, that command is the first thing
+/// lost, so an overlong line gives up the middle of its cause instead.
+fn fit_keeping_action(line: &str, max: usize) -> std::borrow::Cow<'_, str> {
+    if line.chars().count() <= max {
+        return line.into();
+    }
+    if let Some((cause, action)) = line.rsplit_once("; ") {
+        let kept = max.saturating_sub(action.chars().count() + "…; ".chars().count());
+        if kept > 0 {
+            let cause: String = cause.chars().take(kept).collect();
+            return format!("{cause}…; {action}").into();
+        }
+    }
+    line.chars().take(max).collect::<String>().into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_overlong_diagnostic_keeps_the_command_that_fixes_it() {
+        let line = "client + endpoint: config.toml invalid; using defaults; agent-fabric-fleetdeck config check";
+        let fitted = fit_keeping_action(line, 78);
+        assert_eq!(fitted.chars().count(), 78);
+        assert!(fitted.starts_with("client + endpoint: config.toml invalid"));
+        assert!(fitted.ends_with("…; agent-fabric-fleetdeck config check"));
+        assert_eq!(
+            fit_keeping_action("config.toml; short", 78),
+            "config.toml; short"
+        );
+        assert_eq!(fit_keeping_action("no action here at all", 8), "no actio");
+    }
 
     #[test]
     fn copy_feedback_rect_uses_configured_position() {

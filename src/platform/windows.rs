@@ -729,7 +729,7 @@ pub(crate) fn create_remote_ssh_config_dir(_control_socket_name: &str) -> std::i
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::AlreadyExists,
-        "failed to create private herdr ssh config directory",
+        "failed to create private agent-fabric-fleetdeck ssh config directory",
     ))
 }
 
@@ -4122,7 +4122,7 @@ mod tests {
     fn windows_process_cwd_reads_normalized_child_launch_directory() {
         use std::path::PathBuf;
 
-        let name = format!("Herdr-Cwd-Case-{}", std::process::id());
+        let name = format!("FleetDeck-Cwd-Case-{}", std::process::id());
         let cwd = std::env::temp_dir().join(&name);
         fs::create_dir_all(&cwd).expect("create cwd fixture");
         let cwd = super::normalize_cwd_for_launch_platform(&cwd);
@@ -5218,7 +5218,9 @@ mod tests {
 
     #[test]
     fn scrollback_editor_argv_uses_editor_env_and_appends_path() {
-        let path = std::path::Path::new(r"C:\Users\User\AppData\Local\Temp\herdr scrollback.txt");
+        let path = std::path::Path::new(
+            r"C:\Users\User\AppData\Local\Temp\agent-fabric-fleetdeck scrollback.txt",
+        );
         let argv = super::scrollback_editor_argv_with_env(
             path,
             Some(r#""C:\Program Files\Microsoft VS Code\Code.exe" --wait"#),

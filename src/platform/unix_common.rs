@@ -423,7 +423,7 @@ pub(crate) fn create_remote_ssh_config_dir(control_socket_name: &str) -> std::io
         return Err(err);
     }
     let message = if path_fits {
-        "failed to create private herdr ssh config directory"
+        "failed to create private agent-fabric-fleetdeck ssh config directory"
     } else {
         "SSH control socket path exceeds the Unix socket length limit"
     };
@@ -471,7 +471,11 @@ pub(crate) fn remote_bridge_endpoint_path(readable_name: &str, short_name: &str)
 }
 
 pub(crate) fn remote_reattach_program(program: &str) -> String {
-    shell_quote(if program.is_empty() { "herdr" } else { program })
+    shell_quote(if program.is_empty() {
+        crate::identity::BIN_NAME
+    } else {
+        program
+    })
 }
 
 pub(crate) fn remote_reattach_argument(value: &str) -> String {

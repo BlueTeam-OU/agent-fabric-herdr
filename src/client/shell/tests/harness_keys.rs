@@ -268,7 +268,7 @@ fn taken_by(key: &crate::input::TerminalKey) -> Option<String> {
 fn herdrs_own_keys_are_no_harness_or_desktop_key() {
     for label in HERDR_KEYS.iter().chain(&["ctrl+6"]) {
         let key = harness_key(label);
-        assert_eq!(taken_by(&key), None, "herdr's {label}");
+        assert_eq!(taken_by(&key), None, "agent-fabric-fleetdeck's {label}");
     }
     // The check is live: Codex's image paste is why paste is not ctrl+alt+v.
     assert_eq!(
@@ -329,11 +329,11 @@ fn assert_no_harness_key_is_taken(config: &Config) {
             let key = harness_key(label);
             assert!(
                 !shell.keybinds.matches_prefix(&key),
-                "{harness}'s {label} is herdr's prefix"
+                "{harness}'s {label} is agent-fabric-fleetdeck's prefix"
             );
             assert!(
                 resolve_direct_binding(&shell.keybinds.keybinds, &key).is_none(),
-                "{harness}'s {label} is a herdr binding outside the prefix"
+                "{harness}'s {label} is an agent-fabric-fleetdeck binding outside the prefix"
             );
         }
     }
@@ -443,7 +443,7 @@ async fn only_the_prefix_is_kept_and_a_doubled_prefix_reaches_the_pane() {
         assert_eq!(
             path.feed(prefix),
             None,
-            "the prefix is herdr's ({})",
+            "the prefix is agent-fabric-fleetdeck's ({})",
             host.name()
         );
         assert_eq!(
