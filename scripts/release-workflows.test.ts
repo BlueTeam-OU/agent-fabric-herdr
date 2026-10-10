@@ -22,7 +22,7 @@ describe("official publishing workflow boundaries", () => {
     expect(preview.jobs.build.strategy.matrix.include).toContainEqual({
       target: "x86_64-pc-windows-msvc",
       os: "windows-latest",
-      name: "herdr-windows-x86_64.zip",
+      name: "agent-fabric-fleetdeck-windows-x86_64.zip",
     });
     expect(preview.jobs.publish.needs).toContain("build");
   });
@@ -30,7 +30,7 @@ describe("official publishing workflow boundaries", () => {
   test("each publishing job rechecks both actors before using credentials", () => {
     for (const [workflow, names] of [
       [preview, ["preflight", "publish"]],
-      [release, ["validate-release-source", "release", "update-nix-package", "close-released-issues", "update-latest-json"]],
+      [release, ["validate-release-source", "release", "update-latest-json"]],
     ] as const) {
       for (const name of names) {
         const job = workflow.jobs[name];
@@ -42,6 +42,22 @@ describe("official publishing workflow boundaries", () => {
     expect(adminGate.run).toContain('"$GITHUB_ACTOR" "$GITHUB_TRIGGERING_ACTOR"');
     expect(adminGate.env.GH_TOKEN).toBe("${{ github.token }}");
     expect(adminGate.run).not.toContain("ogulcancelik");
+  });
+
+  test("publishing runs only in FleetDeck's repository", () => {
+    for (const [workflow, names] of [
+      [preview, ["preflight", "build", "publish"]],
+      [release, ["validate-release-source", "flake-check", "build", "validate-release-inputs", "release", "update-latest-json"]],
+    ] as const) {
+      for (const name of names) {
+        expect(workflow.jobs[name].if).toContain("github.repository == 'BlueTeam-OU/agent-fabric-fleetdeck'");
+        expect(workflow.jobs[name].if).not.toContain("herdrdev/herdr");
+      }
+    }
+    expect(Object.keys(release.jobs)).not.toContain("update-nix-package");
+    expect(Object.keys(release.jobs)).not.toContain("close-released-issues");
+    expect(JSON.stringify(preview)).not.toContain("KANGAL_GITHUB_TOKEN");
+    expect(JSON.stringify(release)).not.toContain("KANGAL_GITHUB_TOKEN");
   });
 
   test("release arguments are not interpolated into executable shell text", () => {

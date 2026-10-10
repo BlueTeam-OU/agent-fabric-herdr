@@ -16,13 +16,18 @@ RELEASE_FILES = {
     "docs/next/product-announcement.json",
     "skills/herdr/SKILL.md",
 }
+PACKAGE = "agent-fabric-fleetdeck"
+REPOSITORY = "BlueTeam-OU/agent-fabric-fleetdeck"
 ASSETS = {
-    "herdr-linux-x86_64",
-    "herdr-linux-aarch64",
-    "herdr-macos-x86_64",
-    "herdr-macos-aarch64",
-    "herdr-windows-x86_64.zip",
+    f"{PACKAGE}-linux-x86_64",
+    f"{PACKAGE}-linux-aarch64",
+    f"{PACKAGE}-macos-x86_64",
+    f"{PACKAGE}-macos-aarch64",
+    f"{PACKAGE}-windows-x86_64.zip",
 }
+# distribution/latest.json names this version until FleetDeck's first stable
+# release; the version inherited from Herdr (0.9.3) is no FleetDeck release.
+NO_STABLE_RELEASE = "0.0.0"
 
 
 def git(*args: str) -> str:
@@ -37,6 +42,20 @@ def version_tuple(version: str) -> tuple[int, ...]:
 
 def resolve(ref: str) -> str:
     return git("rev-parse", "--verify", f"{ref}^{{commit}}")
+
+
+def package_name(ref: str) -> str:
+    return tomllib.loads(git("show", f"{ref}:Cargo.toml"))["package"]["name"]
+
+
+def require_fleetdeck(ref: str) -> None:
+    """The repository carries Herdr's tags and history; only a source whose
+    package is FleetDeck's may be previewed, released or named as a release."""
+    name = package_name(ref)
+    if name != PACKAGE:
+        raise ValueError(
+            f"{ref} is {name} source, not {PACKAGE}; inherited Herdr tags and commits are never FleetDeck releases"
+        )
 
 
 def ancestor(base: str, commit: str) -> bool:
@@ -74,9 +93,9 @@ def normalized_cargo(text: str, path: str) -> tuple[dict, str]:
     if path == "Cargo.toml":
         version = data["package"].pop("version")
     else:
-        packages = [p for p in data["package"] if p["name"] == "herdr" and "source" not in p]
+        packages = [p for p in data["package"] if p["name"] == PACKAGE and "source" not in p]
         if len(packages) != 1:
-            raise ValueError("expected exactly one local herdr package in Cargo.lock")
+            raise ValueError(f"expected exactly one local {PACKAGE} package in Cargo.lock")
         version = packages[0].pop("version")
     return data, version
 
@@ -90,7 +109,7 @@ def validate_diff(preview: str, candidate: str, version: str | None = None) -> N
             before, _ = normalized_cargo(git("show", f"{preview}:{path}"), path)
             after, _ = normalized_cargo(git("show", f"{candidate}:{path}"), path)
             if before != after:
-                raise ValueError(f"{path}: only the herdr package version may change")
+                raise ValueError(f"{path}: only the {PACKAGE} package version may change")
         elif path not in RELEASE_FILES and not (
             path.startswith("docs/next/website/src/content/docs/")
             and path.endswith((".md", ".mdx"))
@@ -118,15 +137,27 @@ def tag_metadata(tag: str) -> tuple[str, str]:
         if len(values) != 1:
             raise ValueError(f"release tag requires exactly one {key}: trailer")
         fields.append(values[0])
-    if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", fields[1]):
+    if fields[1] != "none" and not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", fields[1]):
         raise ValueError("invalid Previous-Stable tag")
     return fields[0], fields[1]
 
 
 def validate_release(preview_tag: str, candidate: str, version: str, previous: str, repo: str) -> str:
     preview = published_preview(preview_tag, repo)
+    require_fleetdeck(preview)
+    require_fleetdeck(candidate)
     validate_diff(preview, candidate, version)
     current = json.loads(git("show", "origin/master:distribution/latest.json"))["version"]
+    if previous == "none":
+        if current == version:
+            # A retry of the first release after its distribution was published.
+            if resolve(f"refs/tags/v{version}") != resolve(candidate):
+                raise ValueError("published stable version points at different source")
+        elif current != NO_STABLE_RELEASE:
+            raise ValueError(f"Previous-Stable must name the currently published stable release v{current}")
+        return preview
+    if current == NO_STABLE_RELEASE:
+        raise ValueError("FleetDeck has no stable release yet: the first one names Previous-Stable: none")
     if version_tuple(version) <= version_tuple(previous.removeprefix("v")):
         raise ValueError("stable version must increase from Previous-Stable")
     if current == version:
@@ -135,7 +166,7 @@ def validate_release(preview_tag: str, candidate: str, version: str, previous: s
             raise ValueError("published stable version points at different source")
     elif previous != f"v{current}":
         raise ValueError("Previous-Stable must name the currently published stable release")
-    resolve(f"refs/tags/{previous}")
+    require_fleetdeck(f"refs/tags/{previous}")
     return preview
 
 
@@ -155,12 +186,16 @@ def select_hotfix(branch: str, base: str) -> str:
 
 def select_preview(ref: str) -> str:
     commit = resolve(ref)
+    require_fleetdeck(commit)
     workflow = git("show", f"{commit}:.github/workflows/preview.yml")
     if not re.search(r'(?m)^on:\n  push:\n    tags:\n      - "preview-\*"$', workflow):
         raise ValueError("preview source predates tag-triggered previews; select a commit with the new publishing workflow")
     if ancestor(commit, "refs/remotes/origin/master"):
         return commit
-    base = "v" + json.loads(git("show", "origin/master:distribution/latest.json"))["version"]
+    current = json.loads(git("show", "origin/master:distribution/latest.json"))["version"]
+    if current == NO_STABLE_RELEASE:
+        raise ValueError("preview source must be on master: FleetDeck has no stable release to hotfix")
+    base = "v" + current
     branches = git("for-each-ref", "--format=%(refname:strip=3)", "refs/remotes/origin/release/")
     for branch in branches.splitlines():
         if resolve(f"refs/remotes/origin/{branch}") == commit:
@@ -174,16 +209,16 @@ def main() -> None:
     prepare = commands.add_parser("check-source")
     prepare.add_argument("--preview", required=True)
     prepare.add_argument("--commit", default="HEAD")
-    prepare.add_argument("--repo", default="herdrdev/herdr")
+    prepare.add_argument("--repo", default=REPOSITORY)
     check = commands.add_parser("check")
     check.add_argument("--preview", required=True)
     check.add_argument("--version", required=True)
     check.add_argument("--previous", required=True)
     check.add_argument("--commit", default="HEAD")
-    check.add_argument("--repo", default="herdrdev/herdr")
+    check.add_argument("--repo", default=REPOSITORY)
     tag = commands.add_parser("check-tag")
     tag.add_argument("--tag", required=True)
-    tag.add_argument("--repo", default="herdrdev/herdr")
+    tag.add_argument("--repo", default=REPOSITORY)
     tag.add_argument("--github-output", type=Path)
     preview = commands.add_parser("preview-source")
     preview.add_argument("--commit", default="HEAD")

@@ -15,9 +15,11 @@ ASSET_TARGETS = (
     "macos-aarch64",
     "windows-x86_64",
 )
+PACKAGE = "agent-fabric-fleetdeck"
+REPOSITORY = "BlueTeam-OU/agent-fabric-fleetdeck"
 EXPECTED_ASSET_NAMES = {
-    **{target: f"herdr-{target}" for target in ASSET_TARGETS},
-    "windows-x86_64": "herdr-windows-x86_64.zip",
+    **{target: f"{PACKAGE}-{target}" for target in ASSET_TARGETS},
+    "windows-x86_64": f"{PACKAGE}-windows-x86_64.zip",
 }
 ENDPOINT_PROTOCOL_SOURCE_PATH = Path("src/protocol/endpoint.rs")
 
@@ -43,10 +45,19 @@ def read_endpoint_protocol_generation(
 
 
 def latest_stable_tag(ref: str | None = None) -> str:
-    args = ["describe", "--tags", "--match", "v[0-9]*", "--abbrev=0"]
-    if ref:
-        args.append(ref)
-    return run_git(args)
+    """The newest FleetDeck stable tag reachable from ref. The repository also
+    carries Herdr's v* tags; a tag counts only if its source is FleetDeck's."""
+    tags = run_git(
+        ["tag", "--list", "v[0-9]*", "--merged", ref or "HEAD", "--sort=-v:refname"]
+    ).splitlines()
+    for tag in tags:
+        try:
+            cargo = run_git(["show", f"{tag}:Cargo.toml"])
+        except subprocess.CalledProcessError:
+            continue
+        if re.search(rf'(?m)^name = "{re.escape(PACKAGE)}"$', cargo):
+            return tag
+    raise subprocess.CalledProcessError(1, ["git", "tag"], "no FleetDeck stable tag")
 
 
 def git_is_ancestor(ancestor: str, descendant: str) -> bool:
@@ -225,13 +236,13 @@ def main() -> int:
     notes.add_argument("--previous")
     notes.add_argument("--commit", required=True)
     notes.add_argument("--build-id", required=True)
-    notes.add_argument("--repo", default="herdrdev/herdr")
+    notes.add_argument("--repo", default=REPOSITORY)
     notes.add_argument("--output", required=True)
     notes.set_defaults(func=cmd_notes)
 
     manifest = sub.add_parser("manifest")
     manifest.add_argument("--output", default="distribution/preview.json")
-    manifest.add_argument("--repo", default="herdrdev/herdr")
+    manifest.add_argument("--repo", default=REPOSITORY)
     manifest.add_argument("--tag", required=True)
     manifest.add_argument("--build-id", required=True)
     manifest.add_argument("--commit", required=True)

@@ -11,7 +11,7 @@ from scripts import release
 
 class ReleaseTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="herdr-release-", dir="/var/tmp" if os.name != "nt" else None)
+        self.temp = tempfile.TemporaryDirectory(prefix="fleetdeck-release-", dir="/var/tmp" if os.name != "nt" else None)
         self.addCleanup(self.temp.cleanup)
         self.previous_cwd = Path.cwd()
         os.chdir(self.temp.name)
@@ -19,8 +19,8 @@ class ReleaseTests(unittest.TestCase):
         self.git("init", "-q", "-b", "master")
         self.git("config", "user.name", "Release Test")
         self.git("config", "user.email", "release@example.invalid")
-        self.put("Cargo.toml", '[package]\nname = "herdr"\nversion = "1.0.0"\n[dependencies]\nserde = "1"\n')
-        self.put("Cargo.lock", 'version = 4\n[[package]]\nname = "herdr"\nversion = "1.0.0"\n[[package]]\nname = "serde"\nversion = "1.0.0"\n')
+        self.put("Cargo.toml", '[package]\nname = "agent-fabric-fleetdeck"\nversion = "1.0.0"\n[dependencies]\nserde = "1"\n')
+        self.put("Cargo.lock", 'version = 4\n[[package]]\nname = "agent-fabric-fleetdeck"\nversion = "1.0.0"\n[[package]]\nname = "serde"\nversion = "1.0.0"\n')
         self.put("src/main.rs", "fn main() {}\n")
         self.put("docs/next/CHANGELOG.md", "# Changelog\n")
         self.put("skills/herdr/SKILL.md", "Stable skill\n")
@@ -73,7 +73,7 @@ class ReleaseTests(unittest.TestCase):
     def test_code_dependencies_schema_and_build_changes_are_rejected(self):
         cases = {
             "src/main.rs": "fn main() { panic!(); }\n",
-            "Cargo.toml": '[package]\nname = "herdr"\nversion = "1.0.1"\n[dependencies]\nserde = "2"\n',
+            "Cargo.toml": '[package]\nname = "agent-fabric-fleetdeck"\nversion = "1.0.1"\n[dependencies]\nserde = "2"\n',
             "Cargo.lock": Path("Cargo.lock").read_text().replace('name = "serde"\nversion = "1.0.0"', 'name = "serde"\nversion = "2.0.0"'),
             "docs/next/api/herdr-api.schema.json": "{}\n",
             ".github/workflows/release.yml": "changed\n",
@@ -203,6 +203,54 @@ class ReleaseTests(unittest.TestCase):
         self.assertNotIn("fix d", Path("src/main.rs").read_text())
         self.assertEqual(release.normalized_cargo(Path("Cargo.toml").read_text(), "Cargo.toml")[1], "1.0.1")
 
+
+    def test_inherited_herdr_source_is_never_previewed_or_released(self):
+        self.put("Cargo.toml", '[package]\nname = "herdr"\nversion = "1.0.2"\n')
+        herdr = self.commit("upstream herdr source")
+        self.git("update-ref", "refs/remotes/origin/master", herdr)
+        self.git("tag", "v1.0.2", herdr)
+        with self.assertRaisesRegex(ValueError, "never FleetDeck releases"):
+            release.select_preview(herdr)
+        with self.assertRaisesRegex(ValueError, "never FleetDeck releases"):
+            release.require_fleetdeck("refs/tags/v1.0.2")
+        with mock.patch.object(release, "published_preview", return_value=self.preview):
+            with self.assertRaisesRegex(ValueError, "never FleetDeck releases"):
+                release.validate_release("preview-test", "v1.0.2", "1.0.2", "v1.0.0", "test/repo")
+
+    def test_an_inherited_herdr_tag_cannot_be_previous_stable(self):
+        self.git("checkout", "-q", "-b", "herdr-line", "v1.0.0")
+        self.put("Cargo.toml", '[package]\nname = "herdr"\nversion = "1.0.0"\n')
+        self.git("tag", "-f", "v1.0.0", self.commit("herdr's own v1.0.0"))
+        self.git("checkout", "-q", "master")
+        candidate = self.prepare()
+        with mock.patch.object(release, "published_preview", return_value=self.preview):
+            with self.assertRaisesRegex(ValueError, "never FleetDeck releases"):
+                release.validate_release("preview-test", candidate, "1.0.1", "v1.0.0", "test/repo")
+
+    def test_the_first_fleetdeck_release_names_no_previous_stable(self):
+        self.put("distribution/latest.json", json.dumps({"version": release.NO_STABLE_RELEASE}))
+        master = self.commit("no FleetDeck release yet")
+        self.git("update-ref", "refs/remotes/origin/master", master)
+        self.git("checkout", "-q", "-b", "release/first", self.preview)
+        candidate = self.prepare()
+        self.git("tag", "-a", "v1.0.1", "-m", "v1.0.1\n\nPreview: preview-test\nPrevious-Stable: none", candidate)
+        self.assertEqual(release.tag_metadata("v1.0.1"), ("preview-test", "none"))
+        with mock.patch.object(release, "published_preview", return_value=self.preview):
+            self.assertEqual(release.validate_release("preview-test", candidate, "1.0.1", "none", "test/repo"), self.preview)
+            with self.assertRaisesRegex(ValueError, "Previous-Stable: none"):
+                release.validate_release("preview-test", candidate, "1.0.1", "v1.0.0", "test/repo")
+        with self.assertRaisesRegex(ValueError, "no stable release to hotfix"):
+            release.select_preview(candidate)
+        self.put("distribution/latest.json", json.dumps({"version": "1.0.1"}))
+        self.git("update-ref", "refs/remotes/origin/master", self.commit("first release published"))
+        with mock.patch.object(release, "published_preview", return_value=self.preview):
+            self.assertEqual(release.validate_release("preview-test", "v1.0.1", "1.0.1", "none", "test/repo"), self.preview)
+
+    def test_a_later_release_must_name_its_previous_stable(self):
+        candidate = self.prepare()
+        with mock.patch.object(release, "published_preview", return_value=self.preview):
+            with self.assertRaisesRegex(ValueError, "currently published stable release v1.0.0"):
+                release.validate_release("preview-test", candidate, "1.0.1", "none", "test/repo")
 
 if __name__ == "__main__":
     unittest.main()

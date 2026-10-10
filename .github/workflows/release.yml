@@ -12,9 +12,14 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   RUST_TOOLCHAIN_VERSION: 1.96.1
 
+# FleetDeck publishes from its own repository only. The repository also holds
+# Herdr's inherited v* tags; scripts/release.py check-tag refuses any tag whose
+# source is not the agent-fabric-fleetdeck package, so pushing or fetching one
+# publishes nothing. Herdr's Nix dispatch and issue-closing jobs were removed:
+# FleetDeck has no Nix repository or release bot to hand them to.
 jobs:
   validate-release-source:
-    if: github.repository == 'herdrdev/herdr' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: github.repository == 'BlueTeam-OU/agent-fabric-fleetdeck' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     outputs:
       preview_commit: ${{ steps.source.outputs.preview_commit }}
@@ -48,7 +53,7 @@ jobs:
 
   flake-check:
     needs: validate-release-source
-    if: github.repository == 'herdrdev/herdr'
+    if: github.repository == 'BlueTeam-OU/agent-fabric-fleetdeck'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -72,7 +77,7 @@ jobs:
 
   build:
     needs: validate-release-source
-    if: github.repository == 'herdrdev/herdr'
+    if: github.repository == 'BlueTeam-OU/agent-fabric-fleetdeck'
     permissions:
       contents: read
     strategy:
@@ -80,27 +85,27 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            name: herdr-linux-x86_64
+            name: agent-fabric-fleetdeck-linux-x86_64
             libghostty_vt_optimize: ReleaseFast
             libghostty_vt_simd: 'true'
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
-            name: herdr-linux-aarch64
+            name: agent-fabric-fleetdeck-linux-aarch64
             libghostty_vt_optimize: ReleaseFast
             libghostty_vt_simd: 'true'
           - target: x86_64-apple-darwin
             os: macos-latest
-            name: herdr-macos-x86_64
+            name: agent-fabric-fleetdeck-macos-x86_64
             libghostty_vt_optimize: ReleaseFast
             libghostty_vt_simd: 'true'
           - target: aarch64-apple-darwin
             os: macos-latest
-            name: herdr-macos-aarch64
+            name: agent-fabric-fleetdeck-macos-aarch64
             libghostty_vt_optimize: ReleaseFast
             libghostty_vt_simd: 'true'
           - target: x86_64-pc-windows-msvc
             os: windows-2022
-            name: herdr-windows-x86_64.zip
+            name: agent-fabric-fleetdeck-windows-x86_64.zip
             libghostty_vt_optimize: ReleaseFast
             libghostty_vt_simd: 'true'
 
@@ -174,7 +179,7 @@ jobs:
       - name: Package artifact
         if: runner.os != 'Windows'
         shell: bash
-        run: cp target/${{ matrix.target }}/release/herdr ${{ matrix.name }}
+        run: cp target/${{ matrix.target }}/release/agent-fabric-fleetdeck ${{ matrix.name }}
 
       - name: Package artifact
         if: runner.os == 'Windows'
@@ -182,13 +187,13 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $package = Join-Path $env:RUNNER_TEMP "Microsoft.Windows.Console.ConPTY.nupkg"
-          $stage = Join-Path $env:RUNNER_TEMP "herdr-windows-x86_64"
+          $stage = Join-Path $env:RUNNER_TEMP "agent-fabric-fleetdeck-windows-x86_64"
           .\scripts\package_windows_conpty.ps1 `
-            -HerdrExe target\${{ matrix.target }}\release\herdr.exe `
+            -HerdrExe target\${{ matrix.target }}\release\agent-fabric-fleetdeck.exe `
             -PackagePath $package `
             -StageDir $stage `
             -OutputPath ${{ matrix.name }}
-          $version = (& (Join-Path $stage "herdr.exe") --version | Out-String).Trim()
+          $version = (& (Join-Path $stage "agent-fabric-fleetdeck.exe") --version | Out-String).Trim()
           $tagVersion = $env:GITHUB_REF_NAME -replace '^v', ''
           if ($version -notmatch [regex]::Escape($tagVersion) -or $version -match "preview") {
             throw "Packaged Windows binary has unexpected version identity: $version"
@@ -202,7 +207,7 @@ jobs:
 
   validate-release-inputs:
     needs: validate-release-source
-    if: github.repository == 'herdrdev/herdr'
+    if: github.repository == 'BlueTeam-OU/agent-fabric-fleetdeck'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -231,7 +236,7 @@ jobs:
 
   release:
     needs: [build, flake-check, validate-release-inputs]
-    if: github.repository == 'herdrdev/herdr' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: github.repository == 'BlueTeam-OU/agent-fabric-fleetdeck' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -252,168 +257,16 @@ jobs:
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           files: |
-            herdr-linux-x86_64/herdr-linux-x86_64
-            herdr-linux-aarch64/herdr-linux-aarch64
-            herdr-macos-x86_64/herdr-macos-x86_64
-            herdr-macos-aarch64/herdr-macos-aarch64
-            herdr-windows-x86_64.zip/herdr-windows-x86_64.zip
+            agent-fabric-fleetdeck-linux-x86_64/agent-fabric-fleetdeck-linux-x86_64
+            agent-fabric-fleetdeck-linux-aarch64/agent-fabric-fleetdeck-linux-aarch64
+            agent-fabric-fleetdeck-macos-x86_64/agent-fabric-fleetdeck-macos-x86_64
+            agent-fabric-fleetdeck-macos-aarch64/agent-fabric-fleetdeck-macos-aarch64
+            agent-fabric-fleetdeck-windows-x86_64.zip/agent-fabric-fleetdeck-windows-x86_64.zip
           body_path: RELEASE_NOTES.md
-
-  update-nix-package:
-    needs: release
-    if: github.repository == 'herdrdev/herdr' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    continue-on-error: true
-    permissions: {}
-
-    steps:
-      - *require-release-admins
-      - name: Trigger stable Nix package update
-        env:
-          GH_TOKEN: ${{ secrets.HERDR_NIX_DISPATCH_TOKEN }}
-          GH_HOST: github.com
-        run: |
-          if ! gh workflow run update-check.yml --repo herdrdev/herdr-nix --ref main; then
-            echo "::warning::Nix update could not be triggered. The Herdr release is already published; run update-check manually in herdrdev/herdr-nix."
-            exit 1
-          fi
-
-  close-released-issues:
-    needs: [release, validate-release-source]
-    if: github.repository == 'herdrdev/herdr' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    permissions:
-      contents: read
-      issues: write
-
-    steps:
-      - *require-release-admins
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Close issues referenced by released commits
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.KANGAL_GITHUB_TOKEN }}
-          NEXT_RELEASE_LABEL: pending-release
-          LEGACY_NEXT_RELEASE_LABEL: included-in-next-release
-          PREVIEW_RELEASED_LABEL: preview-released
-          PREVIOUS_TAG: ${{ needs.validate-release-source.outputs.previous_tag }}
-        run: |
-          set -euo pipefail
-
-          echo "Using GitHub token for $(gh api user --jq .login)."
-
-          VERSION="${GITHUB_REF_NAME#v}"
-          CURRENT_COMMIT="$(git rev-list -n 1 "$GITHUB_REF_NAME")"
-          echo "Scanning released commits in $PREVIOUS_TAG..$GITHUB_REF_NAME for refs #<issue> mentions."
-          mapfile -t ISSUES < <(
-            git log --format='%s%n%b' "$PREVIOUS_TAG..$CURRENT_COMMIT" \
-              | perl -ne 'print "$1\n" if /\brefs\s+#([0-9]+)\b/i' \
-              | sort -nu
-          )
-
-          if [ "${#ISSUES[@]}" -eq 0 ]; then
-            echo "No released issue refs found."
-            exit 0
-          fi
-
-          RELEASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/tag/v${VERSION}"
-          RELEASE_COMMENT_MARKER="<!-- herdr:released:v${VERSION} -->"
-          RELEASE_COMMENT="${RELEASE_COMMENT_MARKER}"$'\n'"Released in [v${VERSION}](${RELEASE_URL})."
-
-          issue_has_comment_marker() {
-            local issue="$1"
-            local marker="$2"
-            local comments
-            if ! comments="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${issue}/comments?per_page=100" --jq '.[].body')"; then
-              echo "::warning::Could not read comments for issue #$issue."
-              return 2
-            fi
-            grep -F -- "$marker" >/dev/null <<<"$comments"
-          }
-
-          for issue in "${ISSUES[@]}"; do
-            echo "Checking #$issue"
-            if ! data="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${issue}")"; then
-              echo "::warning::Could not read issue #$issue; skipping."
-              continue
-            fi
-
-            if jq -e 'has("pull_request")' <<<"$data" >/dev/null; then
-              echo "Skipping #$issue because it is a pull request."
-              continue
-            fi
-
-            HAS_NEXT_RELEASE_LABEL="$(jq -r --arg label "$NEXT_RELEASE_LABEL" 'any(.labels[].name; . == $label)' <<<"$data")"
-            HAS_LEGACY_NEXT_RELEASE_LABEL="$(jq -r --arg label "$LEGACY_NEXT_RELEASE_LABEL" 'any(.labels[].name; . == $label)' <<<"$data")"
-            HAS_PREVIEW_RELEASED_LABEL="$(jq -r --arg label "$PREVIEW_RELEASED_LABEL" 'any(.labels[].name; . == $label)' <<<"$data")"
-            HAS_RELEASE_TRACKING_LABEL="false"
-            if [ "$HAS_NEXT_RELEASE_LABEL" = "true" ] || [ "$HAS_LEGACY_NEXT_RELEASE_LABEL" = "true" ] || [ "$HAS_PREVIEW_RELEASED_LABEL" = "true" ]; then
-              HAS_RELEASE_TRACKING_LABEL="true"
-            fi
-            MARKER_STATUS=0
-            issue_has_comment_marker "$issue" "$RELEASE_COMMENT_MARKER" || MARKER_STATUS="$?"
-            if [ "$MARKER_STATUS" -eq 2 ]; then
-              continue
-            fi
-            HAS_RELEASE_COMMENT="false"
-            if [ "$MARKER_STATUS" -eq 0 ]; then
-              HAS_RELEASE_COMMENT="true"
-            fi
-
-            if [ "$(jq -r '.state' <<<"$data")" = "open" ]; then
-              if [ "$HAS_RELEASE_COMMENT" = "true" ]; then
-                if ! gh issue close "$issue" --repo "$GITHUB_REPOSITORY" --reason completed; then
-                  echo "::warning::Could not close issue #$issue."
-                  continue
-                fi
-              elif ! gh issue close "$issue" --repo "$GITHUB_REPOSITORY" --reason completed --comment "$RELEASE_COMMENT"; then
-                echo "::warning::Could not close issue #$issue."
-                continue
-              fi
-            elif [ "$HAS_RELEASE_TRACKING_LABEL" = "true" ]; then
-              if [ "$HAS_RELEASE_COMMENT" != "true" ]; then
-                if ! gh issue comment "$issue" --repo "$GITHUB_REPOSITORY" --body "$RELEASE_COMMENT"; then
-                  echo "::warning::Could not comment on issue #$issue."
-                  continue
-                fi
-              else
-                echo "Skipping release comment for #$issue because it already exists."
-              fi
-            else
-              echo "Skipping release comment for #$issue because it is closed and has no release tracking label."
-            fi
-
-            if [ "$HAS_NEXT_RELEASE_LABEL" = "true" ]; then
-              if ! gh issue edit "$issue" --repo "$GITHUB_REPOSITORY" --remove-label "$NEXT_RELEASE_LABEL"; then
-                echo "::warning::Could not remove $NEXT_RELEASE_LABEL from issue #$issue."
-                continue
-              fi
-            fi
-
-            if [ "$HAS_LEGACY_NEXT_RELEASE_LABEL" = "true" ]; then
-              if ! gh issue edit "$issue" --repo "$GITHUB_REPOSITORY" --remove-label "$LEGACY_NEXT_RELEASE_LABEL"; then
-                echo "::warning::Could not remove $LEGACY_NEXT_RELEASE_LABEL from issue #$issue."
-                continue
-              fi
-            fi
-
-            if [ "$HAS_PREVIEW_RELEASED_LABEL" = "true" ]; then
-              if ! gh issue edit "$issue" --repo "$GITHUB_REPOSITORY" --remove-label "$PREVIEW_RELEASED_LABEL"; then
-                echo "::warning::Could not remove $PREVIEW_RELEASED_LABEL from issue #$issue."
-                continue
-              fi
-            fi
-          done
 
   update-latest-json:
     needs: [release, validate-release-source]
-    if: github.repository == 'herdrdev/herdr' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: github.repository == 'BlueTeam-OU/agent-fabric-fleetdeck' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     concurrency:
       group: docs-publish-master
