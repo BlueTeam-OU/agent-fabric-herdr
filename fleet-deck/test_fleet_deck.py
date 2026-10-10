@@ -16,7 +16,8 @@ from types import SimpleNamespace
 from unittest import mock
 
 import fleet_deck
-from fabric_deck import lock_holder, lock_path
+import fabric_deck
+from fabric_deck import hold_lock, lock_holder, lock_path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 
@@ -93,6 +94,8 @@ class FleetDeckTest(unittest.TestCase):
             "STUB_DIR": self.dir,
             "STUB_SOCK": os.path.join(self.sock_dir, "s"),
             "PYTHON": sys.executable,
+            # The deck's catalogue default must not reach the operator's checkout.
+            "AGENT_FABRIC_ROOT": os.path.join(self.dir, "no-fabric"),
         }
         patch = mock.patch.dict(os.environ, env)
         patch.start()
@@ -226,6 +229,72 @@ class FleetDeckTest(unittest.TestCase):
         with open(config, "w") as handle:
             handle.write('[keys]\nprefix = ["ctrl+6", "ctrl+^"]\n')
         self.assertTrue(fleet_deck.prefix_line(config)[1])
+
+    def test_a_probe_never_makes_a_starting_deck_refuse(self):
+        # fleet-deck polls while a deck starts, and status may run at any
+        # time: a deck taking the lock must never lose it to a probe. One
+        # process takes and drops the lock over and over while this one probes.
+        import threading
+
+        path = lock_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, "a").close()
+        taker = subprocess.Popen(
+            [sys.executable, "-B", "-c",
+             "import os, sys; sys.path.insert(0, sys.argv[1]); from fabric_deck import hold_lock\n"
+             "refused = 0\n"
+             "for _ in range(3000):\n"
+             "    fd = hold_lock(sys.argv[2])\n"
+             "    if fd is None: refused += 1\n"
+             "    else: os.close(fd)\n"
+             "print(refused)", HERE, path],
+            stdout=subprocess.PIPE, text=True)
+        done = threading.Event()
+
+        def probe():
+            while not done.is_set():
+                lock_holder(path)
+
+        prober = threading.Thread(target=probe)
+        prober.start()
+        try:
+            out, _ = taker.communicate(timeout=120)
+        finally:
+            done.set()
+            prober.join()
+        self.assertEqual(out.strip(), "0", "a probe made the deck's lock fail")
+
+    def test_the_holder_is_the_kernels_answer(self):
+        self.assertIsNone(lock_holder(lock_path()))
+        fd = hold_lock(lock_path())
+        self.assertIsNotNone(fd)
+        child = subprocess.run(
+            [sys.executable, "-B", "-c",
+             "import sys; sys.path.insert(0, sys.argv[1]); from fabric_deck import lock_holder; "
+             "print(lock_holder(sys.argv[2]))", HERE, lock_path()],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(child.stdout.strip(), str(os.getpid()))
+        os.close(fd)
+        self.assertIsNone(lock_holder(lock_path()))
+
+    def test_options_for_a_running_controller_are_said_to_wait_for_restart(self):
+        self.assertTrue(fleet_deck.ensure_controller(self.args(), self.say))
+        self.said.clear()
+        args = self.args()
+        args.exclude = ["someone"]
+        self.assertTrue(fleet_deck.ensure_controller(args, self.say))
+        self.assertTrue(any("fleet-deck restart" in line for line in self.said), self.said)
+
+    def test_a_missing_herdr_is_named(self):
+        os.environ["PATH"] = os.path.join(self.dir, "empty")
+        self.assertFalse(fleet_deck.ensure_server(self.say))
+        self.assertIn("herdr is not on PATH", self.said)
+
+    def test_a_controller_that_cannot_be_run_says_so_in_its_log(self):
+        with mock.patch.object(fleet_deck, "DECK", os.path.join(self.dir, "no-such-deck")), \
+             mock.patch.object(fleet_deck, "CONTROLLER_READY_S", 1):
+            self.assertFalse(fleet_deck.ensure_controller(self.args(), self.say))
+        self.assertTrue(any("cannot run" in line for line in self.said), self.said)
 
 
 if __name__ == "__main__":

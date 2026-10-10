@@ -39,8 +39,9 @@ fleet-deck start     # starts what is missing, without attaching
 
 - **The controller has no terminal.** It runs in a session of its own, its
   input is `/dev/null`, and it writes to `$XDG_STATE_HOME/fabric-deck/deck.log`
-  (one line per change, timestamped; the previous log is kept as
-  `deck.log.1` once it passes 1 MiB). Closing a terminal or a herdr tab never
+  (one line per change, timestamped). Each time a controller starts, a log
+  past 1 MiB is moved to `deck.log.1`; a controller that runs for weeks
+  keeps writing to the same file. Closing a terminal or a herdr tab never
   reaches it. Only `fleet-deck stop` or `restart` stops it.
 - **`stop` never stops herdr's server.** The server keeps every agent's pane
   running; `herdr server stop` would end them all. After a server restart the
@@ -63,9 +64,10 @@ terminal by hand, it still refuses to run beside another deck.
 
 Every pane runs a harness, so herdr keeps one key for itself: its prefix,
 **ctrl+6** (a legacy terminal sends it as ctrl+^, 0x1e, and that works too).
-Every herdr binding is the prefix and then a key (`prefix+f`, `prefix+a`,
-`prefix+p` below included), so only the prefix is ever taken from a pane.
-Pressing it twice sends it to the pane.
+Every default herdr binding is the prefix and then a key (`prefix+f`,
+`prefix+a`, `prefix+p` below included), so no binding takes a key from a
+pane but the prefix; the few keys herdr takes otherwise are listed below.
+Pressing the prefix twice sends it to the pane.
 
 ctrl+6 is bound by none of the harnesses checked on 2026-10-10. Upstream's
 ctrl+b is Claude Code's "background the task", Codex's and readline's
@@ -79,7 +81,8 @@ backward-char.
 
 `src/client/shell/tests/harness_keys.rs` pins it. The lists are there, so
 the prefix and every default binding are checked against them, as are the
-three keys below. Through herdr's real input path, the keys a harness uses
+`prefix+f/a/p` keys below. A binding to ctrl+^ is refused beside the ctrl+6
+prefix, since a legacy terminal sends both as one byte. Through herdr's real input path, the keys a harness uses
 (ctrl+c, ctrl+d, ctrl+z, ctrl+r, ctrl+b, esc, alt- and shift- combinations,
 function keys) reach the pane byte for byte, from a legacy and from a kitty
 terminal. A `keys.prefix` in herdr's config replaces ctrl+6; `fleet-deck`

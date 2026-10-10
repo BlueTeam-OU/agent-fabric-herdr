@@ -391,47 +391,49 @@ def lock_path() -> str:
 
 
 def hold_lock(path: str) -> int | None:
-    """The one-deck-per-login lock: an flock on `path`, held for the life of
-    the process, with its pid written in. None when another deck holds it.
-    An flock, not a pid file alone, so a deck that died leaves nothing to
-    clean: the kernel drops the lock with the process."""
+    """The one-deck-per-login lock: a POSIX record lock on `path`, held for
+    the life of the process. None when another deck holds it. A lock, not a
+    pid file, so a deck that died leaves nothing to clean: the kernel drops
+    it with the process. A record lock, not flock, because `lock_holder`
+    can ask the kernel who holds it without taking it: a probe that locked,
+    even shared, would make a deck starting in that instant refuse to run."""
     import fcntl
 
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+        fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
         os.close(fd)
         return None
+    # For a person reading the file; lock_holder asks the kernel instead.
     os.ftruncate(fd, 0)
     os.write(fd, f"{os.getpid()}\n".encode())
     return fd
 
 
+# struct flock on Linux: l_type, l_whence, l_start, l_len, l_pid.
+_FLOCK = "hhqqi"
+
+
 def lock_holder(path: str) -> int | None:
-    """The pid of the deck holding the lock, or None when no deck runs."""
+    """The pid of the deck holding the lock, as the kernel reports it
+    (F_GETLK), or None when no deck runs. Takes no lock."""
     import fcntl
+    import struct
 
     try:
         fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
     except FileNotFoundError:
         return None
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        except BlockingIOError:
-            text = os.read(fd, 32).decode(errors="replace").strip()
-            # A deck between taking the lock and writing its pid reads empty;
-            # it still runs, so 0 stands for "running, pid not yet written".
-            return int(text) if text.isdigit() else 0
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        return None
+        query = struct.pack(_FLOCK, fcntl.F_WRLCK, os.SEEK_SET, 0, 0, 0)
+        kind, _, _, _, pid = struct.unpack(_FLOCK, fcntl.fcntl(fd, fcntl.F_GETLK, query))
     finally:
+        # Closing any descriptor of the file drops the record locks this
+        # process holds on it, so the deck itself never calls this.
         os.close(fd)
-
-
-# ------------------------------------------------------------- the server
+    return None if kind == fcntl.F_UNLCK else pid
 
 
 def herdr_socket_path() -> str | None:
@@ -1359,7 +1361,7 @@ def main(argv: list[str] | None = None) -> int:
     lock = hold_lock(lock_path())
     if lock is None:
         holder = lock_holder(lock_path())
-        log(f"another deck already runs on this login (pid {holder or '?'}); this one stops")
+        log(f"another deck already runs on this login (pid {holder}); this one stops")
         return 1
 
     host = local_host()

@@ -19,8 +19,8 @@ process, so this command never does.
 from __future__ import annotations
 
 import os
+import shutil
 import signal
-import subprocess
 import sys
 import time
 from typing import Callable
@@ -128,6 +128,9 @@ def spawn_detached(argv: list[str], log: str | None) -> None:
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
         signal.signal(signal.SIGINT, signal.SIG_DFL)
         os.execvp(argv[0], argv)
+    except OSError as error:
+        # stderr is the log here (or /dev/null): the caller tails the log.
+        os.write(2, f"fleet-deck: cannot run {argv[0]}: {error}\n".encode())
     finally:
         os._exit(127)
 
@@ -148,11 +151,16 @@ def server_up() -> tuple[int, int] | None:
 def ensure_server(say: Callable[[str], None]) -> bool:
     if server_up():
         return True
+    if shutil.which("herdr") is None:
+        say("herdr is not on PATH")
+        return False
     say("starting herdr's server")
     spawn_detached(["herdr", "server"], None)
     if wait_for(server_up, SERVER_READY_S):
         return True
-    say(f"herdr's server did not answer within {SERVER_READY_S}s")
+    # herdr writes its own log; its stderr is /dev/null once detached.
+    say(f"herdr's server did not answer within {SERVER_READY_S}s; "
+        "`herdr server` in a terminal shows why")
     return False
 
 
@@ -186,9 +194,16 @@ def deck_argv(args) -> list[str]:
     return argv
 
 
+def deck_options_given(args) -> bool:
+    return bool(args.catalog or args.exclude or args.cwd or args.no_fleet_tab)
+
+
 def ensure_controller(args, say: Callable[[str], None]) -> bool:
     holder = lock_holder(lock_path())
     if holder is not None:
+        if deck_options_given(args):
+            say(f"the deck controller already runs (pid {holder}); its options are unchanged "
+                "(fleet-deck restart <options> applies them)")
         return True
     os.makedirs(state_dir(), mode=0o700, exist_ok=True)
     log = log_path()
@@ -208,13 +223,10 @@ def stop_controller(say: Callable[[str], None]) -> bool:
     if holder is None:
         say("the deck controller is not running")
         return True
-    if holder == 0:
-        holder = wait_for(lambda: lock_holder(lock_path()), 2) or 0
-    if holder > 0:
-        try:
-            os.kill(holder, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+    try:
+        os.kill(holder, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
     if wait_for(lambda: lock_holder(lock_path()) is None, CONTROLLER_STOP_S):
         say(f"the deck controller (pid {holder}) stopped")
         return True
