@@ -127,7 +127,7 @@ const DEFAULT_CONFIG: &str = r##"# Agent Fabric FleetDeck configuration
 # kitty_graphics = true
 
 [update]
-# Update channel used by background version checks and `herdr update`.
+# Update channel used by background version checks and `agent-fabric-fleetdeck update`.
 # Stable builds default to "stable". Windows preview builds default to "preview"
 # so existing preview installs stay there until explicitly switched.
 # channel = "stable"
@@ -168,7 +168,7 @@ const DEFAULT_CONFIG: &str = r##"# Agent Fabric FleetDeck configuration
 # previous_agent = ""     # optional, unset by default
 # next_agent = ""         # optional, unset by default
 # focus_agent = ""        # optional indexed binding, e.g. "prefix+alt+1..9"
-# remote_image_paste = "ctrl+v" # only active in herdr --remote; empty disables raw-key image paste
+# remote_image_paste = "ctrl+v" # only active in agent-fabric-fleetdeck --remote; empty disables raw-key image paste
 # new_tab = "prefix+c"
 # rename_tab = "prefix+shift+t"
 # previous_tab = "prefix+p"
@@ -418,18 +418,18 @@ const DEFAULT_CONFIG: &str = r##"# Agent Fabric FleetDeck configuration
 # startup_per_agent_delay_ms = 100
 
 [remote]
-# Whether herdr manages the ssh config used for `herdr --remote`.
-# When true (default), herdr runs remote ssh through a generated config that
+# Whether FleetDeck manages the ssh config used for `agent-fabric-fleetdeck --remote`.
+# When true (default), FleetDeck runs remote ssh through a generated config that
 # includes your ~/.ssh/config first and adds ServerAliveInterval/
 # ServerAliveCountMax as fallbacks (so any keepalive values you set yourself
 # still win) to survive idle network/NAT timeouts. Herdr also uses a private
 # per-attach OpenSSH control socket to reuse the first authenticated connection.
 # Set false to run plain ssh against your ssh config unchanged — this does not
-# force keepalive or multiplexing off, it only stops herdr from adding its own.
+# force keepalive or multiplexing off, it only stops FleetDeck from adding its own.
 # manage_ssh_config = true
 
 [experimental]
-# Allow launching herdr from inside a herdr-managed pane.
+# Allow launching FleetDeck from inside a FleetDeck-managed pane.
 # allow_nested = false
 # Save recent pane screen history across full server restarts.
 pane_history = false
@@ -870,6 +870,18 @@ fn main() -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_default_config_teaches_this_builds_command_and_paths() {
+        // `[ui.toast.herdr]` and `herdr = …` are config keys kept for
+        // compatibility (docs/fleetdeck/IDENTITY.md); no other herdr remains.
+        let teaching = super::DEFAULT_CONFIG
+            .lines()
+            .filter(|line| !line.contains("toast.herdr") && !line.contains("herdr = "))
+            .filter(|line| line.contains("herdr"))
+            .collect::<Vec<_>>();
+        assert!(teaching.is_empty(), "{teaching:#?}");
+    }
+
     #[test]
     fn the_printed_skill_names_this_builds_command() {
         let skill = super::skill_for_this_build();

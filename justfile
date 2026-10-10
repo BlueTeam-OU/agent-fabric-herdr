@@ -251,7 +251,7 @@ release-publish $version $preview:
     just release-docs-check
     python3 scripts/changelog.py extract --version "$version" --output /tmp/herdr-release-notes-check.md
     rm -f /tmp/herdr-release-notes-check.md
-    @previous="$(python3 scripts/release.py previous-stable)"; \
+    @previous="$(python3 scripts/release.py previous-stable)" && \
     python3 scripts/release.py check --preview "$preview" --version "$version" --previous "$previous" && \
     git tag -a "v$version" -m "v$version" -m "Preview: $preview" -m "Previous-Stable: $previous"
     git push origin "v$version"
